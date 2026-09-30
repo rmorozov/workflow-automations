@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local workplace data and generated tool outputs
+work/
+.venv-*/

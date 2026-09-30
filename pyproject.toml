@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "workflow-automations"
+version = "0.1.0"
+description = "Local helpers for engineering management routines"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = []
+
+[project.optional-dependencies]
+translation = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4"]
+dev = ["pytest>=8,<10", "ruff==0.16.9", "build>=1.2,<2"]
+
+[project.scripts]
+xlsx-translate = "workflow_automations.xlsx_translation:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
