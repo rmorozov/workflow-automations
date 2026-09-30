@@ -1,0 +1,522 @@
+"""End-to-end contracts using real XLSX files and returned ID mappings."""
+
+import csv
+import json
+from datetime import datetime
+
+import pandas as pd
+import pytest
+from openpyxl import Workbook, load_workbook
+
+from workflow_automations import xlsx_translation as tool
+
+
+@pytest.fixture
+def source(tmp_path):
+    path = tmp_path / "source.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Status", "Description", "Count", "Date", "Flag", "Formula"])
+    ws.append(["Открыто", "Открыто", 1, datetime(2026, 9, 30), True, "=C2+1"])
+    ws.append(["Закрыто", 'line, one\nline "two"', 2, None, False, None])
+    ws.append(["Открыто", "NA", 3, None, None, None])
+    ws.append([" ", "0012", None, None, None, None])
+    ws.append([None, "=literal", None, None, None, None])
+    ws["B6"].data_type = "s"
+    wb.create_sheet("Other")["A1"] = "unchanged"
+    wb.save(path)
+    wb.close()
+    return path
+
+
+def extraction(source, tmp_path, *options):
+    bundle = tmp_path / "bundle"
+    status = tool.main(
+        [
+            "extract",
+            "--input",
+            str(source),
+            "--sheet",
+            "Data",
+            "--source-language",
+            "ru",
+            "--target-language",
+            "en",
+            "--output-dir",
+            str(bundle),
+            *options,
+        ]
+    )
+    assert status == 0
+    return bundle, json.loads((bundle / "manifest.json").read_text())
+
+
+def reply(tmp_path, manifest, name="reply.csv", values=None):
+    path = tmp_path / name
+    records = (
+        values
+        if values is not None
+        else [(e["text_id"], "EN:" + e["source_text"]) for e in manifest["entries"]]
+    )
+    if path.suffix == ".csv":
+        with path.open("w", encoding="utf-8-sig", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow(["text_id", "translated_text_en"])
+            writer.writerows(records)
+    else:
+        tool.write_tables(
+            path, {"returned": pd.DataFrame(records, columns=["text_id", "translated_text_en"])}
+        )
+    return path
+
+
+def application(source, bundle, paths, tmp_path, *options):
+    output = tmp_path / "translated.xlsx"
+    status = tool.main(
+        [
+            "apply",
+            "--input",
+            str(source),
+            "--manifest",
+            str(bundle / "manifest.json"),
+            "--mappings",
+            *(str(p) for p in paths),
+            "--output",
+            str(output),
+            *options,
+        ]
+    )
+    return status, output
+
+
+def test_per_column_dictionaries_and_two_column_templates(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path)
+    opened = [e for e in manifest["entries"] if e["source_text"] == "Открыто"]
+    assert len(opened) == 2
+    assert opened[0]["occurrences"] == 2
+    assert opened[0]["text_id"] != opened[1]["text_id"]
+    assert all(e["text_id"].startswith(manifest["bundle_id"] + "_") for e in manifest["entries"])
+    assert not any(e["source_text"] in ["=C2+1", " "] for e in manifest["entries"])
+    template = pd.read_csv(bundle / "translations/c0001.csv", keep_default_na=False)
+    assert list(template.columns) == ["text_id", "translated_text_en"]
+    assert template["translated_text_en"].tolist() == ["", ""]
+
+
+@pytest.mark.parametrize("suffix", ["csv", "xlsx"])
+def test_round_trip_preserves_types_order_formulas_and_other_sheets(source, tmp_path, suffix):
+    before = source.read_bytes()
+    bundle, manifest = extraction(source, tmp_path)
+    returned = reply(
+        tmp_path,
+        manifest,
+        f"reply.{suffix}",
+        [
+            (
+                e["text_id"],
+                "=literal translated"
+                if e["source_text"] == "=literal"
+                else "EN:" + e["source_text"],
+            )
+            for e in reversed(manifest["entries"])
+        ],
+    )
+    status, output = application(source, bundle, [returned], tmp_path)
+    assert status == 0
+    wb = load_workbook(output)
+    original, translated = wb["Data"], wb["Data_en"]
+    assert translated["A2"].value == translated["A4"].value == "EN:Открыто"
+    assert translated["B3"].value == 'EN:line, one\nline "two"'
+    assert translated["B4"].value == "EN:NA"
+    assert translated["B5"].value == "EN:0012"
+    assert translated["B6"].value == "=literal translated"
+    assert translated["B6"].data_type == "s"
+    for coordinate in ["A1", "A5", "A6", "C2", "D2", "E2", "F2"]:
+        assert translated[coordinate].value == original[coordinate].value
+        assert translated[coordinate].data_type == original[coordinate].data_type
+    assert wb["Other"]["A1"].value == "unchanged"
+    wb.close()
+    assert source.read_bytes() == before
+
+
+def test_column_specific_translation(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path)
+    records = [(e["text_id"], e["scope"] + ":" + e["source_text"]) for e in manifest["entries"]]
+    status, output = application(
+        source, bundle, [reply(tmp_path, manifest, values=records)], tmp_path
+    )
+    assert status == 0
+    wb = load_workbook(output)
+    assert wb["Data_en"]["A2"].value != wb["Data_en"]["B2"].value
+    wb.close()
+
+
+def test_global_deduplication(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path, "--dedupe-scope", "global")
+    assert len([e for e in manifest["entries"] if e["source_text"] == "Открыто"]) == 1
+    assert (bundle / "sources/global.csv").exists()
+    status, output = application(source, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 0
+    wb = load_workbook(output)
+    assert wb["Data_en"]["A2"].value == wb["Data_en"]["B2"].value
+    wb.close()
+
+
+def test_missing_strict_and_partial(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path)
+    records = [(e["text_id"], "Open") for e in manifest["entries"] if e["scope"] == "c0001"]
+    returned = reply(tmp_path, manifest, values=records)
+    status, output = application(source, bundle, [returned], tmp_path)
+    assert status == 2 and not output.exists()
+    assert json.loads(output.with_suffix(".report.json").read_text())["status"] == "failed"
+    status, output = application(
+        source, bundle, [returned], tmp_path, "--missing", "keep", "--overwrite"
+    )
+    assert status == 4 and output.exists()
+    wb = load_workbook(output)
+    assert wb["Data_en"]["B2"].value == "Открыто"
+    assert wb["Data_en"]["A2"].value == "Open"
+    wb.close()
+
+
+@pytest.mark.parametrize("order", [False, True])
+def test_mixed_replies_identical_duplicates_and_pending_templates(source, tmp_path, order):
+    bundle, manifest = extraction(source, tmp_path)
+    paths = [
+        reply(tmp_path, manifest),
+        reply(tmp_path, manifest, "reply.xlsx"),
+        bundle / "translations.en.xlsx",
+    ]
+    if order:
+        paths.reverse()
+    status, output = application(source, bundle, paths, tmp_path)
+    assert status == 0
+    assert json.loads(output.with_suffix(".report.json").read_text())["duplicate_replies"] == len(
+        manifest["entries"]
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["unknown", "conflict", "wrong_language", "wrong_bundle", "numeric_xlsx", "formula_xlsx"],
+)
+def test_invalid_replies_never_publish_workbook(source, tmp_path, case):
+    bundle, manifest = extraction(source, tmp_path)
+    returned = reply(tmp_path, manifest)
+    paths = [returned]
+    if case == "unknown":
+        paths.append(reply(tmp_path, manifest, "extra.csv", [("unknown", "translated")]))
+    elif case == "conflict":
+        paths.append(
+            reply(
+                tmp_path, manifest, "extra.csv", [(manifest["entries"][0]["text_id"], "conflict")]
+            )
+        )
+    elif case == "wrong_language":
+        returned.write_text(
+            returned.read_text(encoding="utf-8-sig").replace(
+                "translated_text_en", "translated_text_de"
+            )
+        )
+    elif case == "wrong_bundle":
+        changed = json.loads(json.dumps(manifest))
+        changed["entries"][0]["text_id"] = "another_bundle_id"
+        paths = [reply(tmp_path, changed)]
+    else:
+        returned = reply(tmp_path, manifest, "reply.xlsx")
+        wb = load_workbook(returned)
+        wb.active["B2"] = 12 if case == "numeric_xlsx" else "=1+1"
+        wb.save(returned)
+        wb.close()
+        paths = [returned]
+    status, output = application(source, bundle, paths, tmp_path, "--missing", "keep")
+    assert status == 2 and not output.exists()
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "text_id,translated_text_en\nx,y,z\n",
+        "text_id,translated_text_en\nx\n",
+        "text_id,translated_text_en\n\n",
+        "text_id,text_id\nx,y\n",
+        'text_id,translated_text_en\nx,"unterminated',
+    ],
+)
+def test_malformed_csv_rejected(source, tmp_path, malformed):
+    bundle, _manifest = extraction(source, tmp_path)
+    returned = tmp_path / "bad.csv"
+    returned.write_text(malformed)
+    status, output = application(source, bundle, [returned], tmp_path)
+    assert status == 2 and not output.exists()
+
+
+@pytest.mark.parametrize("change", ["value", "heading", "row_order", "dimension"])
+def test_source_changes_rejected(source, tmp_path, change):
+    bundle, manifest = extraction(source, tmp_path)
+    wb = load_workbook(source)
+    ws = wb["Data"]
+    if change == "value":
+        ws["A2"] = "different"
+    elif change == "heading":
+        ws["A1"] = "new heading"
+    elif change == "row_order":
+        ws["A2"], ws["A3"] = ws["A3"].value, ws["A2"].value
+    else:
+        ws["A7"] = "new row"
+    wb.save(source)
+    wb.close()
+    status, output = application(source, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 2 and not output.exists()
+
+
+def test_formatting_and_other_sheet_changes_allowed(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path)
+    wb = load_workbook(source)
+    wb["Data"]["A2"].number_format = "@"
+    wb["Data"]["Z100"].number_format = "@"
+    wb["Other"]["A1"] = "changed outside table"
+    wb.save(source)
+    wb.close()
+    assert application(source, bundle, [reply(tmp_path, manifest)], tmp_path)[0] == 0
+
+
+def test_batch_limits_and_unique_coverage(source, tmp_path):
+    bundle, manifest = extraction(
+        source, tmp_path, "--batch-max-rows", "2", "--batch-max-bytes", "180"
+    )
+    all_ids = []
+    for batch in manifest["batches"]:
+        payload = (bundle / batch["path"]).read_bytes()
+        assert len(payload) == batch["bytes"] <= 180
+        frame = pd.read_csv(bundle / batch["path"], na_filter=False)
+        assert len(frame) <= 2
+        all_ids.extend(frame["text_id"])
+    assert len(all_ids) == len(set(all_ids)) == len(manifest["entries"])
+
+
+def test_oversized_record_leaves_no_bundle(source, tmp_path):
+    status = tool.main(
+        [
+            "extract",
+            "--input",
+            str(source),
+            "--sheet",
+            "Data",
+            "--source-language",
+            "ru",
+            "--target-language",
+            "en",
+            "--output-dir",
+            str(tmp_path / "bundle"),
+            "--batch-max-bytes",
+            "10",
+        ]
+    )
+    assert status == 2 and not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize("issue", ["duplicates", "missing", "merged", "bad_column"])
+def test_invalid_source_layout(source, tmp_path, issue):
+    wb = load_workbook(source)
+    if issue == "duplicates":
+        wb["Data"]["B1"] = "Status"
+    elif issue == "missing":
+        wb["Data"]["B1"] = None
+    elif issue == "merged":
+        wb["Data"].merge_cells("A2:B2")
+    wb.save(source)
+    wb.close()
+    options = ["--column-indices", "100"] if issue == "bad_column" else []
+    status = tool.main(
+        [
+            "extract",
+            "--input",
+            str(source),
+            "--sheet",
+            "Data",
+            "--source-language",
+            "ru",
+            "--target-language",
+            "en",
+            "--output-dir",
+            str(tmp_path / "bundle"),
+            *options,
+        ]
+    )
+    assert status == 2 and not (tmp_path / "bundle").exists()
+
+
+def test_header_translation_and_collision(source, tmp_path):
+    bundle, manifest = extraction(
+        source, tmp_path, "--translate-headings", "--columns", "Status", "Description"
+    )
+    assert len([e for e in manifest["entries"] if e["kind"] == "header"]) == 2
+    returned = reply(tmp_path, manifest)
+    status, output = application(source, bundle, [returned], tmp_path)
+    assert status == 0
+    wb = load_workbook(output)
+    assert wb["Data_en"]["A1"].value == "EN:Status"
+    assert wb["Data_en"]["C1"].value == "Count"
+    wb.close()
+    returned = reply(
+        tmp_path,
+        manifest,
+        "collision.csv",
+        [
+            (e["text_id"], "same" if e["kind"] == "header" else "translated")
+            for e in manifest["entries"]
+        ],
+    )
+    assert application(source, bundle, [returned], tmp_path, "--overwrite")[0] == 2
+    # A failed overwrite must retain the previous successful workbook.
+    wb = load_workbook(output)
+    assert wb["Data_en"]["A1"].value == "EN:Status"
+    wb.close()
+
+
+def test_exact_case_and_whitespace_and_keep_value(source, tmp_path):
+    wb = load_workbook(source)
+    for row, value in enumerate(["open", "Open", " Open ", "open"], 2):
+        wb["Data"].cell(row, 1, value)
+    wb.save(source)
+    wb.close()
+    bundle, manifest = extraction(source, tmp_path, "--columns", "Status")
+    assert [e["source_text"] for e in manifest["entries"]] == ["open", "Open", " Open "]
+    status, output = application(
+        source,
+        bundle,
+        [
+            reply(
+                tmp_path,
+                manifest,
+                values=[(e["text_id"], e["source_text"]) for e in manifest["entries"]],
+            )
+        ],
+        tmp_path,
+    )
+    assert status == 0
+    wb = load_workbook(output)
+    assert wb["Data_en"]["A4"].value == " Open "
+    wb.close()
+
+
+def test_custom_delimiter(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path, "--delimiter", ";")
+    returned = tmp_path / "returned.csv"
+    pd.DataFrame(
+        [(e["text_id"], "English") for e in manifest["entries"]],
+        columns=["text_id", "translated_text_en"],
+    ).to_csv(returned, index=False, sep=";")
+    assert application(source, bundle, [returned], tmp_path)[0] == 0
+
+
+def test_empty_dictionary(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path, "--columns", "Count")
+    assert manifest["entries"] == manifest["references"] == []
+    assert application(source, bundle, [bundle / "translations.en.xlsx"], tmp_path)[0] == 0
+
+
+@pytest.mark.parametrize("name", ["Data", "data", "bad/name", "x" * 32, "'invalid"])
+def test_invalid_output_sheet(source, tmp_path, name):
+    bundle, manifest = extraction(source, tmp_path)
+    status, output = application(
+        source, bundle, [reply(tmp_path, manifest)], tmp_path, "--output-sheet", name
+    )
+    assert status == 2 and not output.exists()
+
+
+def test_overwrite_and_input_protection(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path)
+    returned = reply(tmp_path, manifest)
+    assert application(source, bundle, [returned], tmp_path)[0] == 0
+    assert application(source, bundle, [returned], tmp_path)[0] == 2
+    assert application(source, bundle, [returned], tmp_path, "--overwrite")[0] == 0
+    original = source.read_bytes()
+    assert (
+        tool.main(
+            [
+                "apply",
+                "--input",
+                str(source),
+                "--manifest",
+                str(bundle / "manifest.json"),
+                "--mappings",
+                str(returned),
+                "--output",
+                str(source),
+                "--overwrite",
+            ]
+        )
+        == 2
+    )
+    assert source.read_bytes() == original
+
+
+def test_excel_string_limits_and_literal_mapping_files(tmp_path):
+    with pytest.raises(tool.ValidationError):
+        tool.check_text("😀" * 16384)
+    with pytest.raises(tool.ValidationError):
+        tool.check_text("invalid\x00")
+    path = tmp_path / "safe.xlsx"
+    tool.write_tables(
+        path, {"mapping": pd.DataFrame([("id", "=1+1")], columns=["text_id", "translated_text_en"])}
+    )
+    wb = load_workbook(path)
+    assert wb.active["B2"].value == "=1+1" and wb.active["B2"].data_type == "s"
+    wb.close()
+
+
+def test_io_failure_keeps_existing_output(tmp_path, monkeypatch):
+    output = tmp_path / "existing.xlsx"
+    output.write_bytes(b"original")
+    wb = Workbook()
+
+    def fail(_path):
+        raise OSError("simulated IO error")
+
+    monkeypatch.setattr(wb, "save", fail)
+    with pytest.raises(OSError):
+        tool.atomic_workbook(wb, output)
+    assert output.read_bytes() == b"original"
+    assert not list(tmp_path.glob(".translated-*"))
+
+
+@pytest.mark.parametrize(
+    "mutation", ["schema", "reference", "dictionary", "count", "malformed", "coordinate_type"]
+)
+def test_manifest_validation(source, tmp_path, mutation):
+    bundle, manifest = extraction(source, tmp_path)
+    returned = reply(tmp_path, manifest)
+    if mutation == "schema":
+        manifest["schema_version"] = 100
+    elif mutation == "reference":
+        manifest["references"][0]["row"] = 999
+    elif mutation == "dictionary":
+        manifest["entries"][0]["source_text"] = "wrong source"
+    elif mutation == "count":
+        manifest["entries"][0]["occurrences"] += 1
+    elif mutation == "coordinate_type":
+        manifest["references"][0]["row"] = 2.5
+    else:
+        manifest = {}
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+    status, output = application(source, bundle, [returned], tmp_path)
+    assert status == 2 and not output.exists()
+
+
+def test_header_only_table(tmp_path):
+    source = tmp_path / "source.xlsx"
+    wb = Workbook()
+    wb.active.title = "Data"
+    wb.active.append(["Status", "Description"])
+    wb.save(source)
+    wb.close()
+    bundle, manifest = extraction(source, tmp_path)
+    assert manifest["entries"] == []
+    status, output = application(source, bundle, [bundle / "translations.en.xlsx"], tmp_path)
+    assert status == 0
+    wb = load_workbook(output)
+    assert wb["Data_en"].max_row == 1
+    assert wb["Data_en"]["A1"].value == "Status"
+    wb.close()
