@@ -11,6 +11,7 @@ import logging
 import os
 import sys
 import tempfile
+import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -223,7 +224,7 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
         from azure.devops.connection import Connection
         from msrest.authentication import Authentication
         from msrest.exceptions import ClientException
-        from requests_kerberos import HTTPKerberosAuth
+        from requests_kerberos import OPTIONAL, HTTPKerberosAuth
     except ImportError as exc:
         raise TriageError(
             "ADO access needs the 'ado-triage' and 'ado-kerberos' extras: "
@@ -233,7 +234,9 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
     class KerberosAuthentication(Authentication):
         def signed_session(self, session=None):
             session = super().signed_session(session)
-            session.auth = HTTPKerberosAuth()
+            # IIS-hosted ADO servers often omit the mutual-auth token on success, which
+            # fails the default REQUIRED mode. OPTIONAL still verifies a token when sent.
+            session.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
             return session
 
     # ClientException covers every azure-devops/msrest failure: wrapped service errors,
@@ -625,12 +628,15 @@ RESOLVED_COLUMNS = [FIELD_ID, FIELD_TITLE, "Previous_Flags", "Resolution"]
 
 def read_previous_master(path: Path) -> pd.DataFrame:
     """Master Data of an earlier report (this tool's layout or the legacy layout)."""
-    sheets = pd.ExcelFile(path).sheet_names
-    master = next((s for s in sheets if s.endswith("Master Data")), None)
+    try:
+        workbook = pd.ExcelFile(path)
+    except (ValueError, zipfile.BadZipFile) as exc:  # CSV or other non-XLSX input
+        raise TriageError(f"{path}: not a readable XLSX report ({exc})") from exc
+    master = next((s for s in workbook.sheet_names if s.endswith("Master Data")), None)
     if master is None:
         raise TriageError(f"{path}: no '* Master Data' sheet; is this a previous report?")
     for header in (2, 0):  # current layout has a purpose line above the header
-        prev = pd.read_excel(path, sheet_name=master, header=header)
+        prev = workbook.parse(master, header=header)
         if FIELD_ID in prev.columns:
             prev[FIELD_ID] = pd.to_numeric(prev[FIELD_ID], errors="coerce")
             return prev.dropna(subset=[FIELD_ID]).astype({FIELD_ID: int})
@@ -821,10 +827,26 @@ def view_blockers(df, rel, capacity, cfg) -> pd.DataFrame:
     )
 
 
+# Reverse labels whose forward counterpart describes the same dependency.
+INVERSE_LABELS = {"Predecessor": "Successor", "Blocked By": "Blocks"}
+
+
 def view_cross_team(df, rel, capacity, cfg) -> pd.DataFrame:
     cross = rel[
         (rel[REL_COL_TYPE] != "Child") & (rel[REL_COL_SOURCE_AREA] != rel[REL_COL_DEST_AREA])
     ]
+    # When both ends are in the query, ADO stores each dependency on both items.
+    # Keep the forward row; keep a reverse row only when its counterpart is absent.
+    forward = set(
+        zip(cross[REL_COL_SOURCE_ID], cross[REL_COL_DEST_ID], cross[REL_COL_TYPE], strict=True)
+    )
+    mirrored = [
+        (dst, src, INVERSE_LABELS[label]) in forward if label in INVERSE_LABELS else False
+        for src, dst, label in zip(
+            cross[REL_COL_SOURCE_ID], cross[REL_COL_DEST_ID], cross[REL_COL_TYPE], strict=True
+        )
+    ]
+    cross = cross[~np.array(mirrored, dtype=bool)]
     return cross.sort_values([REL_COL_SOURCE_AREA, REL_COL_DEST_AREA])
 
 
@@ -905,6 +927,7 @@ SHEETS: tuple[SheetSpec, ...] = (
         "Every fetched work item with all enrichment columns; source for the other sheets.",
         view_master,
         always=True,
+        exec_profile=True,  # the next run's --previous-file needs it for deltas
     ),
     SheetSpec(
         "4. Capacity Triage",

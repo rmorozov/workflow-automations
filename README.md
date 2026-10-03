@@ -99,7 +99,7 @@ Authentication uses your Kerberos ticket. On Linux, install system Kerberos head
 **1. Executive Summary** (teams by RAG load), then **2. Triage Agenda** (items ranked
 by risk-flag weight, with recommended actions). Pass last week's report as
 `--previous-file` to see new, persisting and resolved risks. `--profile exec` writes
-only the leadership sheets; `--as-of` makes date-based flags reproducible. Existing
+only the leadership sheets plus Master Data, so it still works as `--previous-file`; `--as-of` makes date-based flags reproducible. Existing
 output requires `--overwrite`.
 
 ## Development

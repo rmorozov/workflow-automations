@@ -16,7 +16,8 @@ persist despite management attention.
 
 This tool requires networking by design: it reads from an **on-premise Azure
 DevOps Server** collection with **Kerberos** (the running user's ticket; Windows
-SSPI or Linux GSSAPI). It never writes to ADO, stores no credentials, and uses no
+SSPI or Linux GSSAPI). Mutual authentication is optional: a server token is verified
+when sent, but its absence (common with IIS) is not an error. It never writes to ADO, stores no credentials, and uses no
 personal access tokens. Network access is confined to `fetch_snapshot`; all other
 processing is a deterministic, offline transformation of the fetched snapshot,
 an optional capacity workbook and an optional previous report.
@@ -61,7 +62,8 @@ uses the capacity of its deepest configured ancestor AreaPath (`Matched_Capacity
 **Previous report** (`--previous-file`, optional): an earlier output of this tool,
 or of the legacy script (any sheet named `* Master Data` with a `System.Id` column).
 It enables deltas. A legacy report without flags gives `Delta_Status` but restarts
-persistence and has no resolved list; this is recorded as a warning.
+persistence and has no resolved list; this is recorded as a warning. A file that is not
+a readable XLSX (for example this tool's CSV output) is a validation error (exit 2).
 
 All local inputs are validated before ADO is contacted.
 
@@ -108,7 +110,7 @@ are omitted and listed on the Config sheet, except Summary, Agenda and Master Da
 | 2. Triage Agenda | Top `--agenda-size` (default 20) items by score, then persistence, then remaining work |
 | 3. Master Data | All items with enrichment, flag, score, action and delta columns |
 | 4. Capacity Triage | Remaining work vs capacity per `Matched_Capacity_Level` |
-| 5–18 | One sheet per view: estimation debt (dates, hours), over estimation, minor progress (<16 h logged), date drift, top blockers, cross-team dependencies (non-Child links between AreaPaths), deferred candidates, quick wins, all relations, top 20% remaining work per AreaPath (at least one), exceeds monthly capacity, unassigned, stale |
+| 5–18 | One sheet per view: estimation debt (dates, hours), over estimation, minor progress (<16 h logged), date drift, top blockers, cross-team dependencies (non-Child links between AreaPaths, each dependency once even when both items store it), deferred candidates, quick wins, all relations, top 20% remaining work per AreaPath (at least one), exceeds monthly capacity, unassigned, stale |
 | 19. Resolved Since Last Report | See Deltas |
 
 `Load_Pct` is remaining work as a percentage of capacity. `RAG`: RED above 100,
@@ -116,7 +118,8 @@ AMBER from 85, GREEN below, GREY when capacity is undefined. The summary is sort
 RED, AMBER, GREY, GREEN, then by team score; RAG cells are colored, and score and
 staleness columns use color scales.
 
-`--profile exec` writes only Config, Summary, Agenda, Capacity Triage and Resolved.
+`--profile exec` writes only Config, Summary, Agenda, Master Data, Capacity Triage and
+Resolved. Master Data is kept so an exec report can be the next `--previous-file`.
 `--format csv` writes Master Data only and rejects `--previous-file` and
 `--profile exec`, which require the workbook.
 

@@ -182,8 +182,37 @@ def test_workbook_layout_omissions_and_profiles(snapshot, tmp_path):
     assert first_agenda.iloc[0][tool.FIELD_ID] == 1
 
     exec_report = tool.build_report(snapshot, CAPACITY, settings(profile="exec"))
-    assert tool.SHEET_MASTER not in exec_report.sheets
     assert tool.SHEET_SUMMARY in exec_report.sheets
+    assert "5. Estimation Debt (Dates)" not in exec_report.sheets
+    # Master Data stays so an exec report can serve as the next --previous-file.
+    exec_path = tmp_path / "exec.xlsx"
+    tool.write_excel(exec_path, exec_report, {"As of": "2026-10-01"})
+    previous = tool.read_previous_master(exec_path)
+    nxt = tool.build_report(snapshot, CAPACITY, settings(), previous)
+    assert set(nxt.master[tool.COL_DELTA]) == {"CARRIED"}
+
+
+def test_non_xlsx_previous_report_is_a_validation_error(tmp_path):
+    for name, data in (("prev.csv", b"System.Id\n1\n"), ("prev.xlsx", b"not a zip")):
+        path = tmp_path / name
+        path.write_bytes(data)
+        with pytest.raises(tool.TriageError, match="not a readable XLSX"):
+            tool.read_previous_master(path)
+
+
+def test_cross_team_lists_each_dependency_once():
+    a = item(1, TEAM_X, "A")
+    b = item(2, TEAM_Y, "B")
+    c = item(3, TEAM_Y, "C")
+    a["relations"] = [rel(tool.REL_SUCCESSOR, 2), rel(tool.REL_BLOCKS_FORWARD, 3)]
+    b["relations"] = [rel(tool.REL_PREDECESSOR, 1)]
+    c["relations"] = [rel(tool.REL_BLOCKS_REVERSE, 1), rel(tool.REL_PREDECESSOR, 99)]
+    report = tool.build_report(tool.Snapshot(items=[a, b, c]), {}, settings())
+    cross = report.sheets["11. Cross-Team Deps"]
+    pairs = set(zip(cross[tool.REL_COL_SOURCE_ID], cross[tool.REL_COL_DEST_ID], strict=True))
+    # Mirrored reverse links are dropped; 3 -> 99 has no forward row, so it stays.
+    assert pairs == {(1, 2), (1, 3), (3, 99)}
+    assert len(report.relations) == 5  # All Relations remains the raw graph
 
 
 def capacity_workbook(path, headers, rows):
@@ -332,7 +361,10 @@ class FakeClient:
 def fake_ado(monkeypatch):
     """Install a fake Connection and a stub requests_kerberos; return a setup function."""
     kerberos = ModuleType("requests_kerberos")
-    kerberos.HTTPKerberosAuth = type("HTTPKerberosAuth", (), {})
+    kerberos.OPTIONAL = "optional"
+    kerberos.HTTPKerberosAuth = type(
+        "HTTPKerberosAuth", (), {"__init__": lambda self, **kw: setattr(self, "kw", kw)}
+    )
     monkeypatch.setitem(__import__("sys").modules, "requests_kerberos", kerberos)
     state = {}
 
@@ -377,6 +409,7 @@ def test_fetch_tree_query_collects_items_links_parents_and_warnings(fake_ado):
     assert snap.warnings == ["1 linked items unavailable (deleted or no permission)"]
     assert client.calls[0]["expand"] == "Relations"
     assert isinstance(state["session"].auth, fake_ado.kerberos.HTTPKerberosAuth)
+    assert state["session"].auth.kw == {"mutual_authentication": "optional"}
     assert state["base_url"] == BASE
 
 
