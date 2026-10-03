@@ -182,8 +182,37 @@ def test_workbook_layout_omissions_and_profiles(snapshot, tmp_path):
     assert first_agenda.iloc[0][tool.FIELD_ID] == 1
 
     exec_report = tool.build_report(snapshot, CAPACITY, settings(profile="exec"))
-    assert tool.SHEET_MASTER not in exec_report.sheets
     assert tool.SHEET_SUMMARY in exec_report.sheets
+    assert "5. Estimation Debt (Dates)" not in exec_report.sheets
+    # Master Data stays so an exec report can serve as the next --previous-file.
+    exec_path = tmp_path / "exec.xlsx"
+    tool.write_excel(exec_path, exec_report, {"As of": "2026-10-01"})
+    previous = tool.read_previous_master(exec_path)
+    nxt = tool.build_report(snapshot, CAPACITY, settings(), previous)
+    assert set(nxt.master[tool.COL_DELTA]) == {"CARRIED"}
+
+
+def test_non_xlsx_previous_report_is_a_validation_error(tmp_path):
+    for name, data in (("prev.csv", b"System.Id\n1\n"), ("prev.xlsx", b"not a zip")):
+        path = tmp_path / name
+        path.write_bytes(data)
+        with pytest.raises(tool.TriageError, match="not a readable XLSX"):
+            tool.read_previous_master(path)
+
+
+def test_cross_team_lists_each_dependency_once():
+    a = item(1, TEAM_X, "A")
+    b = item(2, TEAM_Y, "B")
+    c = item(3, TEAM_Y, "C")
+    a["relations"] = [rel(tool.REL_SUCCESSOR, 2), rel(tool.REL_BLOCKS_FORWARD, 3)]
+    b["relations"] = [rel(tool.REL_PREDECESSOR, 1)]
+    c["relations"] = [rel(tool.REL_BLOCKS_REVERSE, 1), rel(tool.REL_PREDECESSOR, 99)]
+    report = tool.build_report(tool.Snapshot(items=[a, b, c]), {}, settings())
+    cross = report.sheets["11. Cross-Team Deps"]
+    pairs = set(zip(cross[tool.REL_COL_SOURCE_ID], cross[tool.REL_COL_DEST_ID], strict=True))
+    # Mirrored reverse links are dropped; 3 -> 99 has no forward row, so it stays.
+    assert pairs == {(1, 2), (1, 3), (3, 99)}
+    assert len(report.relations) == 5  # All Relations remains the raw graph
 
 
 def capacity_workbook(path, headers, rows):
@@ -289,3 +318,144 @@ def test_csv_output_is_master_data(snapshot, tmp_path, monkeypatch):
     frame = pd.read_csv(out)
     assert {tool.COL_FLAGS, tool.COL_SCORE} <= set(frame.columns)
     assert len(frame) == len(snapshot.items)
+
+
+# --- fetch_snapshot against a fake ADO client (no server, no Kerberos libraries) ---
+
+azure_connection = pytest.importorskip("azure.devops.connection")
+from types import ModuleType, SimpleNamespace  # noqa: E402
+
+from azure.devops.exceptions import (  # noqa: E402
+    AzureDevOpsAuthenticationError,
+    AzureDevOpsClientRequestError,
+)
+from msrest.exceptions import ClientRequestError  # noqa: E402
+
+
+def ado_item(wi_id, fields, relations=()):
+    rels = [SimpleNamespace(rel=r["rel"], url=r["url"]) for r in relations]
+    return SimpleNamespace(id=wi_id, fields=fields, relations=rels)
+
+
+class FakeClient:
+    """Mimics WorkItemTrackingClient: get_work_items raises on unknown ids unless omitted."""
+
+    def __init__(self, result, store, fail_on=None):
+        self.result, self.store, self.fail_on = result, store, fail_on
+        self.calls = []
+
+    def query_by_id(self, id):
+        if self.fail_on == "query":
+            raise self.error
+        return self.result
+
+    def get_work_items(self, ids, fields=None, expand=None, error_policy=None):
+        self.calls.append({"ids": ids, "fields": fields, "expand": expand})
+        assert len(ids) <= 200 and not (fields and expand)  # ADO API limits
+        if error_policy == "omit":
+            return [self.store.get(i) for i in ids]
+        return [self.store[i] for i in ids if i in self.store]
+
+
+@pytest.fixture
+def fake_ado(monkeypatch):
+    """Install a fake Connection and a stub requests_kerberos; return a setup function."""
+    kerberos = ModuleType("requests_kerberos")
+    kerberos.OPTIONAL = "optional"
+    kerberos.HTTPKerberosAuth = type(
+        "HTTPKerberosAuth", (), {"__init__": lambda self, **kw: setattr(self, "kw", kw)}
+    )
+    monkeypatch.setitem(__import__("sys").modules, "requests_kerberos", kerberos)
+    state = {}
+
+    def setup(client):
+        def connection(base_url, creds):
+            state["base_url"], state["session"] = base_url, creds.signed_session()
+            if client.fail_on == "connect":
+                raise client.error
+            return SimpleNamespace(
+                clients=SimpleNamespace(get_work_item_tracking_client=lambda: client)
+            )
+
+        monkeypatch.setattr(azure_connection, "Connection", connection)
+        return state
+
+    setup.kerberos = kerberos
+    return setup
+
+
+def link(source, target, rel=None):
+    end = lambda i: None if i is None else SimpleNamespace(id=i)  # noqa: E731
+    return SimpleNamespace(source=end(source), target=end(target), rel=rel)
+
+
+def test_fetch_tree_query_collects_items_links_parents_and_warnings(fake_ado):
+    store = {
+        1: ado_item(1, {tool.FIELD_TITLE: "Root"}, [rel(tool.REL_SUCCESSOR, 50)]),
+        2: ado_item(2, {tool.FIELD_TITLE: "Child", tool.FIELD_PARENT: 1}),
+        50: ado_item(50, {tool.FIELD_TITLE: "Outside", tool.FIELD_AREA_PATH: TEAM_Y}),
+    }
+    store[1].relations.append(SimpleNamespace(rel=tool.REL_BLOCKS_FORWARD, url=f"{BASE}/x/77"))
+    # Tree results have a root link with no source and no flat work_items list.
+    result = SimpleNamespace(work_item_relations=[link(None, 1), link(1, 2)], work_items=None)
+    client = FakeClient(result, store)
+    state = fake_ado(client)
+
+    snap = tool.fetch_snapshot(BASE, "q")
+
+    assert sorted(i["id"] for i in snap.items) == [1, 2]
+    assert snap.external == {50: store[50].fields}
+    assert snap.parent_titles == {1: "Root"}
+    assert snap.warnings == ["1 linked items unavailable (deleted or no permission)"]
+    assert client.calls[0]["expand"] == "Relations"
+    assert isinstance(state["session"].auth, fake_ado.kerberos.HTTPKerberosAuth)
+    assert state["session"].auth.kw == {"mutual_authentication": "optional"}
+    assert state["base_url"] == BASE
+
+
+def test_fetch_flat_query_batches_by_200(fake_ado):
+    store = {i: ado_item(i, {tool.FIELD_TITLE: str(i)}) for i in range(1, 451)}
+    result = SimpleNamespace(
+        work_item_relations=None, work_items=[SimpleNamespace(id=i) for i in store]
+    )
+    client = FakeClient(result, store)
+    fake_ado(client)
+    assert len(tool.fetch_snapshot(BASE, "q").items) == 450
+    assert [len(c["ids"]) for c in client.calls] == [200, 200, 50]
+
+
+def test_fetch_empty_query_and_missing_core_items(fake_ado):
+    fake_ado(FakeClient(SimpleNamespace(work_item_relations=[], work_items=[]), {}))
+    with pytest.raises(tool.EmptyQueryError):
+        tool.fetch_snapshot(BASE, "q")
+
+    result = SimpleNamespace(work_item_relations=None, work_items=[SimpleNamespace(id=1)])
+    fake_ado(FakeClient(result, {}))
+    with pytest.raises(tool.AdoError, match="could not be fetched"):
+        tool.fetch_snapshot(BASE, "q")
+
+
+@pytest.mark.parametrize(
+    ("where", "error"),
+    [
+        ("connect", ClientRequestError("connection refused")),
+        ("query", AzureDevOpsAuthenticationError("401 Unauthorized")),
+        ("query", AzureDevOpsClientRequestError("404 query not found")),
+    ],
+)
+def test_fetch_maps_client_failures_to_ado_error(fake_ado, where, error):
+    client = FakeClient(None, {}, fail_on=where)
+    client.error = error
+    fake_ado(client)
+    with pytest.raises(tool.AdoError):
+        tool.fetch_snapshot(BASE, "q")
+
+
+def test_control_characters_in_fields_do_not_break_the_workbook(tmp_path):
+    bad = item(1, TEAM_X, "Bad\x0btitle", **{"System.Description": "a\x01b"})
+    snap = tool.Snapshot(items=[bad])
+    out = tmp_path / "r.xlsx"
+    tool.write_excel(out, tool.build_report(snap, {}, settings()), {"As of": "2026-10-01"})
+    master = load_workbook(out)[tool.SHEET_MASTER]
+    titles = [c.value for c in master[tool.DATA_START_ROW - 1]]
+    assert master.cell(tool.DATA_START_ROW, titles.index(tool.FIELD_TITLE) + 1).value == "Badtitle"
