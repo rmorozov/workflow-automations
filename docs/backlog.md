@@ -14,6 +14,19 @@ These are proposals, not promises made by the current specifications.
 - Measured large-workbook performance improvements.
 - Workbook fidelity and formula-reference rewriting, with clearly defined supported features.
 
+## ADO scope triage
+
+- Per-team output (one small workbook or sheet per team lead) to route actions to owners.
+- Write triage decisions back to ADO (tags or comments); read-only until then.
+- Trend history across more than one previous report (team load and score over time).
+- Transitive blocker chains (critical path) instead of one-hop blocker counts.
+- Planned-vs-capacity view based on `OriginalEstimate`, alongside remaining work.
+- Embedded summary chart (remaining work vs capacity per team).
+- Merge sibling sheets (estimation debt by date/hours; estimate-quality sheets).
+- Configurable field names, hour thresholds, flag weights and RAG bands (JSON config).
+- Offline replay: save the fetched snapshot as JSON and rebuild reports from it.
+- Restrict fetched fields to those used, to reduce payload on very large queries.
+
 ## Repository workflow
 
 - Enable branch protection/rulesets and require the shared CI checks when ready.

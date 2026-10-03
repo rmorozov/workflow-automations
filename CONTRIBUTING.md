@@ -21,7 +21,7 @@ on every user. Keep code and specification changes in the same PR.
 ## Local checks
 
 ```bash
-python -m pip install -e '.[translation,dev]'
+python -m pip install -e '.[translation,ado-triage,dev]'
 ruff check .
 ruff format --check .
 pytest
@@ -35,7 +35,7 @@ translation bundles and reports belong under ignored `work/`, outside the reposi
 or in temporary directories.
 
 CI runs lint/format and tests on supported Python/dependency combinations, builds a
-wheel, installs that wheel, and smoke-tests both CLI entry points. Workflow tokens
+wheel, installs that wheel, and smoke-tests the CLI entry points. Workflow tokens
 have read-only contents permission. Actions are pinned to commit SHAs and dependency
 updates are proposed by Dependabot.
 
