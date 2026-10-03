@@ -19,6 +19,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -220,8 +221,8 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
     try:
         import requests
         from azure.devops.connection import Connection
-        from azure.devops.exceptions import AzureDevOpsServiceError
         from msrest.authentication import Authentication
+        from msrest.exceptions import ClientException
         from requests_kerberos import HTTPKerberosAuth
     except ImportError as exc:
         raise TriageError(
@@ -235,7 +236,9 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
             session.auth = HTTPKerberosAuth()
             return session
 
-    service_errors = (AzureDevOpsServiceError, requests.RequestException)
+    # ClientException covers every azure-devops/msrest failure: wrapped service errors,
+    # plain HTTP errors (404, 403), authentication (401) and wrapped connection errors.
+    service_errors = (ClientException, requests.RequestException)
     warnings: list[str] = []
     try:
         connection = Connection(base_url=base_url, creds=KerberosAuthentication())
@@ -1037,7 +1040,21 @@ RAG_FILLS = {
 }
 
 
+def _excel_safe(frame: pd.DataFrame) -> pd.DataFrame:
+    """Strip control characters openpyxl rejects (they occur in ADO rich-text fields)."""
+    text = frame.select_dtypes(include=["object", "string"]).columns
+    if text.empty:
+        return frame
+    frame = frame.copy()
+    for col in text:
+        frame[col] = frame[col].map(
+            lambda v: ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v
+        )
+    return frame
+
+
 def _write_frame(writer: pd.ExcelWriter, name: str, frame: pd.DataFrame, purpose: str) -> None:
+    frame = _excel_safe(frame)
     frame.to_excel(writer, sheet_name=name, index=False, startrow=DATA_START_ROW - 2)
     ws = writer.sheets[name]
     ws.cell(row=1, column=1, value=purpose).font = Font(italic=True, color="808080")

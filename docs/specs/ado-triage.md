@@ -39,7 +39,8 @@ the run fails (exit 5): a report missing part of the scope would look complete.
 RemainingWork}`, and custom dates `my.EstimationExpectedDate`,
 `my.EstimationReadyDate`, `my.UATExpectedDate`, `my.UATReadyDate`. Absent fields are
 treated as empty: missing hours are 0, missing dates are blank. Dates are converted
-to naive UTC because Excel cannot store time zones.
+to naive UTC because Excel cannot store time zones. Control characters that Excel
+cannot store (found in rich-text fields) are removed from the workbook.
 
 **Links** read: Child (`Hierarchy-Forward`), Predecessor (`Dependency-Reverse`),
 Successor (`Dependency-Forward`), Blocks (`Blocks-Forward`) and Blocked By
@@ -170,8 +171,10 @@ Tests use synthetic snapshots and generated workbooks to cover flag kinds, scori
 blocker direction, root detection, unknown linked items, hierarchical capacity,
 RAG, the top-20% rule, capacity header normalization and validation, a two-report
 delta cycle, legacy previous reports, workbook layout, profiles, CSV, overwrite
-protection, input-before-network validation and exit codes. `fetch_snapshot` is not
-covered by automated tests because it requires an ADO server.
+protection, input-before-network validation and exit codes. `fetch_snapshot` is tested
+against a fake work item client: tree and flat queries, 200-item batches, unavailable
+linked items, Kerberos wiring, and mapping of connection, authentication and HTTP
+failures to exit 5. A real ADO server and Kerberos handshake are not exercised.
 
 Hour thresholds (16 h, 1–20 h), flag weights and RAG bands are fixed in this
 version. Field names in the `my.*` namespace are fixed. Only one previous report is
