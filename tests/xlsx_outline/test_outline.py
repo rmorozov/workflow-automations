@@ -233,3 +233,70 @@ def test_io_errors(tmp_path, capsys):
     status, _, err = run(capsys, "--input", empty)
     assert status == 2
     assert "empty" in err
+
+
+def test_shortened_row_ends_the_child_run(tmp_path, capsys):
+    path = workbook(
+        tmp_path / "short.xlsx", [["Area", "Item"], ["A", "X"], ["A", None], ["A", "X"]]
+    )
+    _, out, _ = run(capsys, "--input", path)
+    assert out == "- A\n  - X\n  - X\n"
+    _, out, _ = run(capsys, "--input", path, "--group")
+    assert out == "- A\n  - X\n"
+
+
+def test_blank_cell_differs_from_blank_label_text(tmp_path, capsys):
+    path = workbook(
+        tmp_path / "blank.xlsx", [["Area", "Item"], [None, "X"], ["(blank)", "Y"], [None, "Z"]]
+    )
+    _, out, _ = run(capsys, "--input", path, "--group")
+    assert out == "- (blank)\n  - X\n  - Z\n- (blank)\n  - Y\n"
+    _, out, _ = run(capsys, "--input", path)
+    assert out == "- (blank)\n  - X\n- (blank)\n  - Y\n- (blank)\n  - Z\n"
+
+
+def test_details_keep_row_order_around_children(tmp_path, capsys):
+    path = workbook(
+        tmp_path / "order.xlsx",
+        [
+            ["Area", "Item", "Owner"],
+            ["A", None, "before"],
+            ["A", "X", "first"],
+            ["A", None, "between"],
+            ["A", "Y", "second"],
+            ["A", None, "after"],
+        ],
+    )
+    _, out, _ = run(capsys, "--input", path, "--levels", "2")
+    assert out == (
+        "- A\n"
+        "  - Owner: before\n"
+        "  - X\n"
+        "    - Owner: first\n"
+        "  - Owner: between\n"
+        "  - Y\n"
+        "    - Owner: second\n"
+        "  - Owner: after\n"
+    )
+
+
+def test_formatting_far_from_data_is_not_materialized(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "styled.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Team", "Task"])
+    ws.append(["Alpha", "One"])
+    ws.cell(5000, 5000).number_format = "0.00"
+    wb.save(path)
+    wb.close()
+    opened = []
+    original = tool.load_workbook
+
+    def spy(*args, **kwargs):
+        opened.append(original(*args, **kwargs))
+        return opened[-1]
+
+    monkeypatch.setattr(tool, "load_workbook", spy)
+    _, out, _ = run(capsys, "--input", path)
+    assert out == "- Alpha\n  - One\n"
+    assert len(opened[0].active._cells) < 10

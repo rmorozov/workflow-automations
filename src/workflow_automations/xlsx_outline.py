@@ -23,10 +23,12 @@ class ValidationError(ValueError):
 
 @dataclass
 class Node:
-    label: str
+    # None is a blank cell; the blank label is applied only when rendering.
+    key: str | None
     children: list[Node] = field(default_factory=list)
-    details: list[str] = field(default_factory=list)
-    index: dict[str, Node] = field(default_factory=dict)
+    # Children and detail rows in the order the sheet introduced them.
+    items: list[Node | list[str | None]] = field(default_factory=list)
+    index: dict[str | None, Node] = field(default_factory=dict)
 
 
 def text(value) -> str | None:
@@ -72,10 +74,11 @@ def read_table(path: Path, sheet: str | None) -> tuple[list[str], list[list[str 
             ws = workbook[sheet]
         else:
             raise ValidationError(f"Sheet does not exist: {sheet}")
+        # Visit only stored cells: iter_rows() would create every cell up to the sheet's
+        # dimensions, which stray formatting can stretch far beyond the data.
         cells = {
-            (cell.row, cell.column): cell.value
-            for row in ws.iter_rows()
-            for cell in row
+            coordinate: cell.value
+            for coordinate, cell in ws._cells.items()
             if cell.value is not None
         }
         # A merged range displays its top-left value in every covered cell.
@@ -123,10 +126,11 @@ def select_columns(
     return selected
 
 
-def build_tree(rows, levels: int, fill_down: bool, group: bool, blank_label: str) -> Node:
+def build_tree(rows, levels: int, fill_down: bool, group: bool) -> Node:
     """Fold rows into a tree; equal leading values share one parent node."""
-    root = Node("")
+    root = Node(None)
     previous: list[str | None] = [None] * levels
+    active: list[Node] = []
     for row in rows:
         values = list(row[:levels])
         for level in range(levels):
@@ -140,22 +144,28 @@ def build_tree(rows, levels: int, fill_down: bool, group: bool, blank_label: str
         if not values and all(value is None for value in details):
             continue
         node = root
-        for value in values:
-            label = blank_label if value is None else value
+        path: list[Node] = []
+        continuing = True
+        for level, value in enumerate(values):
             if group:
-                child = node.index.get(label)
+                child = node.index.get(value)
             else:
-                # Without grouping only a run of rows sharing the previous row's prefix merges.
-                child = node.children[-1] if node.children else None
-                if child is not None and child.label != label:
-                    child = None
+                # Without grouping, a node is reused only while the row continues the
+                # previous row's path; any difference starts a new run below it.
+                child = None
+                if continuing and level < len(active) and active[level].key == value:
+                    child = active[level]
+                continuing = child is not None
             if child is None:
-                child = Node(label)
+                child = Node(value)
                 node.children.append(child)
-                node.index[label] = child
+                node.items.append(child)
+                node.index.setdefault(value, child)
+            path.append(child)
             node = child
+        active = path
         if any(value is not None for value in details):
-            node.details.append(details)
+            node.items.append(details)
     return root
 
 
@@ -169,6 +179,7 @@ def render(
     label_levels: bool,
     indent: int,
     raw: bool,
+    blank_label: str,
 ) -> str:
     out: list[str] = []
     quote = (lambda value: value) if raw else escape
@@ -190,12 +201,13 @@ def render(
 
     def walk(node: Node, depth: int) -> None:
         bullet_depth = max(depth - heading_levels, 0)
-        for values in node.details:
-            line = details_line(values)
-            if line:
-                out.append(" " * (indent * bullet_depth) + "- " + line)
-        for child in node.children:
-            label = quote(child.label)
+        for child in node.items:
+            if not isinstance(child, Node):
+                line = details_line(child)
+                if line:
+                    out.append(" " * (indent * bullet_depth) + "- " + line)
+                continue
+            label = quote(blank_label if child.key is None else child.key)
             if label_levels:
                 label = f"{quote(headings[depth])}: {label}"
             if depth < heading_levels:
@@ -242,7 +254,7 @@ def convert(args) -> tuple[str, int, int]:
     if args.indent < 1:
         raise ValidationError("--indent must be a positive integer")
     rows = [[row[column] for column in selected] for row in data]
-    root = build_tree(rows, levels, args.fill_down, args.group, args.blank_label)
+    root = build_tree(rows, levels, args.fill_down, args.group)
     names = [headings[column] for column in selected]
     content = render(
         root,
@@ -253,6 +265,7 @@ def convert(args) -> tuple[str, int, int]:
         label_levels=args.label_levels,
         indent=args.indent,
         raw=args.raw,
+        blank_label=args.blank_label,
     )
 
     def count(node: Node) -> int:
