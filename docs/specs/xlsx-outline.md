@@ -68,9 +68,16 @@ blank fields. Rows whose selected cells are all blank are skipped.
 
 Rows are processed in sheet order. A row joins the previous row's item at each level
 while all values to its left, and the value itself, equal the previous row's. At the
-first difference, a new item starts and every level to its right starts anew. This
-is the left-to-right duplication the outline removes; a row identical to the previous
-one on every hierarchy column adds nothing unless it has details.
+first difference, a new item starts and every level to its right starts anew. A
+level the previous row did not reach (its path ended earlier) is a difference, so
+`A | X`, `A | (empty)`, `A | X` yields two `X` items under one `A`. This is the
+left-to-right duplication the outline removes; a row identical to the previous one
+on every hierarchy column adds nothing unless it has details. Rows whose selected
+cells are all blank are skipped and do not end a run.
+
+Detail lines and child items under one parent keep the order of the rows that
+introduced them. Under `#` headings, a detail line that follows a child section is
+printed after that section.
 
 By default only adjacent rows fold, so the outline keeps the sheet's order and a
 value that reappears later starts a new run. `--group` merges non-adjacent rows with
@@ -82,7 +89,8 @@ order relative to the sheet, so it is explicit.
 Trailing blank hierarchy cells shorten the row's path: a row `Beta, (blank)` is the
 item `Beta` with nothing beneath it. An inner blank (a blank followed by a value)
 renders as `--blank-label` (default `(blank)`), because dropping it would place the
-deeper value at the wrong level.
+deeper value at the wrong level. The label is display only: a blank cell and a cell
+whose text equals the label are different values and never fold together.
 
 Sheets laid out for reading often leave a parent blank under its first occurrence.
 `--fill-down` treats a blank hierarchy cell as the value above it, but only when
@@ -120,8 +128,10 @@ through a temporary file and an atomic rename. An existing output requires
 
 Tests use generated workbooks to cover folding in sheet order and with `--group`,
 headings with title and labels, column reordering, trailing and inner blanks,
-`--fill-down` parent boundaries, merged cells, value formatting, escaping, cached
+`--fill-down` parent boundaries, runs ended by a shorter row, blank cells versus
+label text, detail order around children, formatting far from the data, merged cells, value formatting, escaping, cached
 formula values, output overwrite protection and validation errors.
 
-The sheet is read into memory. Deferred items are listed in the
+The value-bearing table is read into memory. Only cells stored in the file are
+visited, so formatting far outside the data does not enlarge the work. Deferred items are listed in the
 [backlog](../backlog.md).
