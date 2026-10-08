@@ -13,6 +13,7 @@ import re
 import secrets
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 from collections import Counter
 from collections.abc import Callable
@@ -20,6 +21,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import quoteattr
 from zipfile import BadZipFile
 
 import pandas as pd
@@ -544,11 +546,16 @@ def read_reply_csv(path: Path, expected: list[str], delimiter: str) -> list[list
         delimiter=delimiter,
         strict=True,
     )
-    rows = [
-        (reader.line_num, row)
-        for row in reader
-        if row and not (len(row) == 1 and not row[0].strip())
-    ]
+    rows = []
+    try:
+        for row in reader:
+            if row and not (len(row) == 1 and not row[0].strip()):
+                rows.append((reader.line_num, row))
+    except csv.Error as exc:
+        raise ValidationError(
+            f"Invalid two-column translation CSV {path.name}: line {reader.line_num}: {exc}; "
+            "check quoting (a quote inside a quoted field must be doubled)"
+        ) from exc
     if rows and len(rows[0][1]) == 1 and FENCE.fullmatch(rows[0][1][0]):
         rows = rows[1:]
     if rows and len(rows[-1][1]) == 1 and FENCE.fullmatch(rows[-1][1][0]):
@@ -647,6 +654,7 @@ def publish_translation(
     cells: dict,
     output: Path,
     before_publish: Callable[[str], None],
+    engine: str = "auto",
 ) -> None:
     """Write the workbook with a translated copy of the source sheet.
 
@@ -654,6 +662,8 @@ def publish_translation(
     copy by rewriting only the translated cells of the sheet XML. A sheet whose XML
     cannot be rewritten safely (parts that cannot be shared with a copy, or cells the
     rewrite cannot locate) falls back to openpyxl, which loads and saves everything.
+    ``engine`` forces one writer: ``xml`` fails instead of falling back, and
+    ``openpyxl`` skips the fast path.
     """
     output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=".translated-", suffix=".xlsx", dir=output.parent)
@@ -661,7 +671,12 @@ def publish_translation(
     temp = Path(name)
     try:
         writer = "xml"
-        if not xml_copy(path, source.sheet_path, sheet_name, cells, temp):
+        if engine == "openpyxl" or not xml_copy(path, source.sheet_path, sheet_name, cells, temp):
+            if engine == "xml":
+                raise ValidationError(
+                    "The XML writer cannot copy this sheet safely; "
+                    "use --writer auto or --writer openpyxl"
+                )
             writer = "openpyxl"
             workbook = load_workbook(path, data_only=False)
             try:
@@ -684,18 +699,23 @@ def publish_translation(
 NS_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 NS_DOC_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 NS_PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+NS_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
 WORKSHEET_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
 HYPERLINK_REL = NS_DOC_REL + "/hyperlink"
+QUOTED = rb"""(?:"[^"]*"|'[^']*')"""
 # Sheet parts a copy cannot share with the original (drawings, comments, tables, controls).
 UNSHAREABLE = re.compile(
     rb"<(?P<p>[\w.-]+:)?(?P<tag>drawing|legacyDrawing|legacyDrawingHF|picture|tableParts|"
     rb"oleObjects|controls)\b[^>]*?(?:/>|>.*?</(?P=p)?(?P=tag)>)",
     re.S,
 )
-RELATIONSHIP_ID = re.compile(rb'\s[\w.-]+:id="[^"]*"')
+RELATIONSHIP_ID = re.compile(rb"\s[\w.-]+:id=" + QUOTED)
 HYPERLINK = re.compile(rb"<(?:[\w.-]+:)?hyperlink\b[^>]*>")
-# One selected tab and unique VBA code names per workbook.
-TAB_SELECTED = re.compile(rb'\s(?:tabSelected="(?:1|true)"|codeName="[^"]*")')
+HYPERLINK_ID = re.compile(rb"""\s[\w.-]+:id=(?:"([^"]*)"|'([^']*)')""")
+PAGE_SETUP = re.compile(rb"<(?:[\w.-]+:)?pageSetup\b[^>]*>")
+# One selected tab and unique VBA code names per workbook; only in these start tags.
+VIEW_TAGS = re.compile(rb"<(?:[\w.-]+:)?(?:sheetView|sheetPr)\b[^>]*>")
+VIEW_ATTRS = re.compile(rb"\s(?:tabSelected|codeName)=" + QUOTED)
 
 
 def xml_escape_text(text: str) -> bytes:
@@ -703,25 +723,51 @@ def xml_escape_text(text: str) -> bytes:
     return escaped.replace("\r", "&#13;").encode("utf-8")
 
 
+def parse_xml(data: bytes, root: str):
+    """The parsed part when its root element is ``root`` (Clark notation), else None."""
+    try:
+        element = ET.fromstring(data)
+    except ET.ParseError:
+        return None
+    return element if element.tag == root else None
+
+
+def insert_before_close(data: bytes, local_name: str, fragment: str) -> bytes | None:
+    """Insert ``fragment`` before the last closing tag of ``local_name``, any prefix.
+
+    Package parts are edited as text, not re-serialized: Excel relies on the original
+    prefixes (for example in ``mc:Ignorable``). Every fragment declares its own
+    namespace, so it is valid under any prefix the part uses.
+    """
+    closings = list(re.finditer(rb"</(?:[\w.-]+:)?" + local_name.encode() + rb"\s*>", data))
+    if not closings:
+        return None
+    at = closings[-1].start()
+    return data[:at] + fragment.encode("utf-8") + data[at:]
+
+
+def relationships(root) -> list:
+    return list(root.iter(f"{{{NS_PKG_REL}}}Relationship"))
+
+
 def xml_copy(path: Path, sheet_path: str, sheet_name: str, cells: dict, output: Path) -> bool:
-    """Add the translated sheet at the XML level; False when the fast path does not apply."""
+    """Add the translated sheet at the XML level; False when the fast path does not apply.
+
+    Package parts are read with a namespace-aware parser; every edit is verified by
+    parsing the result again, and any unsupported serialization returns False so the
+    caller uses openpyxl instead.
+    """
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         sheet_xml = archive.read(sheet_path)
         folder, base = sheet_path.rsplit("/", 1)
         rels_name = f"{folder}/_rels/{base}.rels"
-        sheet_rels = archive.read(rels_name) if rels_name in names else None
 
         sheet_xml = UNSHAREABLE.sub(b"", sheet_xml)
-        sheet_xml = TAB_SELECTED.sub(b"", sheet_xml)
-        sheet_xml = re.sub(
-            rb"<(?:[\w.-]+:)?pageSetup\b[^>]*>",
-            lambda m: RELATIONSHIP_ID.sub(b"", m.group(0)),
-            sheet_xml,
-        )
+        sheet_xml = VIEW_TAGS.sub(lambda m: VIEW_ATTRS.sub(b"", m.group(0)), sheet_xml)
+        sheet_xml = PAGE_SETUP.sub(lambda m: RELATIONSHIP_ID.sub(b"", m.group(0)), sheet_xml)
         # Only external hyperlinks may keep relationship IDs; their targets are copied below.
-        outside = RELATIONSHIP_ID.findall(HYPERLINK.sub(b"", sheet_xml))
-        if outside:
+        if RELATIONSHIP_ID.search(HYPERLINK.sub(b"", sheet_xml)):
             return False
 
         letters = {get_column_letter(column) for _row, column in cells}
@@ -739,109 +785,109 @@ def xml_copy(path: Path, sheet_path: str, sheet_name: str, cells: dict, output: 
                 text = pending.pop(key, None)
                 if text is None:
                     return match.group(0)
-                prefix = match["p"] or b""
-                attrs = re.sub(rb'\s(?:t|cm|vm)="[^"]*"', b"", match["attrs"])
-                return (
-                    b"<"
-                    + prefix
-                    + b'c r="'
-                    + match["col"]
-                    + match["row"]
-                    + b'"'
-                    + attrs
-                    + b' t="inlineStr"><'
-                    + prefix
-                    + b"is><"
-                    + prefix
-                    + b't xml:space="preserve">'
-                    + xml_escape_text(text)
-                    + b"</"
-                    + prefix
-                    + b"t></"
-                    + prefix
-                    + b"is></"
-                    + prefix
-                    + b"c>"
-                )
+                p = match["p"] or b""
+                attrs = re.sub(rb"\s(?:t|cm|vm)=" + QUOTED, b"", match["attrs"])
+                ref = match["col"] + match["row"]
+                return b"".join(
+                    [
+                        b"<", p, b'c r="', ref, b'"', attrs, b' t="inlineStr"><', p, b"is><",
+                        p, b't xml:space="preserve">', xml_escape_text(text), b"</", p,
+                        b"t></", p, b"is></", p, b"c>",
+                    ]
+                )  # fmt: skip
 
             sheet_xml = pattern.sub(replace, sheet_xml)
         if pending:  # a cell without a leading r attribute, or written by an unusual producer
             return False
 
+        # Hyperlinks keep their IDs, so each must resolve to a copied relationship.
+        link_ids = {
+            (m[0] or m[1]).decode()
+            for m in HYPERLINK_ID.findall(b"".join(HYPERLINK.findall(sheet_xml)))
+        }
+        new_rels = None
+        if link_ids:
+            sheet_rels = (
+                parse_xml(archive.read(rels_name), f"{{{NS_PKG_REL}}}Relationships")
+                if rels_name in names
+                else None
+            )
+            if sheet_rels is None:
+                return False
+            links = [r for r in relationships(sheet_rels) if r.get("Type") == HYPERLINK_REL]
+            if not link_ids <= {r.get("Id") for r in links}:
+                return False
+            new_rels = (
+                '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                f'<Relationships xmlns="{NS_PKG_REL}">'
+                + "".join(
+                    "<Relationship"
+                    + "".join(
+                        f" {key}={quoteattr(value)}"
+                        for key in ("Id", "Type", "Target", "TargetMode")
+                        if (value := r.get(key)) is not None
+                    )
+                    + "/>"
+                    for r in links
+                )
+                + "</Relationships>"
+            ).encode("utf-8")
+
         workbook_name = "xl/workbook.xml"
         workbook_rels_name = "xl/_rels/workbook.xml.rels"
-        if workbook_name not in names or workbook_rels_name not in names:
+        types_name = "[Content_Types].xml"
+        if not {workbook_name, workbook_rels_name, types_name} <= set(names):
             return False
         workbook_xml = archive.read(workbook_name)
         workbook_rels = archive.read(workbook_rels_name)
-        content_types = archive.read("[Content_Types].xml")
+        content_types = archive.read(types_name)
+        book = parse_xml(workbook_xml, f"{{{NS_MAIN}}}workbook")
+        rels = parse_xml(workbook_rels, f"{{{NS_PKG_REL}}}Relationships")
+        types = parse_xml(content_types, f"{{{NS_TYPES}}}Types")
+        sheets = book.find(f"{{{NS_MAIN}}}sheets") if book is not None else None
+        if sheets is None or rels is None or types is None:
+            return False
 
         number = 1
         while f"xl/worksheets/sheet{number}.xml" in names:
             number += 1
         new_part = f"xl/worksheets/sheet{number}.xml"
-        used_ids = set(re.findall(rb'\bId="([^"]+)"', workbook_rels))
+        used_ids = {r.get("Id") for r in relationships(rels)}
         rel_number = 1
-        while f"rId{rel_number}".encode() in used_ids:
+        while f"rId{rel_number}" in used_ids:
             rel_number += 1
         rel_id = f"rId{rel_number}"
-        sheet_ids = [
-            int(x)
-            for x in re.findall(rb'<(?:[\w.-]+:)?sheet\b[^>]*?\bsheetId="(\d+)"', workbook_xml)
-        ]
-        sheet_tag = re.search(rb"<(?P<p>[\w.-]+:)?sheet\b[^>]*?\b(?P<r>[\w.-]+):id=", workbook_xml)
-        closing = re.search(rb"</(?:[\w.-]+:)?sheets>", workbook_xml)
-        if not sheet_ids or sheet_tag is None or closing is None:
+        try:
+            sheet_id = max(int(s.get("sheetId")) for s in sheets) + 1
+        except (TypeError, ValueError):
             return False
-        escaped_name = sheet_name.replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
-        entry = (
-            b"<"
-            + (sheet_tag["p"] or b"")
-            + b'sheet name="'
-            + escaped_name.encode("utf-8")
-            + b'" sheetId="'
-            + str(max(sheet_ids) + 1).encode()
-            + b'" xmlns:'
-            + sheet_tag["r"]
-            + b'="'
-            + NS_DOC_REL.encode()
-            + b'" '
-            + sheet_tag["r"]
-            + b':id="'
-            + rel_id.encode()
-            + b'"/>'
+
+        workbook_xml = insert_before_close(
+            workbook_xml,
+            "sheets",
+            f'<sheet xmlns="{NS_MAIN}" xmlns:r="{NS_DOC_REL}" name={quoteattr(sheet_name)} '
+            f'sheetId="{sheet_id}" r:id="{rel_id}"/>',
         )
-        workbook_xml = workbook_xml[: closing.start()] + entry + workbook_xml[closing.start() :]
-        rels_close = workbook_rels.rindex(b"</Relationships>")
-        workbook_rels = (
-            workbook_rels[:rels_close]
-            + f'<Relationship Id="{rel_id}" Type="{NS_DOC_REL}/worksheet" '
-            f'Target="/{new_part}"/>'.encode()
-            + workbook_rels[rels_close:]
+        workbook_rels = insert_before_close(
+            workbook_rels,
+            "Relationships",
+            f'<Relationship xmlns="{NS_PKG_REL}" Id="{rel_id}" '
+            f'Type="{NS_DOC_REL}/worksheet" Target="/{new_part}"/>',
         )
-        types_close = content_types.rindex(b"</Types>")
-        content_types = (
-            content_types[:types_close]
-            + f'<Override PartName="/{new_part}" ContentType="{WORKSHEET_TYPE}"/>'.encode()
-            + content_types[types_close:]
+        content_types = insert_before_close(
+            content_types,
+            "Types",
+            f'<Override xmlns="{NS_TYPES}" PartName="/{new_part}" ContentType="{WORKSHEET_TYPE}"/>',
         )
-        new_rels = None
-        if sheet_rels is not None and HYPERLINK.search(sheet_xml):
-            links = re.findall(
-                rb"<Relationship\b[^>]*?Type=\"" + re.escape(HYPERLINK_REL.encode()) + rb'"[^>]*/>',
-                sheet_rels,
-            )
-            new_rels = (
-                b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-                + f'<Relationships xmlns="{NS_PKG_REL}">'.encode()
-                + b"".join(links)
-                + b"</Relationships>"
-            )
+        if not verify_package(
+            workbook_xml, workbook_rels, content_types, sheet_name, rel_id, new_part
+        ):
+            return False
 
         replaced = {
             workbook_name: workbook_xml,
             workbook_rels_name: workbook_rels,
-            "[Content_Types].xml": content_types,
+            types_name: content_types,
         }
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
             for info in archive.infolist():
@@ -854,6 +900,33 @@ def xml_copy(path: Path, sheet_path: str, sheet_name: str, cells: dict, output: 
             if new_rels is not None:
                 target.writestr(f"xl/worksheets/_rels/sheet{number}.xml.rels", new_rels)
     return True
+
+
+def verify_package(
+    workbook_xml, workbook_rels, content_types, sheet_name: str, rel_id: str, new_part: str
+) -> bool:
+    """The edited parts parse, IDs stay unique, and the new sheet resolves to its part."""
+    if None in (workbook_xml, workbook_rels, content_types):
+        return False
+    book = parse_xml(workbook_xml, f"{{{NS_MAIN}}}workbook")
+    rels = parse_xml(workbook_rels, f"{{{NS_PKG_REL}}}Relationships")
+    types = parse_xml(content_types, f"{{{NS_TYPES}}}Types")
+    if book is None or rels is None or types is None:
+        return False
+    ids = [r.get("Id") for r in relationships(rels)]
+    targets = {r.get("Id"): r.get("Target") for r in relationships(rels)}
+    entries = [
+        s.get(f"{{{NS_DOC_REL}}}id")
+        for s in book.iter(f"{{{NS_MAIN}}}sheet")
+        if s.get("name") == sheet_name
+    ]
+    overrides = {o.get("PartName") for o in types.iter(f"{{{NS_TYPES}}}Override")}
+    return (
+        len(ids) == len(set(ids))
+        and entries == [rel_id]
+        and targets.get(rel_id) == f"/{new_part}"
+        and f"/{new_part}" in overrides
+    )
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -952,7 +1025,9 @@ def apply(args) -> tuple[dict, int]:
             report["writer"] = writer
             atomic_json(report_path, report)
 
-        publish_translation(args.input, source, sheet_name, cells, output, write_report)
+        publish_translation(
+            args.input, source, sheet_name, cells, output, write_report, args.writer
+        )
         return report, 4 if missing else 0
     finally:
         source.workbook.close()
@@ -994,6 +1069,13 @@ def parser() -> argparse.ArgumentParser:
     application.add_argument("--missing", choices=["error", "keep"], default="error")
     application.add_argument("--delimiter", default=None)
     application.add_argument("--overwrite", action="store_true")
+    application.add_argument(
+        "--writer",
+        choices=["auto", "xml", "openpyxl"],
+        default="auto",
+        help="auto: XML writer with openpyxl fallback (default); xml: fail instead of "
+        "falling back; openpyxl: always load and save the workbook with openpyxl",
+    )
     return root
 
 
