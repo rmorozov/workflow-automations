@@ -899,3 +899,42 @@ def test_strict_xml_writer_fails_instead_of_falling_back(tmp_path, capsys):
     assert "--writer openpyxl" in capsys.readouterr().err
     status, output = application(path, bundle, [returned], tmp_path, "--writer", "auto")
     assert status == 0 and report_writer(output) == "openpyxl"
+
+
+@pytest.mark.parametrize("spacing", [" = ", " =", "= ", "\n=\t"])
+@pytest.mark.parametrize("writer", ["auto", "xml"])
+def test_attribute_whitespace_keeps_hyperlinks_and_types(tmp_path, spacing, writer):
+    path = excel_like_workbook(tmp_path / "excel.xlsx")
+    rewrite_member(
+        path,
+        "xl/worksheets/sheet1.xml",
+        lambda data: data.replace(b'r:id="rId1"', f'r:id{spacing}"rId1"'.encode()).replace(
+            b't="s"', f't{spacing}"s"'.encode()
+        ),
+    )
+    assert load_workbook(path)["Data"]["B2"].hyperlink.target == "https://example.com/"
+    bundle, manifest = extraction(path, tmp_path, "--translate-headings")
+    returned = reply(tmp_path, manifest)
+    status, output = application(path, bundle, [returned], tmp_path, "--writer", writer)
+    assert status == 0 and report_writer(output) == "xml"
+    result = load_workbook(output)
+    assert result["Data_en"]["B2"].value == "EN:a & <b>"
+    assert result["Data_en"]["B2"].hyperlink.target == "https://example.com/"
+    assert result["Data_en"]["A2"].value == "EN:Открыто"
+
+
+def test_other_relationship_references_never_reach_the_copy(tmp_path):
+    path = excel_like_workbook(tmp_path / "excel.xlsx")
+    # An unknown element with a relationship ID: the copy could not resolve it.
+    rewrite_member(
+        path,
+        "xl/worksheets/sheet1.xml",
+        lambda data: data.replace(b"</hyperlinks>", b'</hyperlinks><extra r:id = "rId1"/>'),
+    )
+    bundle, manifest = extraction(path, tmp_path)
+    returned = reply(tmp_path, manifest)
+    status, output = application(path, bundle, [returned], tmp_path, "--writer", "xml")
+    assert status == 2 and not output.exists()
+    status, output = application(path, bundle, [returned], tmp_path)
+    assert status == 0 and report_writer(output) == "openpyxl"
+    assert load_workbook(output)["Data_en"]["A2"].value == "EN:Открыто"
