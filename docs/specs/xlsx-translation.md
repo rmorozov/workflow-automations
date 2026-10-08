@@ -82,6 +82,7 @@ files never need to repeat source text. Mapping row/file order is irrelevant.
 | `manifest.json` | Schema, settings, dictionary, cell references, source fingerprint, batch inventory |
 | `summary.json` | Unique/eligible counts, character totals, per-column counts |
 | `prompt.txt` | Languages, column context, and response instructions |
+| `agent_prompt.md` | Agent-mode instructions and work-unit checklist; written only when CSV units exist |
 
 Column IDs are based on physical positions, not arbitrary heading text; filenames
 and sheet names remain safe. Selected columns with no eligible text get empty
@@ -109,6 +110,21 @@ and the generated reply. The prompt asks for every ID once and only the target
 two-column schema, proper CSV quoting, no prose/code fences, and preservation of
 placeholders/markup. It tells the model to treat source text as data. Placeholder
 correctness and semantic translation quality remain human review responsibilities.
+
+## Agent mode
+
+`agent_prompt.md` drives an LLM agent with file access and a small context window.
+Work units are the batches when batching is enabled, otherwise the per-column (or
+global) source CSVs; an XLSX-only extraction without batches has no units and no
+agent prompt. The prompt states the absolute bundle directory and uses paths
+relative to it. It contains the same reply rules and column context as `prompt.txt`,
+the delimiter, and a checklist of each unit, its row count and its reply path
+`replies/<unit file name>`. Steps: process units in order, reading only the current
+unit; write a two-column reply with one row per source row; verify row count and
+IDs; skip a unit whose reply already has the expected row count, so runs resume.
+Finally run `apply` with the original workbook's absolute path, the bundle manifest,
+every reply path listed explicitly, and output `translated.<language>.xlsx` in the
+bundle. `apply` validation is unchanged and remains the authority on completeness.
 
 ## Mapping validation and application
 
@@ -198,7 +214,8 @@ Tests use generated, synthetic real workbooks to cover repeated values, per-colu
 versus global scope, XLSX/CSV/mixed replies, reply reordering, NA/leading-zero text,
 embedded CSV punctuation/newlines, blanks/numbers/dates/booleans/formulas, literal
 formula-like text, strict/partial completeness, foreign IDs, conflicts, batch
-coverage/limits, headings, changed source, manifest validation, and safe overwrite.
+coverage/limits, headings, changed source, manifest validation, safe overwrite, and an
+agent-mode round trip that follows the prompt's checklist and apply command.
 
 V1 reads the selected worksheet and manifest into memory. Column-wise dictionary
 work uses pandas; workbook metadata and references require Python iteration. No

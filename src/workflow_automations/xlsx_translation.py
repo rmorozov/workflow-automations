@@ -337,6 +337,17 @@ def extract(args) -> dict:
                 + "\n"
             )
             (staged / "prompt.txt").write_text(prompt, encoding="utf-8")
+            units = (
+                [(item["path"], item["rows"]) for item in inventory]
+                if inventory
+                else [(f"sources/{scope}.csv", len(sources[scope])) for scope in scopes]
+                if "csv" in args.formats
+                else []
+            )
+            if units:
+                (staged / AGENT_PROMPT).write_text(
+                    agent_prompt(args, destination, prompt, units), encoding="utf-8"
+                )
             manifest["batches"] = inventory
             (staged / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
             (staged / "manifest.json").write_text(
@@ -347,6 +358,73 @@ def extract(args) -> dict:
         return summary
     finally:
         workbook.close()
+
+
+AGENT_PROMPT = "agent_prompt.md"
+
+
+def agent_prompt(args, bundle: Path, rules: str, units: list[tuple[str, int]]) -> str:
+    """Step-by-step instructions for a file-capable LLM agent with a small context window.
+
+    The agent handles one CSV work unit at a time and writes one reply file per unit,
+    so no step needs more than one unit's text in context.
+    """
+    target = args.target_language
+    replies = [f"replies/{Path(path).name}" for path, _ in units]
+    lines = [
+        f"# Translate this bundle from {args.source_language} to {target}",
+        "",
+        f"Bundle directory: `{bundle}`. All paths below are relative to it; work from there.",
+        f"There are {len(units)} work units with {sum(rows for _, rows in units)} rows in total.",
+        "",
+        "Keep context small: read one work unit at a time, and do not open `manifest.json`,",
+        "`sources.xlsx`, or other work units while translating. This file and the unit you are",
+        "working on are all you need.",
+        "",
+        "## Rules for every reply",
+        "",
+        rules.rstrip("\n"),
+        f"Use the delimiter `{args.delimiter}` and UTF-8 encoding.",
+        "",
+        "## Steps",
+        "",
+        "1. Create the `replies` directory if it does not exist.",
+        "2. For each unit in the checklist below, in order:",
+        "   1. If its reply file already exists with a header and as many rows as the",
+        "      checklist's Rows value, it is done; skip it. This makes the run resumable.",
+        "   2. Read only that unit. Its columns are `text_id` and `source_text`.",
+        f"   3. Write the reply file with the header `text_id{args.delimiter}"
+        f"translated_text_{target}` and one row per source row, in the same order.",
+        "   4. Check the reply: same row count and the same IDs as the unit. Fix it if not.",
+        "   5. Move on without re-reading finished units or replies.",
+        "3. When every unit has a reply, run the apply command below if you can run commands.",
+        "   Otherwise report that the replies are ready. It fails on missing or unknown IDs;",
+        "   if so, fix the reply it names and run it again.",
+        "",
+        "## Checklist",
+        "",
+        "| Unit | Rows | Reply |",
+        "| --- | --- | --- |",
+        *(
+            f"| `{path}` | {rows} | `{reply_path}` |"
+            for (path, rows), reply_path in zip(units, replies, strict=True)
+        ),
+        "",
+        "## Apply",
+        "",
+        "Run in the bundle directory (in PowerShell, end lines with a backtick instead of `\\`):",
+        "",
+        "```bash",
+        "xlsx-translate apply \\",
+        f'  --input "{args.input.resolve()}" \\',
+        "  --manifest manifest.json \\",
+        "  --mappings \\",
+        *(f"    {reply_path} \\" for reply_path in replies),
+        f"  --output translated.{target}.xlsx",
+        "```",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def load_manifest(path: Path) -> dict:
