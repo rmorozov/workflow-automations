@@ -197,8 +197,9 @@ rewritten as inline strings with their style kept. Parts a second sheet cannot s
 dropped from the copy, and `tabSelected` and `codeName` are cleared from the
 `sheetView` and `sheetPr` tags only; cell text is never touched. External hyperlinks
 are kept. Package parts (workbook, its relationships, content types, the sheet's
-relationships) are read with a namespace-aware XML parser, so any quoting and any
-namespace prefix are understood; the new entries are inserted textually, keeping the
+relationships) and the copied sheet outside its cell data are read with a
+namespace-aware XML parser, so quoting, namespace prefixes and whitespace around `=`
+are understood; the new entries are inserted textually, keeping the
 original prefixes Excel relies on, and the edited parts are parsed again to verify
 that relationship IDs are unique and the new sheet resolves to its part. If the copy
 would still reference other sheet parts, a hyperlink ID has no hyperlink

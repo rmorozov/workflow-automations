@@ -709,13 +709,15 @@ UNSHAREABLE = re.compile(
     rb"oleObjects|controls)\b[^>]*?(?:/>|>.*?</(?P=p)?(?P=tag)>)",
     re.S,
 )
-RELATIONSHIP_ID = re.compile(rb"\s[\w.-]+:id=" + QUOTED)
-HYPERLINK = re.compile(rb"<(?:[\w.-]+:)?hyperlink\b[^>]*>")
-HYPERLINK_ID = re.compile(rb"""\s[\w.-]+:id=(?:"([^"]*)"|'([^']*)')""")
+RELATIONSHIP_ID = re.compile(rb"\s[\w.-]+:id\s*=\s*" + QUOTED)
+# Cells never carry relationship attributes, so the sheet is checked without its data.
+SHEET_DATA = re.compile(
+    rb"<(?P<p>[\w.-]+:)?sheetData\b[^>]*?(?:/>|>.*?</(?P=p)?sheetData\s*>)", re.S
+)
 PAGE_SETUP = re.compile(rb"<(?:[\w.-]+:)?pageSetup\b[^>]*>")
 # One selected tab and unique VBA code names per workbook; only in these start tags.
 VIEW_TAGS = re.compile(rb"<(?:[\w.-]+:)?(?:sheetView|sheetPr)\b[^>]*>")
-VIEW_ATTRS = re.compile(rb"\s(?:tabSelected|codeName)=" + QUOTED)
+VIEW_ATTRS = re.compile(rb"\s(?:tabSelected|codeName)\s*=\s*" + QUOTED)
 
 
 def xml_escape_text(text: str) -> bytes:
@@ -750,6 +752,25 @@ def relationships(root) -> list:
     return list(root.iter(f"{{{NS_PKG_REL}}}Relationship"))
 
 
+def hyperlink_ids(sheet_xml: bytes) -> set[str] | None:
+    """Relationship IDs of the sheet's hyperlinks, read with a namespace-aware parser.
+
+    None when the sheet cannot be parsed or any other element references a
+    relationship, since the copy would then point at parts it does not have.
+    """
+    root = parse_xml(SHEET_DATA.sub(b"", sheet_xml, count=1), f"{{{NS_MAIN}}}worksheet")
+    if root is None:
+        return None
+    ids = set()
+    for element in root.iter():
+        for key, value in element.attrib.items():
+            if key.startswith(f"{{{NS_DOC_REL}}}"):
+                if element.tag != f"{{{NS_MAIN}}}hyperlink" or key != f"{{{NS_DOC_REL}}}id":
+                    return None
+                ids.add(value)
+    return ids
+
+
 def xml_copy(path: Path, sheet_path: str, sheet_name: str, cells: dict, output: Path) -> bool:
     """Add the translated sheet at the XML level; False when the fast path does not apply.
 
@@ -766,8 +787,9 @@ def xml_copy(path: Path, sheet_path: str, sheet_name: str, cells: dict, output: 
         sheet_xml = UNSHAREABLE.sub(b"", sheet_xml)
         sheet_xml = VIEW_TAGS.sub(lambda m: VIEW_ATTRS.sub(b"", m.group(0)), sheet_xml)
         sheet_xml = PAGE_SETUP.sub(lambda m: RELATIONSHIP_ID.sub(b"", m.group(0)), sheet_xml)
-        # Only external hyperlinks may keep relationship IDs; their targets are copied below.
-        if RELATIONSHIP_ID.search(HYPERLINK.sub(b"", sheet_xml)):
+        # Only hyperlinks may keep relationship IDs; their targets are copied below.
+        link_ids = hyperlink_ids(sheet_xml)
+        if link_ids is None:
             return False
 
         letters = {get_column_letter(column) for _row, column in cells}
@@ -786,7 +808,7 @@ def xml_copy(path: Path, sheet_path: str, sheet_name: str, cells: dict, output: 
                 if text is None:
                     return match.group(0)
                 p = match["p"] or b""
-                attrs = re.sub(rb"\s(?:t|cm|vm)=" + QUOTED, b"", match["attrs"])
+                attrs = re.sub(rb"\s(?:t|cm|vm)\s*=\s*" + QUOTED, b"", match["attrs"])
                 ref = match["col"] + match["row"]
                 return b"".join(
                     [
@@ -801,10 +823,6 @@ def xml_copy(path: Path, sheet_path: str, sheet_name: str, cells: dict, output: 
             return False
 
         # Hyperlinks keep their IDs, so each must resolve to a copied relationship.
-        link_ids = {
-            (m[0] or m[1]).decode()
-            for m in HYPERLINK_ID.findall(b"".join(HYPERLINK.findall(sheet_xml)))
-        }
         new_rels = None
         if link_ids:
             sheet_rels = (
