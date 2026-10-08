@@ -351,3 +351,93 @@ def test_merge_validation(original, tmp_path, capsys):
     assert "changed since the outline was written" in error(md)
     status, _, err = unfold(capsys, "--input", md, "--into", original, "--output", original)
     assert status == 2 and "new file" in err
+
+
+def round_trip(tmp_path, capsys, rows, *options):
+    """Outline rows with tags and front matter, then unfold and merge without edits."""
+    path = tmp_path / "round.xlsx"
+    wb = Workbook()
+    for row in rows:
+        wb.active.append(row)
+    wb.save(path)
+    md = tmp_path / "round.md"
+    argv = ["--input", path, "--output", md, "--row-ids", "--front-matter", "--overwrite"]
+    assert xlsx_outline.main([str(a) for a in [*argv, *options]]) == 0
+    new, merged_path = tmp_path / "new.xlsx", tmp_path / "merged.xlsx"
+    for extra, output in [([], new), (["--into", path], merged_path)]:
+        status, _, err = unfold(capsys, "--input", md, "--output", output, "--overwrite", *extra)
+        assert status == 0, err
+    capsys.readouterr()
+    return md.read_text(), table(new), values(load_workbook(merged_path), "Sheet")
+
+
+@pytest.mark.parametrize("position", ["middle", "end"])
+def test_merge_keeps_rows_with_uncached_formulas(tmp_path, capsys, position):
+    rows = [["Area", "Task"], ["A", "One"], [None, "=1+1"], ["B", "Two"]]
+    if position == "end":
+        rows = [rows[0], rows[1], rows[3], rows[2]]
+    path = tmp_path / "formulas.xlsx"
+    wb = Workbook()
+    for row in rows:
+        wb.active.append(row)
+    wb.save(path)
+    md = tmp_path / "formulas.md"
+    argv = ["--input", path, "--output", md, "--row-ids", "--front-matter"]
+    assert xlsx_outline.main([str(a) for a in argv]) == 0
+    md.write_text(md.read_text() + "- C\n")
+    result = tmp_path / "merged.xlsx"
+    status, out, _ = unfold(capsys, "--input", md, "--into", path, "--output", result)
+    assert status == 0
+    assert "1 added, 0 deleted, 1 without outline values kept at the end" in out
+    merged_rows = values(load_workbook(result), "Sheet")
+    assert merged_rows[-1] == [None, "=1+1"]
+    assert sorted(map(str, merged_rows[1:-1])) == sorted(
+        map(str, [["A", "One"], ["B", "Two"], ["C", None]])
+    )
+
+
+def test_detail_values_containing_later_labels_round_trip(tmp_path, capsys):
+    rows = [
+        ["Area", "Owner", "Due"],
+        ["A", "Ask; Due: tomorrow", None],
+        ["B", "Ask; Due: soon", "today"],
+        ["C", "x\\", "y"],
+    ]
+    text, new, merged = round_trip(tmp_path, capsys, rows, "--levels", "1")
+    assert "- Owner: Ask\\; Due: tomorrow <!-- rows: 2 -->" in text
+    assert new == merged == rows
+
+
+def test_hierarchy_items_that_look_like_details_round_trip(tmp_path, capsys):
+    rows = [["Area", "Item", "Owner"], ["A", "Owner: Ann", None], ["A", None, "Bob"]]
+    text, new, merged = round_trip(tmp_path, capsys, rows, "--levels", "2")
+    assert "  - Owner\\: Ann <!-- rows: 2 -->\n  - Owner: Bob <!-- rows: 3 -->\n" in text
+    assert new == merged == rows
+
+
+def test_trailing_hashes_in_headings_round_trip(tmp_path, capsys):
+    rows = [["Area #", "Task"], ["Feature #", "One"], ["C ##", "Two"], ["#", "Three"]]
+    expected = {
+        (): "# Feature \\#",
+        ("--label-levels",): "# Area #: Feature \\#",
+        ("--title", "Plan #"): "# Plan \\#\n\n## Feature \\#",
+    }
+    for options, heading in expected.items():
+        text, new, merged = round_trip(tmp_path, capsys, rows, "--heading-levels", "1", *options)
+        assert heading in text
+        assert new == merged == rows
+
+
+def test_blank_label_literal_text_round_trips(tmp_path, capsys):
+    rows = [["Area", "Item"], [None, "X"], ["[empty]", "Y"], ["(empty)", "Z"]]
+    text, new, merged = round_trip(tmp_path, capsys, rows, "--blank-label", "(empty)")
+    assert "- (empty)\n  - X" in text and "- \\(empty)\n  - Z" in text
+    assert new == merged == rows
+
+
+def test_blank_label_must_be_reversible(tmp_path, capsys):
+    path = source(tmp_path)
+    for label in ["EMPTY", "[empty]", " (x)", ""]:
+        status = xlsx_outline.main(["--input", str(path), "--blank-label", label])
+        assert status == 2
+        assert "--blank-label must start with ASCII punctuation" in capsys.readouterr().err
