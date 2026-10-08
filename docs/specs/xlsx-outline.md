@@ -1,7 +1,9 @@
 # XLSX outline specification, v1
 
 Status: implemented initial contract. Entry points: `xlsx-outline`,
-`python scripts/xlsx_outline.py`, or `python -m workflow_automations.xlsx_outline`.
+`python scripts/xlsx_outline.py`, or `python -m workflow_automations.xlsx_outline`;
+the reverse is `xlsx-unfold`, `python scripts/xlsx_unfold.py`, or
+`python -m workflow_automations.xlsx_unfold` (see [Unfold](#unfold-outline-to-table)).
 
 ## Goal
 
@@ -106,6 +108,23 @@ renders the first N hierarchy levels as `#` headings and deeper levels as bullet
 heading levels, so headings including the title cannot exceed six. `--label-levels`
 prefixes each hierarchy item with its column heading (`Team: Core`).
 
+A blank cell renders as the blank label verbatim. Text equal to the label (and
+starting with punctuation, as the default `(blank)` does) gets a leading backslash, so
+`\(blank)` is text and `(blank)` is a blank cell; `--raw` cannot keep them apart.
+
+`--row-ids` ends each item that stands for sheet rows with an HTML comment such as
+`<!-- rows: 3 4 -->`: the sheet row numbers whose path ends at that item (several
+when the outline merged duplicate rows), or the one row a detail line came from.
+Rendered Markdown hides the comment; `xlsx-unfold --into` uses it to merge edits back.
+
+`--front-matter` is optional. It starts the file with a YAML block under the key
+`xlsx-outline` holding format `version`, the source `sheet`, the `levels` and `details`
+column names, and the `title`, `label_levels`, `blank_label`, `raw` and `fill_down`
+settings `xlsx-unfold` needs; with `--row-ids` it also holds a `fingerprint` of the
+selected values. Values are JSON scalars and lists, which are also valid YAML.
+Mind-map editors differ in what they do with front matter (some keep it, some drop
+it, some render it), so every setting can also be passed to `xlsx-unfold` directly.
+
 Cell text is escaped so it reads literally: backslash, backtick, `*`, `_`, brackets
 and angle brackets are backslash-escaped, as are a leading `#`, `-` or `+` followed
 by a space, a leading `---`, and `1.` or `1)` followed by a space. `--raw` disables
@@ -124,13 +143,130 @@ through a temporary file and an atomic rename. An existing output requires
 | 2 | Invalid workbook layout, column selection, or option combination |
 | 3 | File IO failure, including an unreadable workbook |
 
+## Unfold: outline to table
+
+`xlsx-unfold` reverses the outline, so a sheet can be edited as a mind map and
+brought back. It has two modes:
+
+- **New workbook** (`xlsx-unfold --input plan.md --output table.xlsx`): writes the
+  unfolded rows to a new workbook. It needs no row tags and no front matter.
+- **Merge** (`--into original.xlsx`): writes a copy of the original workbook in which
+  the sheet's data rows follow the edited outline. Rows are matched by `--row-ids`
+  tags, so columns that were not in the outline, unchanged values, formulas and
+  formatting stay with their row.
+ Folding removed only
+duplication: every path from the root to a leaf is one row. Unfolding therefore
+turns structural edits into row edits. Renaming an item renames that column value
+in every row beneath it, moving a subtree rewrites its parent columns, deleting an
+item deletes its rows, and adding an item adds a row.
+
+### Reading the outline
+
+The input is UTF-8 Markdown made only of ATX headings (`#` to `######`, optional
+closing `#`s), list items (`-`, `*`, `+`, `1.` or `1)` markers) and blank lines. Any
+other line, such as a paragraph or note, is an error naming its line number, rather
+than being guessed at. Tabs count as four spaces.
+
+Nesting follows the document. A heading's parent is the nearest earlier heading of
+a lower level, so skipped levels (`##` then `####`) are fine. A list item's parent
+is the nearest earlier list item with less indentation, or else the heading above it.
+Indentation width can differ from what `xlsx-outline` wrote, as long as it is
+consistent with nesting. With `title`, the first heading is the document title, not
+an item.
+
+### Settings
+
+Settings come from the `xlsx-outline` front matter when present. Command-line
+options override it, for files whose editor dropped the front matter: `--columns`
+(level column names, outermost first), `--details` (detail column names in order),
+`--title`, `--label-levels`, `--blank-label`, `--raw`, `--fill-down` and `--sheet`.
+Without level names, the
+columns are named `Level 1`, `Level 2` and so on, up to the deepest item. Level and
+detail names must be unique.
+
+### Rows
+
+Items are read in document order:
+
+- A leaf item that is not a detail line produces one row: its path, with deeper
+  level columns blank.
+- A leaf item that reads as `Name: value; Name: value`, with detail names in column
+  order, is a detail line. It produces one row: its parent's path plus those detail
+  values. Because names must appear in column order, a value containing
+  `; Name: ` for an earlier or the same column stays part of the value. Without
+  detail names, no item is a detail line.
+- An item with children produces no row of its own; its rows come from beneath it,
+  unless it carries row tags (rows whose path ends at it).
+- An item with several row tags produces one row per tag, so tagged outlines restore
+  duplicate rows the outline merged. Without tags, an item produces one row.
+
+Item text is unescaped (a backslash before ASCII punctuation is removed) unless
+`raw` is set. With `label_levels`, a leading `Column: ` prefix for the item's level
+is removed. Text equal to the blank label (compared before unescaping) becomes a
+blank cell. An item deeper than the known level columns is an error.
+
+Without edits, unfolding an outline (with its settings) to a new workbook restores
+the selected columns of the sheet, with these limits:
+
+- Columns not selected for the outline are not in it and do not come back.
+- Every value comes back as text; numbers, dates and booleans are not retyped.
+- Without row tags, rows that the outline merged do not come back as separate rows:
+  adjacent duplicate rows and a row whose shorter path is already covered by other
+  rows. Repeats merged by `--group` come back in grouped order.
+- Under `#` headings, a detail line printed after a child section is read as
+  belonging to that section.
+
+### Merge into the original
+
+`--into` names the original workbook and `--sheet` its sheet (default: the front
+matter `sheet`, else the first sheet). Level names are required, and every level and
+detail name must appear exactly once in row 1. The outline needs at least one row
+tag; an outline whose editor dropped every tag is refused instead of being read as
+"delete every row". When the front matter has a `fingerprint`, the sheet's selected
+values must still match it, so edits are never merged into a sheet that changed
+after the outline was written. Without front matter there is no such check.
+
+The data rows (row 2 to the last row with a value) are rewritten in outline order:
+
+- A tagged row copies every cell of its source row (values, formulas, styles,
+  hyperlinks, comments) and its height, then writes each selected column whose text
+  differs from what the outline showed. Changed values are written as literal text;
+  unchanged cells keep their type. With `fill_down`, a parent the outline filled in
+  stays blank unless it was edited.
+- An untagged item is a new row with only its selected columns filled.
+- A tag used twice copies its source row twice.
+- A source row with outline values whose tag is gone is deleted.
+- A source row with no selected values but other data could not appear in the
+  outline; it is kept, after the outline rows.
+
+The summary counts updated, added, deleted and kept rows. Formulas are copied
+unchanged, so relative references in moved rows are not adjusted. Merged cells
+below the heading row are refused. Excel tables, data validation and conditional
+formatting ranges are not adjusted. Other sheets are copied as openpyxl preserves
+them; charts and images are outside this tool's fidelity guarantees.
+
+### Output
+
+The new-workbook mode writes one sheet (`--sheet`, default `Outline`): row 1 holds
+the level then detail names, and each row follows in document order. Every value is
+stored as literal text, so `=1+1` stays text. Both modes save to a temporary file,
+check it by reopening, and rename it into place. An existing output requires
+`--overwrite`; neither the outline nor the `--into` workbook is accepted as the
+output, so the original is never modified.
+Exit codes match `xlsx-outline`: 0 written, 2 invalid outline or options, 3 file IO.
+
 ## Verification and future work
 
 Tests use generated workbooks to cover folding in sheet order and with `--group`,
 headings with title and labels, column reordering, trailing and inner blanks,
 `--fill-down` parent boundaries, runs ended by a shorter row, blank cells versus
 label text, detail order around children, formatting far from the data, merged cells, value formatting, escaping, cached
-formula values, output overwrite protection and validation errors.
+formula values, output overwrite protection and validation errors. Unfold tests
+cover round trips with and without headings, titles and labels; rename, move, delete
+and add edits; mind-map formatting (other markers, tabs, skipped heading levels);
+generic level names; literal formula-like text; restored duplicate rows; merges
+without edits, with rename, move, delete, add and value edits, without front matter
+and with fill-down; and outline and merge validation errors.
 
 The value-bearing table is read into memory. Only cells stored in the file are
 visited, so formatting far outside the data does not enlarge the work. Deferred items are listed in the

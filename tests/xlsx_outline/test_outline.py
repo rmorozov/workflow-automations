@@ -250,9 +250,9 @@ def test_blank_cell_differs_from_blank_label_text(tmp_path, capsys):
         tmp_path / "blank.xlsx", [["Area", "Item"], [None, "X"], ["(blank)", "Y"], [None, "Z"]]
     )
     _, out, _ = run(capsys, "--input", path, "--group")
-    assert out == "- (blank)\n  - X\n  - Z\n- (blank)\n  - Y\n"
+    assert out == "- (blank)\n  - X\n  - Z\n- \\(blank)\n  - Y\n"
     _, out, _ = run(capsys, "--input", path)
-    assert out == "- (blank)\n  - X\n- (blank)\n  - Y\n- (blank)\n  - Z\n"
+    assert out == "- (blank)\n  - X\n- \\(blank)\n  - Y\n- (blank)\n  - Z\n"
 
 
 def test_details_keep_row_order_around_children(tmp_path, capsys):

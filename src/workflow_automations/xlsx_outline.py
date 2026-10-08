@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import re
 import sys
@@ -15,6 +17,7 @@ from zipfile import BadZipFile
 from openpyxl import load_workbook
 
 MAX_HEADING_LEVEL = 6
+FRONT_MATTER_KEY = "xlsx-outline"
 
 
 class ValidationError(ValueError):
@@ -27,8 +30,16 @@ class Node:
     key: str | None
     children: list[Node] = field(default_factory=list)
     # Children and detail rows in the order the sheet introduced them.
-    items: list[Node | list[str | None]] = field(default_factory=list)
+    items: list[Node | Detail] = field(default_factory=list)
     index: dict[str | None, Node] = field(default_factory=dict)
+    # Sheet rows whose path ends here and that carry no details.
+    rows: list[int] = field(default_factory=list)
+
+
+@dataclass
+class Detail:
+    values: list[str | None]
+    row: int
 
 
 def text(value) -> str | None:
@@ -61,8 +72,8 @@ def escape(value: str) -> str:
     return re.sub(r"^(\d{1,9})([.)])(?=\s|$)", r"\1\\\2", value)
 
 
-def read_table(path: Path, sheet: str | None) -> tuple[list[str], list[list[str | None]]]:
-    """Return row-1 headings and the rendered data rows of the selected sheet."""
+def read_table(path: Path, sheet: str | None) -> tuple[str, list[str], list[list[str | None]]]:
+    """Return the sheet title, row-1 headings and rendered data rows (from sheet row 2)."""
     if path.suffix.lower() != ".xlsx":
         raise ValidationError("Input must be an .xlsx workbook")
     # data_only reads the values Excel cached for formulas when the file was last saved.
@@ -97,7 +108,7 @@ def read_table(path: Path, sheet: str | None) -> tuple[list[str], list[list[str 
             [text(cells.get((row, column))) for column in range(1, columns + 1)]
             for row in range(2, rows + 1)
         ]
-        return headings, data
+        return ws.title, headings, data
     finally:
         workbook.close()
 
@@ -126,18 +137,33 @@ def select_columns(
     return selected
 
 
-def build_tree(rows, levels: int, fill_down: bool, group: bool) -> Node:
-    """Fold rows into a tree; equal leading values share one parent node."""
-    root = Node(None)
+def fingerprint(sheet: str, names: list[str], rows) -> str:
+    """Identify the selected values of a sheet, so a merge can detect later changes."""
+    payload = json.dumps([sheet, names, rows], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def fill_down(rows, levels: int) -> list[list[str | None]]:
+    """Give blank hierarchy cells the value above them, within the same parent."""
+    filled = []
     previous: list[str | None] = [None] * levels
-    active: list[Node] = []
     for row in rows:
         values = list(row[:levels])
         for level in range(levels):
             # Fill only within the same parent, so a new group never inherits children.
-            if values[level] is None and fill_down and values[:level] == previous[:level]:
+            if values[level] is None and values[:level] == previous[:level]:
                 values[level] = previous[level]
-        previous = values[:]
+        previous = values
+        filled.append(values + list(row[levels:]))
+    return filled
+
+
+def build_tree(rows, levels: int, fill: bool, group: bool) -> Node:
+    """Fold rows into a tree; equal leading values share one parent node."""
+    root = Node(None)
+    active: list[Node] = []
+    for number, row in enumerate(fill_down(rows, levels) if fill else rows, 2):
+        values = list(row[:levels])
         details = row[levels:]
         while values and values[-1] is None:
             values.pop()
@@ -165,7 +191,9 @@ def build_tree(rows, levels: int, fill_down: bool, group: bool) -> Node:
             node = child
         active = path
         if any(value is not None for value in details):
-            node.items.append(details)
+            node.items.append(Detail(details, number))
+        else:
+            node.rows.append(number)
     return root
 
 
@@ -180,6 +208,7 @@ def render(
     indent: int,
     raw: bool,
     blank_label: str,
+    row_ids: bool = False,
 ) -> str:
     out: list[str] = []
     quote = (lambda value: value) if raw else escape
@@ -199,17 +228,31 @@ def render(
         ]
         return "; ".join(parts) or None
 
+    def item_label(key: str | None) -> str:
+        if key is None:
+            return blank_label
+        label = quote(key)
+        # Keep text that reads like the blank label distinct from a blank cell.
+        if label == blank_label and not raw and re.match(r"[!-/:-@\[-`{-~]", label):
+            label = "\\" + label
+        return label
+
+    def tag(rows: list[int]) -> str:
+        # An HTML comment is invisible in rendered Markdown and names the source rows.
+        return f" <!-- rows: {' '.join(map(str, rows))} -->" if row_ids and rows else ""
+
     def walk(node: Node, depth: int) -> None:
         bullet_depth = max(depth - heading_levels, 0)
         for child in node.items:
-            if not isinstance(child, Node):
-                line = details_line(child)
+            if isinstance(child, Detail):
+                line = details_line(child.values)
                 if line:
-                    out.append(" " * (indent * bullet_depth) + "- " + line)
+                    out.append(" " * (indent * bullet_depth) + "- " + line + tag([child.row]))
                 continue
-            label = quote(blank_label if child.key is None else child.key)
+            label = item_label(child.key)
             if label_levels:
                 label = f"{quote(headings[depth])}: {label}"
+            label += tag(child.rows)
             if depth < heading_levels:
                 block("#" * (depth + 1 + offset) + " " + label)
             else:
@@ -222,6 +265,26 @@ def render(
     while out and out[-1] == "":
         out.pop()
     return "\n".join(out) + "\n"
+
+
+def front_matter(levels: list[str], details: list[str], args, sheet: str, source: str) -> str:
+    """YAML front matter recording what xlsx-unfold needs to rebuild the table."""
+    settings = {
+        "version": 1,
+        "sheet": sheet,
+        "levels": levels,
+        "details": details,
+        "title": bool(args.title),
+        "label_levels": args.label_levels,
+        "blank_label": args.blank_label,
+        "raw": args.raw,
+        "fill_down": args.fill_down,
+    }
+    if args.row_ids:
+        settings["fingerprint"] = source
+    # JSON scalars and flow lists are valid YAML, which keeps the block dependency-free.
+    lines = [f"  {key}: {json.dumps(value, ensure_ascii=False)}" for key, value in settings.items()]
+    return "\n".join(["---", f"{FRONT_MATTER_KEY}:", *lines, "---", ""]) + "\n"
 
 
 def write_output(output: Path, content: str, protected: Path, overwrite: bool) -> None:
@@ -241,7 +304,7 @@ def write_output(output: Path, content: str, protected: Path, overwrite: bool) -
 
 
 def convert(args) -> tuple[str, int, int]:
-    headings, data = read_table(args.input, args.sheet)
+    sheet, headings, data = read_table(args.input, args.sheet)
     selected = select_columns(headings, args.columns, args.column_indices)
     levels = len(selected) if args.levels is None else args.levels
     if not 1 <= levels <= len(selected):
@@ -266,7 +329,11 @@ def convert(args) -> tuple[str, int, int]:
         indent=args.indent,
         raw=args.raw,
         blank_label=args.blank_label,
+        row_ids=args.row_ids,
     )
+    if args.front_matter:
+        source = fingerprint(sheet, names, rows)
+        content = front_matter(names[:levels], names[levels:], args, sheet, source) + content
 
     def count(node: Node) -> int:
         return sum(1 + count(child) for child in node.children)
@@ -312,6 +379,16 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--blank-label", default="(blank)", help="Label for an inner blank level")
     root.add_argument("--indent", type=int, default=2, help="Spaces per nested bullet level")
     root.add_argument("--raw", action="store_true", help="Do not escape Markdown characters")
+    root.add_argument(
+        "--row-ids",
+        action="store_true",
+        help="Tag items with their sheet rows, so xlsx-unfold --into can merge edits back",
+    )
+    root.add_argument(
+        "--front-matter",
+        action="store_true",
+        help="Start with YAML front matter that lets xlsx-unfold rebuild the table",
+    )
     return root
 
 

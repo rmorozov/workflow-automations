@@ -8,6 +8,7 @@ upload workbook data. `ado-triage` reads (never writes) an on-premise Azure DevO
 | --- | --- | --- |
 | `xlsx-translate` | Deduplicate workbook text and apply translations by ID | [XLSX translation](docs/specs/xlsx-translation.md) |
 | `xlsx-outline` | Fold repeated left-to-right sheet values into a Markdown outline | [XLSX outline](docs/specs/xlsx-outline.md) |
+| `xlsx-unfold` | Turn an edited outline back into rows, or merge it into the original | [XLSX outline](docs/specs/xlsx-outline.md#unfold-outline-to-table) |
 | `ado-triage` | Rank ADO change-request scope into a triage agenda and team summary | [ADO scope triage](docs/specs/ado-triage.md) |
 
 ## Install
@@ -116,6 +117,27 @@ sheets that leave a repeated parent blank, `--fill-down` reuses the value above
 within the same parent. Without `--output` the outline goes to standard output; an
 existing output file requires `--overwrite`. Formulas show the values Excel last
 saved.
+
+To edit the data as a mind map and bring the edits back, use `xlsx-unfold`. Each
+path from the root to a leaf becomes a row again, so renaming or moving a parent
+updates every row under it. It has two modes:
+
+```bash
+xlsx-outline --input plan.xlsx --levels 3 --row-ids --front-matter --output work/plan.md
+# edit work/plan.md: rename, move, add or delete items
+
+# 1. Unfold into a new workbook (text values, outline columns only)
+xlsx-unfold --input work/plan.md --output work/plan-table.xlsx
+# 2. Merge into a copy of the original, keeping other columns, types and formatting
+xlsx-unfold --input work/plan.md --into plan.xlsx --output work/plan-merged.xlsx
+```
+
+`--row-ids` tags items with their sheet rows in hidden `<!-- rows: N -->` comments;
+merging needs them, and the new-workbook mode uses them to restore duplicate rows.
+`--front-matter` is optional: it records the column names and settings, plus a
+fingerprint that stops a merge into a sheet changed since. If your editor drops or
+mangles front matter, leave it out and pass `--columns`, `--details` (and any other
+outline options you used) to `xlsx-unfold` instead. Neither mode modifies its inputs.
 
 ## Triage ADO scope
 

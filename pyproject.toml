@@ -13,7 +13,7 @@ dependencies = []
 
 [project.optional-dependencies]
 translation = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4"]
-outline = ["openpyxl>=3.1.5,<4"]
+outline = ["openpyxl>=3.1.5,<4", "pyyaml>=6,<7"]
 ado-triage = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4", "azure-devops>=7.1.0b4,<8"]
 # Separate: on Linux this builds gssapi and needs system Kerberos headers (libkrb5-dev).
 ado-kerberos = ["requests-kerberos>=0.15,<1"]
@@ -24,6 +24,7 @@ dev = ["pytest>=8,<10", "ruff==0.16.9", "build>=1.2,<2"]
 [project.scripts]
 xlsx-translate = "workflow_automations.xlsx_translation:main"
 xlsx-outline = "workflow_automations.xlsx_outline:main"
+xlsx-unfold = "workflow_automations.xlsx_unfold:main"
 ado-triage = "workflow_automations.ado_triage:main"
 
 [tool.setuptools.packages.find]
