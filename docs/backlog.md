@@ -14,6 +14,13 @@ These are proposals, not promises made by the current specifications.
 - Measured large-workbook performance improvements.
 - Workbook fidelity and formula-reference rewriting, with clearly defined supported features.
 
+## XLSX outline
+
+- Outline every sheet of a workbook, one heading per sheet.
+- Tables that do not start at A1 or have no heading row.
+- Detail columns as a Markdown table under each leaf instead of one line per row.
+- CSV input.
+
 ## ADO scope triage
 
 - Per-team output (one small workbook or sheet per team lead) to route actions to owners.
