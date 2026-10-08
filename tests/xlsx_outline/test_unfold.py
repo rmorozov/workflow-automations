@@ -441,3 +441,16 @@ def test_blank_label_must_be_reversible(tmp_path, capsys):
         status = xlsx_outline.main(["--input", str(path), "--blank-label", label])
         assert status == 2
         assert "--blank-label must start with ASCII punctuation" in capsys.readouterr().err
+
+
+def test_detail_names_containing_semicolons_round_trip(tmp_path, capsys):
+    rows = [
+        ["Area", "Owner", "Due; phase"],
+        ["A", "Ann", "Soon"],
+        ["B", None, "Later"],
+        ["C", "Cy", None],
+    ]
+    text, new, merged = round_trip(tmp_path, capsys, rows, "--levels", "1")
+    assert "- Owner: Ann; Due\; phase: Soon <!-- rows: 2 -->" in text
+    assert "- Due\; phase: Later <!-- rows: 3 -->" in text
+    assert new == merged == rows

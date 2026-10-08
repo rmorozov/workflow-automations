@@ -132,7 +132,8 @@ and angle brackets are backslash-escaped, as are a leading `#`, `-` or `+` follo
 by a space, a leading `---`, and `1.` or `1)` followed by a space. So that unfolding
 reads back the same text, the outline also escapes:
 
-- `;` inside a detail value (`\;`), because `; ` separates detail fields;
+- `;` inside a detail column name or value (`\;`), because `; ` separates detail
+  fields;
 - the colon of a hierarchy item that starts with a detail column name and `: `
   (`Owner\: Ann`), so it is not read as a detail line;
 - trailing `#`s after a space in a heading (`Feature \#`), which Markdown would

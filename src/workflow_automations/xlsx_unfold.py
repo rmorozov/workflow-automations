@@ -163,8 +163,10 @@ def parse_details(text: str, settings: Settings) -> list[str | None] | None:
     """Split `Name: value; Name: value` back into detail columns, or None if it is not one."""
     if not settings.details:
         return None
-    quote = (lambda value: value) if settings.raw else escape
-    names = [quote(name) for name in settings.details]
+    # Names are written like values: Markdown-escaped, with ";" escaped as a separator.
+    names = [
+        name if settings.raw else escape(name).replace(";", "\\;") for name in settings.details
+    ]
     fields: list[tuple[int, str]] = []
     last = -1
     for part in split_fields(text):
