@@ -221,11 +221,12 @@ def render(
         out.append(line)
         out.append("")
 
-    detail_names = [quote(name) for name in detail_headings]
-
-    def detail_value(value: str) -> str:
-        # "; " separates fields, so a semicolon inside a value is escaped.
+    def detail_text(value: str) -> str:
+        # "; " separates fields, so a semicolon in a name or value is escaped.
         return value if raw else quote(value).replace(";", "\\;")
+
+    detail_names = [detail_text(name) for name in detail_headings]
+    detail_value = detail_text
 
     def details_line(values) -> str | None:
         parts = [
