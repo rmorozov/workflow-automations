@@ -11,7 +11,8 @@ These are proposals, not promises made by the current specifications.
 - JSON configuration for repeatable selections, languages and batch limits.
 - Model-specific token budgeting and placeholder/markup validation.
 - Source CSV table support.
-- Measured large-workbook performance improvements.
+- Faster source reading than openpyxl's read-only parser (now the dominant cost when
+  a source must be re-verified and during extraction).
 - Workbook fidelity and formula-reference rewriting, with clearly defined supported features.
 
 ## XLSX outline
