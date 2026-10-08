@@ -17,6 +17,7 @@ from zipfile import BadZipFile
 from openpyxl import load_workbook
 
 MAX_HEADING_LEVEL = 6
+PUNCTUATION = r"[!-/:-@\[-`{-~]"
 FRONT_MATTER_KEY = "xlsx-outline"
 
 
@@ -220,10 +221,16 @@ def render(
         out.append(line)
         out.append("")
 
+    detail_names = [quote(name) for name in detail_headings]
+
+    def detail_value(value: str) -> str:
+        # "; " separates fields, so a semicolon inside a value is escaped.
+        return value if raw else quote(value).replace(";", "\\;")
+
     def details_line(values) -> str | None:
         parts = [
-            f"{quote(name)}: {quote(value)}"
-            for name, value in zip(detail_headings, values, strict=True)
+            f"{name}: {detail_value(value)}"
+            for name, value in zip(detail_names, values, strict=True)
             if value is not None
         ]
         return "; ".join(parts) or None
@@ -233,9 +240,18 @@ def render(
             return blank_label
         label = quote(key)
         # Keep text that reads like the blank label distinct from a blank cell.
-        if label == blank_label and not raw and re.match(r"[!-/:-@\[-`{-~]", label):
-            label = "\\" + label
+        if label == blank_label:
+            return "\\" + label
+        if not raw:
+            # An item reading "Detail: value" would unfold as a detail line.
+            for name in detail_names:
+                if label.startswith(name + ": "):
+                    return name + "\\" + label[len(name) :]
         return label
+
+    def heading(text: str) -> str:
+        # A space then trailing "#"s would be read as an optional closing sequence.
+        return text if raw else re.sub(r"(?<=[ \t])(#+[ \t]*)$", r"\\\1", text)
 
     def tag(rows: list[int]) -> str:
         # An HTML comment is invisible in rendered Markdown and names the source rows.
@@ -252,6 +268,8 @@ def render(
             label = item_label(child.key)
             if label_levels:
                 label = f"{quote(headings[depth])}: {label}"
+            if depth < heading_levels:
+                label = heading(label)
             label += tag(child.rows)
             if depth < heading_levels:
                 block("#" * (depth + 1 + offset) + " " + label)
@@ -260,7 +278,7 @@ def render(
             walk(child, depth + 1)
 
     if title:
-        block("# " + quote(title))
+        block("# " + heading(quote(title)))
     walk(root, 0)
     while out and out[-1] == "":
         out.pop()
@@ -316,6 +334,13 @@ def convert(args) -> tuple[str, int, int]:
         raise ValidationError("Markdown supports six heading levels, including the title")
     if args.indent < 1:
         raise ValidationError("--indent must be a positive integer")
+    # A leading backslash marks literal text equal to the label, which needs punctuation.
+    label = args.blank_label
+    if not re.match(PUNCTUATION, label or "") or escape(label) != label or label != label.strip():
+        raise ValidationError(
+            "--blank-label must start with ASCII punctuation and need no Markdown escaping, "
+            "such as (blank) or (empty)"
+        )
     rows = [[row[column] for column in selected] for row in data]
     root = build_tree(rows, levels, args.fill_down, args.group)
     names = [headings[column] for column in selected]

@@ -165,22 +165,45 @@ def parse_details(text: str, settings: Settings) -> list[str | None] | None:
         return None
     quote = (lambda value: value) if settings.raw else escape
     names = [quote(name) for name in settings.details]
-    pattern = "|".join(re.escape(name) for name in sorted(names, key=len, reverse=True))
-    starts: list[tuple[int, int, int]] = []
+    fields: list[tuple[int, str]] = []
     last = -1
-    # The outline writes details in column order, which disambiguates "; Name: " in values.
-    for match in re.finditer(rf"(?:^|; )({pattern}): ", text):
-        column = names.index(match.group(1))
-        if column > last and (starts or match.start() == 0):
-            starts.append((match.start(), match.end(), column))
+    for part in split_fields(text):
+        # The longest matching name wins when one name prefixes another.
+        matches = [
+            column
+            for column, name in enumerate(names)
+            if column > last and part.startswith(name + ": ")
+        ]
+        if matches:
+            column = max(matches, key=lambda index: len(names[index]))
+            fields.append((column, part[len(names[column]) + 2 :]))
             last = column
-    if not starts:
-        return None
+        elif fields:
+            # Hand-written text may use a bare "; " inside a value.
+            column, value = fields[-1]
+            fields[-1] = (column, f"{value}; {part}")
+        else:
+            return None
     values: list[str | None] = [None] * len(names)
-    for index, (_, value_start, column) in enumerate(starts):
-        value_end = starts[index + 1][0] if index + 1 < len(starts) else len(text)
-        values[column] = unescape(text[value_start:value_end], settings.raw) or None
+    for column, value in fields:
+        values[column] = unescape(value, settings.raw) or None
     return values
+
+
+def split_fields(text: str) -> list[str]:
+    """Split on "; " unless the semicolon is backslash-escaped."""
+    parts, start, index = [], 0, 0
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text.startswith("; ", index):
+            parts.append(text[start:index])
+            start = index = index + 2
+            continue
+        index += 1
+    parts.append(text[start:])
+    return parts
 
 
 def unfold(root: Item, settings: Settings) -> tuple[list[str], list[tuple[int | None, list]]]:
@@ -193,9 +216,13 @@ def unfold(root: Item, settings: Settings) -> tuple[list[str], list[tuple[int | 
             prefix = settings.levels[depth] if settings.raw else escape(settings.levels[depth])
             if text.startswith(prefix + ": "):
                 text = text[len(prefix) + 2 :]
-        # Compare before unescaping: the outline escapes text that equals the blank label.
-        if text.strip() == settings.blank_label:
+        # Compare before unescaping: the outline marks text equal to the blank label
+        # with a leading backslash.
+        text = text.strip()
+        if text == settings.blank_label:
             return None
+        if text == "\\" + settings.blank_label:
+            return settings.blank_label
         text = unescape(text, settings.raw)
         if not text:
             raise ValidationError(f"Line {item.line} has an empty item")
@@ -292,31 +319,35 @@ def merge(settings: Settings, headings: list[str], rows, into: Path, sheet: str 
         raise ValidationError(
             f"Sheet {title} changed since the outline was written; regenerate the outline"
         )
-    # Compare with what the outline showed, so filled-down parents stay blank in the sheet.
-    shown = fill_down(selected, len(settings.levels)) if settings.fill_down else selected
-    last = len(data) + 1
     for tag, _ in rows:
-        if tag is not None and not 2 <= tag <= last:
-            raise ValidationError(f"Row tag {tag} is outside the data rows 2-{last} of {title}")
-    used = {tag for tag, _ in rows}
-    # Rows the outline could not show (no selected value) keep their other data at the end.
-    hidden = [
-        number
-        for number, row in enumerate(data, 2)
-        if all(value is None for value in selected[number - 2])
-        and any(value is not None for value in row)
-    ]
-    deleted = sum(
-        1
-        for number in range(2, last + 1)
-        if number not in used and any(value is not None for value in selected[number - 2])
-    )
+        if tag is not None and not 2 <= tag <= len(data) + 1:
+            raise ValidationError(
+                f"Row tag {tag} is outside the data rows 2-{len(data) + 1} of {title}"
+            )
 
     workbook = load_workbook(into)
     ws = workbook[title]
     if any(area.max_row >= 2 for area in ws.merged_cells.ranges):
         workbook.close()
         raise ValidationError("Merged cells below the heading row are unsupported when merging")
+    # Row presence comes from the stored cells, not cached values: a formula Excel never
+    # calculated reads as blank in the cached view but is still data.
+    present = {row for (row, _), cell in ws._cells.items() if row >= 2 and cell.value is not None}
+    last = max([len(data) + 1, *present])
+    selected += [[None] * len(columns)] * (last - 1 - len(selected))
+    # Compare with what the outline showed, so filled-down parents stay blank in the sheet.
+    shown = fill_down(selected, len(settings.levels)) if settings.fill_down else selected
+    used = {tag for tag, _ in rows}
+    displayed = [any(value is not None for value in row) for row in selected]
+    # Rows the outline could not show keep all their data, after the outline rows.
+    hidden = [
+        number
+        for number in range(2, last + 1)
+        if number in present and number not in used and not displayed[number - 2]
+    ]
+    deleted = sum(
+        1 for number in range(2, last + 1) if number not in used and displayed[number - 2]
+    )
     # Detach the old data rows, then write them back in outline order.
     old: dict[int, dict[int, object]] = {}
     for (row, column), cell in list(ws._cells.items()):

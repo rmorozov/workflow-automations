@@ -108,9 +108,11 @@ renders the first N hierarchy levels as `#` headings and deeper levels as bullet
 heading levels, so headings including the title cannot exceed six. `--label-levels`
 prefixes each hierarchy item with its column heading (`Team: Core`).
 
-A blank cell renders as the blank label verbatim. Text equal to the label (and
-starting with punctuation, as the default `(blank)` does) gets a leading backslash, so
-`\(blank)` is text and `(blank)` is a blank cell; `--raw` cannot keep them apart.
+A blank cell renders as the blank label verbatim. Text equal to the label gets a
+leading backslash, so `\(blank)` is text and `(blank)` is a blank cell. For that
+marker to stay reversible, `--blank-label` must start with ASCII punctuation, need no
+Markdown escaping and have no surrounding spaces (`(blank)`, `(empty)`, `~`);
+other labels are rejected.
 
 `--row-ids` ends each item that stands for sheet rows with an HTML comment such as
 `<!-- rows: 3 4 -->`: the sheet row numbers whose path ends at that item (several
@@ -127,8 +129,17 @@ it, some render it), so every setting can also be passed to `xlsx-unfold` direct
 
 Cell text is escaped so it reads literally: backslash, backtick, `*`, `_`, brackets
 and angle brackets are backslash-escaped, as are a leading `#`, `-` or `+` followed
-by a space, a leading `---`, and `1.` or `1)` followed by a space. `--raw` disables
-escaping for cells that already contain Markdown.
+by a space, a leading `---`, and `1.` or `1)` followed by a space. So that unfolding
+reads back the same text, the outline also escapes:
+
+- `;` inside a detail value (`\;`), because `; ` separates detail fields;
+- the colon of a hierarchy item that starts with a detail column name and `: `
+  (`Owner\: Ann`), so it is not read as a detail line;
+- trailing `#`s after a space in a heading (`Feature \#`), which Markdown would
+  otherwise treat as an optional closing sequence.
+
+`--raw` disables escaping for cells that already contain Markdown; raw outlines only
+round-trip when cell text avoids these cases.
 
 ## Output and exit codes
 
@@ -192,9 +203,10 @@ Items are read in document order:
   level columns blank.
 - A leaf item that reads as `Name: value; Name: value`, with detail names in column
   order, is a detail line. It produces one row: its parent's path plus those detail
-  values. Because names must appear in column order, a value containing
-  `; Name: ` for an earlier or the same column stays part of the value. Without
-  detail names, no item is a detail line.
+  values. Fields split on `; ` unless the semicolon is escaped (`\;`). A hand-written
+  segment that does not start with the next detail name stays part of the previous
+  value. A leaf whose first segment is not `Name: ` with an unescaped colon is a
+  hierarchy item. Without detail names, no item is a detail line.
 - An item with children produces no row of its own; its rows come from beneath it,
   unless it carries row tags (rows whose path ends at it).
 - An item with several row tags produces one row per tag, so tagged outlines restore
@@ -202,7 +214,8 @@ Items are read in document order:
 
 Item text is unescaped (a backslash before ASCII punctuation is removed) unless
 `raw` is set. With `label_levels`, a leading `Column: ` prefix for the item's level
-is removed. Text equal to the blank label (compared before unescaping) becomes a
+is removed. The blank label marked with a leading backslash is that literal text.
+Text equal to the blank label (compared before unescaping) becomes a
 blank cell. An item deeper than the known level columns is an error.
 
 Without edits, unfolding an outline (with its settings) to a new workbook restores
@@ -236,6 +249,9 @@ The data rows (row 2 to the last row with a value) are rewritten in outline orde
 - An untagged item is a new row with only its selected columns filled.
 - A tag used twice copies its source row twice.
 - A source row with outline values whose tag is gone is deleted.
+- A source row is data when any stored cell holds a value or formula, judged from
+  the workbook itself rather than cached values, so rows of formulas Excel never
+  calculated are not lost.
 - A source row with no selected values but other data could not appear in the
   outline; it is kept, after the outline rows.
 
