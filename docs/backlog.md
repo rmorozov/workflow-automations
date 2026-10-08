@@ -17,6 +17,10 @@ These are proposals, not promises made by the current specifications.
 
 ## XLSX outline
 
+- Optional retyping of unfolded and merged numbers and dates.
+- Adjust Excel tables, data validation and conditional formatting ranges on merge.
+- Row tags in a form that more mind-map editors keep, if HTML comments get dropped.
+
 - Outline every sheet of a workbook, one heading per sheet.
 - Tables that do not start at A1 or have no heading row.
 - Detail columns as a Markdown table under each leaf instead of one line per row.
