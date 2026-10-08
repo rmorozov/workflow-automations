@@ -3,6 +3,7 @@
 import csv
 import json
 import re
+import zipfile
 from datetime import datetime
 
 import pandas as pd
@@ -239,7 +240,7 @@ def test_invalid_replies_never_publish_workbook(source, tmp_path, case):
     [
         "text_id,translated_text_en\nx,y,z\n",
         "text_id,translated_text_en\nx\n",
-        "text_id,translated_text_en\n\n",
+        "",
         "text_id,text_id\nx,y\n",
         'text_id,translated_text_en\nx,"unterminated',
     ],
@@ -468,17 +469,18 @@ def test_excel_string_limits_and_literal_mapping_files(tmp_path):
     wb.close()
 
 
-def test_io_failure_keeps_existing_output(tmp_path, monkeypatch):
-    output = tmp_path / "existing.xlsx"
+def test_io_failure_keeps_existing_output(source, tmp_path, monkeypatch):
+    bundle, manifest = extraction(source, tmp_path)
+    returned = reply(tmp_path, manifest)
+    output = tmp_path / "translated.xlsx"
     output.write_bytes(b"original")
-    wb = Workbook()
 
-    def fail(_path):
+    def fail(*_args):
         raise OSError("simulated IO error")
 
-    monkeypatch.setattr(wb, "save", fail)
-    with pytest.raises(OSError):
-        tool.atomic_workbook(wb, output)
+    monkeypatch.setattr(tool, "xml_copy", fail)
+    status, _ = application(source, bundle, [returned], tmp_path, "--overwrite")
+    assert status == 3
     assert output.read_bytes() == b"original"
     assert not list(tmp_path.glob(".translated-*"))
 
@@ -560,3 +562,203 @@ def test_agent_prompt_units_follow_export_formats(source, tmp_path):
     xlsx_only.mkdir()
     bundle, _ = extraction(source, xlsx_only, "--formats", "xlsx")
     assert not (bundle / tool.AGENT_PROMPT).exists()
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ("text_id,translated_text_en\nID,Open, now\n", "line 2 has 3 fields, expected 2"),
+        ("text_id, translated_text_en\nID,Open\n", "remove spaces around the delimiter"),
+        ("text_id;translated_text_en\nID;Open\n", "check the delimiter"),
+        ("text_id,translated_text_de\nID,Open\n", "expected 'text_id,translated_text_en'"),
+        ("```csv\n```\n", "no header row"),
+    ],
+)
+def test_csv_reply_errors_name_line_and_cause(source, tmp_path, capsys, payload, message):
+    bundle, _manifest = extraction(source, tmp_path)
+    returned = tmp_path / "bad.csv"
+    returned.write_text(payload, encoding="utf-8")
+    status, output = application(source, bundle, [returned], tmp_path)
+    assert status == 2 and not output.exists()
+    assert message in capsys.readouterr().err
+
+
+def test_csv_reply_tolerates_blank_lines_and_code_fence(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path)
+    rows = [
+        f'{e["text_id"]},"EN:{e["source_text"].replace(chr(34), chr(34) * 2)}"'
+        for e in manifest["entries"]
+    ]
+    body = "\n\n".join(rows)
+    returned = tmp_path / "fenced.csv"
+    returned.write_text(f"```csv\ntext_id,translated_text_en\n{body}\n   \n```\n\n", "utf-8")
+    status, output = application(source, bundle, [returned], tmp_path)
+    assert status == 0
+    assert load_workbook(output)["Data_en"]["A2"].value == "EN:Открыто"
+
+
+def sheet_cells(path, name):
+    ws = load_workbook(path)[name]
+    return [[(c.value, c.data_type, c.number_format) for c in row] for row in ws.iter_rows()]
+
+
+def test_xml_writer_matches_openpyxl_writer(source, tmp_path, monkeypatch):
+    bundle, manifest = extraction(source, tmp_path, "--translate-headings")
+    returned = reply(tmp_path, manifest)
+    status, fast = application(source, bundle, [returned], tmp_path)
+    assert status == 0
+    assert json.loads(fast.with_suffix(".report.json").read_text())["writer"] == "xml"
+    fast = fast.rename(tmp_path / "fast.xlsx")
+
+    monkeypatch.setattr(tool, "xml_copy", lambda *args: False)
+    status, slow = application(source, bundle, [returned], tmp_path, "--overwrite")
+    assert status == 0
+    assert json.loads(slow.with_suffix(".report.json").read_text())["writer"] == "openpyxl"
+    assert load_workbook(fast).sheetnames == load_workbook(slow).sheetnames
+    for name in load_workbook(fast).sheetnames:
+        assert sheet_cells(fast, name) == sheet_cells(slow, name), name
+    assert sheet_cells(fast, "Data") == sheet_cells(source, "Data")
+
+
+def test_sheet_parts_a_copy_cannot_share_are_dropped_from_it(tmp_path):
+    from openpyxl.worksheet.table import Table
+
+    path = tmp_path / "table.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Status"])
+    ws.append(["Открыто"])
+    ws.add_table(Table(displayName="Statuses", ref="A1:A2"))
+    wb.save(path)
+    bundle, manifest = extraction(path, tmp_path)
+    status, output = application(path, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 0
+    result = load_workbook(output)
+    assert result["Data_en"]["A2"].value == "EN:Открыто"
+    assert list(result["Data"].tables) == ["Statuses"] and not result["Data_en"].tables
+
+
+MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+DOC_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PKG_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml"
+
+
+def excel_like_workbook(path, prefix="", cell_attrs='r="{ref}" s="{s}" t="s"'):
+    """A minimal workbook written the way Excel and the OpenXML SDK write them: shared
+    strings, a bold style, an external hyperlink, optionally prefixed elements."""
+    p = f"{prefix}:" if prefix else ""
+    ns = f'xmlns{":" + prefix if prefix else ""}="{MAIN_NS}" xmlns:r="{DOC_NS}"'
+    strings = ["Status", "Открыто", "Link", "a &amp; &lt;b&gt;"]
+
+    def cell(ref, index, style=0):
+        attrs = cell_attrs.format(ref=ref, s=style)
+        return f"<{p}c {attrs}><{p}v>{index}</{p}v></{p}c>"
+
+    def rel(rid, kind, target, extra=""):
+        return f'<Relationship Id="{rid}" Type="{DOC_NS}/{kind}" Target="{target}"{extra}/>'
+
+    def override(part, kind):
+        return f'<Override PartName="/xl/{part}" ContentType="{TYPE}.{kind}+xml"/>'
+
+    files = {
+        "[Content_Types].xml": (
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" '
+            'ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            + override("workbook.xml", "sheet.main")
+            + override("worksheets/sheet1.xml", "worksheet")
+            + override("sharedStrings.xml", "sharedStrings")
+            + override("styles.xml", "styles")
+            + "</Types>"
+        ),
+        "_rels/.rels": (
+            f'<Relationships xmlns="{PKG_NS}">'
+            + rel("rId1", "officeDocument", "xl/workbook.xml")
+            + "</Relationships>"
+        ),
+        "xl/workbook.xml": (
+            f"<{p}workbook {ns}><{p}sheets>"
+            f'<{p}sheet name="Data" sheetId="1" r:id="rId1"/></{p}sheets></{p}workbook>'
+        ),
+        "xl/_rels/workbook.xml.rels": (
+            f'<Relationships xmlns="{PKG_NS}">'
+            + rel("rId1", "worksheet", "worksheets/sheet1.xml")
+            + rel("rId2", "sharedStrings", "sharedStrings.xml")
+            + rel("rId3", "styles", "styles.xml")
+            + "</Relationships>"
+        ),
+        "xl/sharedStrings.xml": (
+            f'<{p}sst {ns} count="4" uniqueCount="4">'
+            + "".join(f"<{p}si><{p}t>{text}</{p}t></{p}si>" for text in strings)
+            + f"</{p}sst>"
+        ),
+        "xl/styles.xml": (
+            f'<{p}styleSheet {ns}><{p}fonts count="2"><{p}font/><{p}font><{p}b/></{p}font>'
+            f'</{p}fonts><{p}fills count="1"><{p}fill><{p}patternFill patternType="none"/>'
+            f'</{p}fill></{p}fills><{p}borders count="1"><{p}border/></{p}borders>'
+            f'<{p}cellStyleXfs count="1"><{p}xf/></{p}cellStyleXfs><{p}cellXfs count="2">'
+            f'<{p}xf fontId="0"/><{p}xf fontId="1" applyFont="1"/></{p}cellXfs>'
+            f'<{p}cellStyles count="1"><{p}cellStyle name="Normal" xfId="0" builtinId="0"/>'
+            f"</{p}cellStyles></{p}styleSheet>"
+        ),
+        "xl/worksheets/sheet1.xml": (
+            f"<{p}worksheet {ns}><{p}sheetViews>"
+            f'<{p}sheetView tabSelected="1" workbookViewId="0"/></{p}sheetViews><{p}sheetData>'
+            f'<{p}row r="1">{cell("A1", 0, 1)}{cell("B1", 2)}</{p}row>'
+            f'<{p}row r="2">{cell("A2", 1, 1)}{cell("B2", 3)}</{p}row></{p}sheetData>'
+            f'<{p}hyperlinks><{p}hyperlink ref="B2" r:id="rId1"/></{p}hyperlinks>'
+            f"</{p}worksheet>"
+        ),
+        "xl/worksheets/_rels/sheet1.xml.rels": (
+            f'<Relationships xmlns="{PKG_NS}">'
+            + rel("rId1", "hyperlink", "https://example.com/", ' TargetMode="External"')
+            + "</Relationships>"
+        ),
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, text in files.items():
+            archive.writestr(name, text)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("prefix", "cell_attrs", "writer"),
+    [
+        ("", 'r="{ref}" s="{s}" t="s"', "xml"),
+        ("x", 'r="{ref}" s="{s}" t="s"', "xml"),
+        ("", 's="{s}" t="s" r="{ref}"', "openpyxl"),  # r not first: rewrite cannot find it
+    ],
+)
+def test_excel_style_workbook_translation(tmp_path, prefix, cell_attrs, writer):
+    path = excel_like_workbook(tmp_path / "excel.xlsx", prefix, cell_attrs)
+    before = path.read_bytes()
+    bundle, manifest = extraction(path, tmp_path, "--translate-headings")
+    status, output = application(path, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 0 and path.read_bytes() == before
+    assert json.loads(output.with_suffix(".report.json").read_text())["writer"] == writer
+    wb = load_workbook(output)
+    assert wb.sheetnames == ["Data", "Data_en"]
+    copy = wb["Data_en"]
+    assert [c.value for c in copy[1]] == ["EN:Status", "EN:Link"]
+    assert [c.value for c in copy[2]] == ["EN:Открыто", "EN:a & <b>"]
+    assert copy["A2"].font.b and copy["B2"].hyperlink.target == "https://example.com/"
+    assert [c.value for c in wb["Data"][2]] == ["Открыто", "a & <b>"]
+
+
+def test_untouched_source_skips_cell_verification(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path)
+    returned = reply(tmp_path, manifest)
+    status, output = application(source, bundle, [returned], tmp_path)
+    assert status == 0
+    assert json.loads(output.with_suffix(".report.json").read_text())["source_check"] == "unchanged"
+
+    # Any byte change, even formatting only, takes the full semantic check.
+    wb = load_workbook(source)
+    wb["Data"]["A2"].number_format = "@"
+    wb.save(source)
+    status, output = application(source, bundle, [returned], tmp_path, "--overwrite")
+    assert status == 0
+    assert json.loads(output.with_suffix(".report.json").read_text())["source_check"] == "cells"

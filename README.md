@@ -70,11 +70,16 @@ Mapping input can be one or more CSV files, XLSX workbooks, or both. Every suppl
 XLSX sheet must use the two-column translation schema. The default requires all
 translations; `--missing keep` keeps unresolved cells and exits with code 4.
 Unknown IDs and conflicting translations always fail. Reordered replies are fine.
+Blank lines and a surrounding code fence in a CSV reply are ignored; any other CSV
+problem names the file, line and likely cause (for example an unquoted comma).
 
-The original workbook is never modified. The output retains original sheets and
-adds the translated copy. Full fidelity for charts, drawings, unsupported Excel
-extensions, and formula reference rewriting is outside v1. Prefer ordinary data
-tables. Formula expressions are copied unchanged and not evaluated. CSV fields
+The original workbook is never modified. The output is a byte-for-byte copy of it
+plus the translated sheet, written at the XML level, so other sheets keep charts
+and drawings. The translated copy leaves out drawings, comments and tables, and
+formula references are not rewritten. Prefer ordinary data tables. When the
+workbook and manifest are unchanged since extraction, apply skips re-reading the
+source cells. On a 50,000-row, 10-column sheet this takes about 3 seconds instead
+of about 21. Formula expressions are copied unchanged and not evaluated. CSV fields
 are literal data to this tool; use the XLSX templates for spreadsheet editing of
 text that could be interpreted as formulas.
 

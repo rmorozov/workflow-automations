@@ -137,6 +137,13 @@ CSV and every sheet of an input XLSX mapping must contain exactly the two header
 or source-text columns/sheets are rejected. Target language tags are constrained to
 letters followed by letters/digits/hyphens/underscores, up to 35 characters.
 
+CSV replies may contain blank or whitespace-only lines and one Markdown code fence
+line (such as a line of three backticks followed by `csv`) at the start and end; these
+carry no IDs and are skipped. Any other CSV problem fails with the file, line number
+and likely cause: a different header (with hints for spaces around the delimiter or a
+different delimiter), or a row without exactly two fields (usually an unquoted
+delimiter in a translation).
+
 Validation before output:
 
 - Supported manifest schema, valid dictionary IDs, references and occurrence counts.
@@ -169,23 +176,40 @@ numbers. Formatting changes or changes outside the source table are permitted.
 Changed values, headings, row order or bounds require a new extraction. The hash
 detects accidental changes, not hostile manifest edits.
 
+Extraction also stores `fast_check`, a SHA-256 of the exact workbook bytes and the
+exact manifest content. When both are unchanged at apply time, the fingerprint and
+per-cell reference checks are skipped because they would repeat extraction's own
+reading; any byte change in either file, or a manifest without `fast_check`, takes
+the full semantic check. The report's `source_check` is `unchanged` or `cells`.
+
 ## Workbook and report output
 
-The tool loads the original workbook, copies the selected worksheet, and replaces
-only referenced cells with resolved target strings. Pandas maps reference IDs to
-translations; no text-based join with returned replies occurs. The output retains
-original sheets and adds the copy. New sheet name defaults to `<original>_<language>`;
+The output is the original workbook plus a copy of the selected worksheet in which
+only referenced cells hold resolved target strings. Reference IDs map to
+translations; no text-based join with returned replies occurs.
+
+By default the copy is made at the XML level (report `writer`: `xml`). Every member
+of the original XLSX package is copied unchanged, so original sheets keep full
+fidelity, including charts and drawings. The copied sheet XML has translated cells
+rewritten as inline strings with their style kept. Parts a second sheet cannot share
+(drawings, comments, tables, pictures, controls, OLE objects, printer settings) are
+dropped from the copy, and tab selection and code names are cleared. External
+hyperlinks are kept. If the copy would still reference other sheet parts, or a
+translated cell cannot be located (for example a producer that does not write the
+cell reference as the first attribute), the tool falls back to openpyxl (`writer`:
+`openpyxl`), which loads, copies and saves the whole workbook. New sheet name defaults to `<original>_<language>`;
 `--output-sheet` sets it explicitly. Invalid or case-insensitively colliding names,
 or translated heading collisions, fail before workbook publication.
 
 Original rows, columns, repeated occurrences, ordinary formulas and nontext cell
-types remain logically intact. openpyxl retains supported sheet formatting on a
-best-effort basis. Full fidelity for drawings, charts, advanced Excel features and
-formula-reference rewriting is outside the contract. Formula expressions may
+types remain logically intact. The openpyxl fallback retains supported formatting
+on a best-effort basis. Drawings, charts and tables in the translated copy, and
+formula-reference rewriting, are outside the contract. Formula expressions may
 continue referencing original sheets, and no cached recalculated values are promised.
 
 `<output-stem>.report.json` records bundle/language, resolved IDs, missing IDs/cells,
-translated cell count, redundant replies and complete/partial/failed status.
+translated cell count, redundant replies, complete/partial/failed status, the source
+check and the writer used.
 Same-text translations count as resolved/translated. Validation errors other than
 missing translations print diagnostics but do not promise a report.
 
@@ -214,13 +238,16 @@ Tests use generated, synthetic real workbooks to cover repeated values, per-colu
 versus global scope, XLSX/CSV/mixed replies, reply reordering, NA/leading-zero text,
 embedded CSV punctuation/newlines, blanks/numbers/dates/booleans/formulas, literal
 formula-like text, strict/partial completeness, foreign IDs, conflicts, batch
-coverage/limits, headings, changed source, manifest validation, safe overwrite, and an
-agent-mode round trip that follows the prompt's checklist and apply command.
+coverage/limits, headings, changed source, manifest validation, safe overwrite, an
+agent-mode round trip that follows the prompt's checklist and apply command, CSV
+reply diagnostics, XML and openpyxl writers producing identical cells, Excel-style
+shared-string and prefixed-namespace packages, and the unchanged-source shortcut.
 
-V1 reads the selected worksheet and manifest into memory. Column-wise dictionary
-work uses pandas; workbook metadata and references require Python iteration. No
-streaming or fixed memory ceiling is promised. Large input tables need a later
-measured optimization pass.
+V1 reads the selected worksheet and manifest into memory, streaming the sheet once
+in openpyxl's read-only mode. No fixed memory ceiling is promised. Measured on a
+synthetic 50,000-row, 10-column sheet with two translated columns: apply took 21 s
+before this design, 2.8 s with an unchanged source and about 10 s when the source
+must be re-verified; extraction about 7 s.
 
 Deferred: JSON configuration, reusable translation memories, one bundle with
 multiple languages, pending-only batch regeneration, row-context keys, token-aware
