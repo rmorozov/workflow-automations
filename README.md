@@ -75,7 +75,9 @@ problem names the file, line and likely cause (for example an unquoted comma).
 
 The original workbook is never modified. The output is a byte-for-byte copy of it
 plus the translated sheet, written at the XML level, so other sheets keep charts
-and drawings. The translated copy leaves out drawings, comments and tables, and
+and drawings. Workbooks the XML writer cannot handle safely fall back to openpyxl;
+`--writer openpyxl` always uses openpyxl and `--writer xml` fails instead of
+falling back. The translated copy leaves out drawings, comments and tables, and
 formula references are not rewritten. Prefer ordinary data tables. When the
 workbook and manifest are unchanged since extraction, apply skips re-reading the
 source cells. On a 50,000-row, 10-column sheet this takes about 3 seconds instead

@@ -141,8 +141,9 @@ CSV replies may contain blank or whitespace-only lines and one Markdown code fen
 line (such as a line of three backticks followed by `csv`) at the start and end; these
 carry no IDs and are skipped. Any other CSV problem fails with the file, line number
 and likely cause: a different header (with hints for spaces around the delimiter or a
-different delimiter), or a row without exactly two fields (usually an unquoted
-delimiter in a translation).
+different delimiter), a row without exactly two fields (usually an unquoted
+delimiter in a translation), or a CSV parser error such as an unterminated quote or
+text after a closing quote (with a hint that quotes inside a quoted field are doubled).
 
 Validation before output:
 
@@ -193,11 +194,22 @@ of the original XLSX package is copied unchanged, so original sheets keep full
 fidelity, including charts and drawings. The copied sheet XML has translated cells
 rewritten as inline strings with their style kept. Parts a second sheet cannot share
 (drawings, comments, tables, pictures, controls, OLE objects, printer settings) are
-dropped from the copy, and tab selection and code names are cleared. External
-hyperlinks are kept. If the copy would still reference other sheet parts, or a
-translated cell cannot be located (for example a producer that does not write the
-cell reference as the first attribute), the tool falls back to openpyxl (`writer`:
-`openpyxl`), which loads, copies and saves the whole workbook. New sheet name defaults to `<original>_<language>`;
+dropped from the copy, and `tabSelected` and `codeName` are cleared from the
+`sheetView` and `sheetPr` tags only; cell text is never touched. External hyperlinks
+are kept. Package parts (workbook, its relationships, content types, the sheet's
+relationships) are read with a namespace-aware XML parser, so any quoting and any
+namespace prefix are understood; the new entries are inserted textually, keeping the
+original prefixes Excel relies on, and the edited parts are parsed again to verify
+that relationship IDs are unique and the new sheet resolves to its part. If the copy
+would still reference other sheet parts, a hyperlink ID has no hyperlink
+relationship, a translated cell cannot be located (for example a producer that does
+not write the cell reference as the first attribute), or verification fails, the tool
+falls back to openpyxl (`writer`: `openpyxl`), which loads, copies and saves the whole
+workbook.
+
+`--writer` chooses the engine: `auto` (default) is the behavior above, `xml` fails
+with a validation error (exit 2) instead of falling back, and `openpyxl` always
+uses openpyxl. New sheet name defaults to `<original>_<language>`;
 `--output-sheet` sets it explicitly. Invalid or case-insensitively colliding names,
 or translated heading collisions, fail before workbook publication.
 
@@ -241,7 +253,9 @@ formula-like text, strict/partial completeness, foreign IDs, conflicts, batch
 coverage/limits, headings, changed source, manifest validation, safe overwrite, an
 agent-mode round trip that follows the prompt's checklist and apply command, CSV
 reply diagnostics, XML and openpyxl writers producing identical cells, Excel-style
-shared-string and prefixed-namespace packages, and the unchanged-source shortcut.
+shared-string and prefixed-namespace packages, single-quoted and prefixed package
+parts and sheet relationships, view-attribute text inside cells, the `--writer`
+choices, and the unchanged-source shortcut.
 
 V1 reads the selected worksheet and manifest into memory, streaming the sheet once
 in openpyxl's read-only mode. No fixed memory ceiling is promised. Measured on a

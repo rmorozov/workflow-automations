@@ -602,7 +602,7 @@ def sheet_cells(path, name):
     return [[(c.value, c.data_type, c.number_format) for c in row] for row in ws.iter_rows()]
 
 
-def test_xml_writer_matches_openpyxl_writer(source, tmp_path, monkeypatch):
+def test_xml_writer_matches_openpyxl_writer(source, tmp_path):
     bundle, manifest = extraction(source, tmp_path, "--translate-headings")
     returned = reply(tmp_path, manifest)
     status, fast = application(source, bundle, [returned], tmp_path)
@@ -610,8 +610,9 @@ def test_xml_writer_matches_openpyxl_writer(source, tmp_path, monkeypatch):
     assert json.loads(fast.with_suffix(".report.json").read_text())["writer"] == "xml"
     fast = fast.rename(tmp_path / "fast.xlsx")
 
-    monkeypatch.setattr(tool, "xml_copy", lambda *args: False)
-    status, slow = application(source, bundle, [returned], tmp_path, "--overwrite")
+    status, slow = application(
+        source, bundle, [returned], tmp_path, "--overwrite", "--writer", "openpyxl"
+    )
     assert status == 0
     assert json.loads(slow.with_suffix(".report.json").read_text())["writer"] == "openpyxl"
     assert load_workbook(fast).sheetnames == load_workbook(slow).sheetnames
@@ -762,3 +763,139 @@ def test_untouched_source_skips_cell_verification(source, tmp_path):
     status, output = application(source, bundle, [returned], tmp_path, "--overwrite")
     assert status == 0
     assert json.loads(output.with_suffix(".report.json").read_text())["source_check"] == "cells"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ('text_id,translated_text_en\nID,"unterminated\n', "bad.csv: line 2: unexpected end"),
+        ('text_id,translated_text_en\nID,"Open"x\n', "bad.csv: line 2: ',' expected after '\"'"),
+    ],
+)
+def test_csv_parser_errors_name_file_and_line(source, tmp_path, capsys, payload, message):
+    bundle, _manifest = extraction(source, tmp_path)
+    returned = tmp_path / "bad.csv"
+    returned.write_text(payload, encoding="utf-8")
+    status, output = application(source, bundle, [returned], tmp_path)
+    assert status == 2 and not output.exists()
+    error = capsys.readouterr().err
+    assert message in error and "quote inside a quoted field must be doubled" in error
+
+
+def rewrite_member(path, name, edit):
+    """Rewrite one zip member in place, as another producer would have written it."""
+    with zipfile.ZipFile(path) as archive:
+        members = [(info, archive.read(info.filename)) for info in archive.infolist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for info, data in members:
+            archive.writestr(info, edit(data) if info.filename == name else data)
+
+
+def report_writer(output):
+    return json.loads(output.with_suffix(".report.json").read_text())["writer"]
+
+
+def test_view_cleanup_leaves_cell_text_alone(tmp_path):
+    path = tmp_path / "note.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Status", "Note"])
+    ws.append(["Открыто", "placeholder"])
+    wb.save(path)
+    note = 'Set tabSelected="1" and codeName="Example" now'
+    rewrite_member(
+        path,
+        "xl/worksheets/sheet1.xml",
+        lambda data: re.sub(
+            rb'<c r="B2"[^>]*>.*?</c>',
+            b'<c r="B2" t="inlineStr"><is><t>' + note.encode() + b"</t></is></c>",
+            data,
+        ),
+    )
+    bundle, manifest = extraction(path, tmp_path, "--columns", "Status")
+    status, output = application(path, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 0 and report_writer(output) == "xml"
+    result = load_workbook(output)
+    assert result["Data_en"]["A2"].value == "EN:Открыто"
+    assert result["Data_en"]["B2"].value == result["Data"]["B2"].value == note
+    assert [[c.value for c in r] for r in result["Data_en"].iter_rows(max_col=2)][0] == [
+        "Status",
+        "Note",
+    ]
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_workbook_relationship_ids_stay_unique_with_any_quoting(source, tmp_path, quote):
+    if quote == "'":
+        rewrite_member(
+            source,
+            "xl/_rels/workbook.xml.rels",
+            lambda data: re.sub(rb'(\s\w+)="([^"]*)"', rb"\1='\2'", data),
+        )
+    bundle, manifest = extraction(source, tmp_path)
+    status, output = application(source, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 0
+    with zipfile.ZipFile(output) as archive:
+        rels = archive.read("xl/_rels/workbook.xml.rels").decode()
+    ids = re.findall(r"""\sId=["']([^"']*)""", rels)
+    assert len(ids) == len(set(ids))
+    result = load_workbook(output)
+    assert result["Data"]["A2"].value == "Открыто"
+    assert result["Data_en"]["A2"].value == "EN:Открыто"
+
+
+def prefixed(data, root, children):
+    """The same part with its elements in a ``p:`` prefix instead of the default namespace."""
+    data = re.sub(rb"<" + root + rb' xmlns="', b"<p:" + root + b' xmlns:p="', data)
+    data = data.replace(b"</" + root + b">", b"</p:" + root + b">")
+    for child in children:
+        data = re.sub(rb"<" + child + rb"\b", b"<p:" + child, data)
+    return data
+
+
+@pytest.mark.parametrize(
+    ("member", "root", "children"),
+    [
+        ("xl/_rels/workbook.xml.rels", b"Relationships", [b"Relationship"]),
+        ("[Content_Types].xml", b"Types", [b"Default", b"Override"]),
+    ],
+)
+def test_prefixed_package_parts(source, tmp_path, member, root, children):
+    rewrite_member(source, member, lambda data: prefixed(data, root, children))
+    load_workbook(source).close()  # still a valid package
+    bundle, manifest = extraction(source, tmp_path)
+    status, output = application(source, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 0
+    result = load_workbook(output)
+    assert result.sheetnames == ["Data", "Other", "Data_en"]
+    assert result["Data"]["A2"].value == "Открыто"
+    assert result["Data_en"]["A2"].value == "EN:Открыто"
+
+
+def test_prefixed_sheet_relationships_keep_hyperlinks(tmp_path):
+    path = excel_like_workbook(tmp_path / "excel.xlsx")
+    rewrite_member(
+        path,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        lambda data: prefixed(data, b"Relationships", [b"Relationship"]),
+    )
+    bundle, manifest = extraction(path, tmp_path, "--translate-headings")
+    status, output = application(path, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 0 and report_writer(output) == "xml"
+    result = load_workbook(output)
+    assert result["Data_en"]["B2"].value == "EN:a & <b>"
+    assert result["Data_en"]["B2"].hyperlink.target == "https://example.com/"
+    assert result["Data"]["B2"].hyperlink.target == "https://example.com/"
+
+
+def test_strict_xml_writer_fails_instead_of_falling_back(tmp_path, capsys):
+    path = excel_like_workbook(tmp_path / "excel.xlsx", cell_attrs='s="{s}" t="s" r="{ref}"')
+    bundle, manifest = extraction(path, tmp_path)
+    returned = reply(tmp_path, manifest)
+    status, output = application(path, bundle, [returned], tmp_path, "--writer", "xml")
+    assert status == 2 and not output.exists()
+    assert not output.with_suffix(".report.json").exists()
+    assert "--writer openpyxl" in capsys.readouterr().err
+    status, output = application(path, bundle, [returned], tmp_path, "--writer", "auto")
+    assert status == 0 and report_writer(output) == "openpyxl"
