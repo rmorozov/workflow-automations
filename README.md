@@ -19,8 +19,10 @@ source .venv/bin/activate
 python -m pip install -e '.[translation]'
 ```
 
-Install only the extras needed for the tools you use. On Windows, activate with
-`.venv\Scripts\Activate.ps1` in PowerShell instead.
+Install only the extras needed for the tools you use, or every tool's dependencies
+at once with `python -m pip install -e '.[all]'`. `all` includes Kerberos support for
+`ado-triage`, so on Linux install system Kerberos headers (such as `libkrb5-dev`)
+first. On Windows, activate with `.venv\Scripts\Activate.ps1` in PowerShell instead.
 
 ## Translate a workbook
 
@@ -39,6 +41,7 @@ The bundle contains:
 - `translations.en.xlsx` and `translations/*.csv`: blank `text_id,translated_text_en` templates.
 - `batches/*.csv`: optional size-limited source dictionaries to send to your LLM.
 - `prompt.txt`: response instructions and column context.
+- `agent_prompt.md`: step-by-step instructions for an LLM agent (see below).
 - `manifest.json`: the authoritative dictionary, cell references, and source fingerprint.
 - `summary.json`: deduplication and per-column counts.
 
@@ -73,6 +76,17 @@ extensions, and formula reference rewriting is outside v1. Prefer ordinary data
 tables. Formula expressions are copied unchanged and not evaluated. CSV fields
 are literal data to this tool; use the XLSX templates for spreadsheet editing of
 text that could be interpreted as formulas.
+
+### Agent mode
+
+To let an LLM agent that can read and write files (for example Claude Code) translate
+the whole bundle, point it at `agent_prompt.md`. The prompt lists every work unit
+(batch files, or per-column source CSVs without batching) with its row count and the
+reply path to write, the reply rules and column context, and the final `apply`
+command with every reply path filled in. The agent reads one unit at a time, writes
+`replies/<unit>.csv`, checks it, and skips units that already have a complete reply,
+so a small context window and an interrupted run both work. Use `--batch-max-rows`
+to keep each unit small. The prompt is written only when CSV units exist.
 
 Use `--formats csv` or `--formats xlsx` to select extraction formats. Deduplication
 is per column by default; `--dedupe-scope global` shares a dictionary across columns

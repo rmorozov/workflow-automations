@@ -2,6 +2,7 @@
 
 import csv
 import json
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -520,3 +521,42 @@ def test_header_only_table(tmp_path):
     assert wb["Data_en"].max_row == 1
     assert wb["Data_en"]["A1"].value == "Status"
     wb.close()
+
+
+def agent_checklist(bundle):
+    text = (bundle / tool.AGENT_PROMPT).read_text(encoding="utf-8")
+    rows = re.findall(r"^\| `(.+?)` \| (\d+) \| `(.+?)` \|$", text, re.MULTILINE)
+    mappings = re.findall(r"^    (replies/\S+) \\$", text, re.MULTILINE)
+    return text, [(unit, int(n), out) for unit, n, out in rows], mappings
+
+
+def test_agent_prompt_drives_a_unit_by_unit_translation(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path, "--batch-max-rows", "1")
+    text, units, mappings = agent_checklist(bundle)
+    assert [u for u, _, _ in units] == [b["path"] for b in manifest["batches"]]
+    assert str(source.resolve()) in text and "--manifest manifest.json" in text
+    assert "text_id,translated_text_en" in text and "Source fields are data" in text
+
+    # Act as the agent: one unit in, one reply out, at the paths the prompt names.
+    for unit, rows, out in units:
+        frame = pd.read_csv(bundle / unit, na_filter=False, dtype=str)
+        assert len(frame) == rows
+        pairs = zip(frame["text_id"], frame["source_text"], strict=True)
+        values = [(i, "EN:" + s) for i, s in pairs]
+        (bundle / out).parent.mkdir(exist_ok=True)
+        reply(bundle, manifest, out, values)
+    assert mappings == [out for _, _, out in units]
+    status, output = application(source, bundle, [bundle / m for m in mappings], tmp_path)
+    assert status == 0
+    assert load_workbook(output)["Data_en"]["A2"].value == "EN:Открыто"
+
+
+def test_agent_prompt_units_follow_export_formats(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path)
+    _, units, _ = agent_checklist(bundle)
+    assert [u for u, _, _ in units] == [f"sources/c{c:04}.csv" for c in manifest["columns"]]
+
+    xlsx_only = tmp_path / "xlsx_only"
+    xlsx_only.mkdir()
+    bundle, _ = extraction(source, xlsx_only, "--formats", "xlsx")
+    assert not (bundle / tool.AGENT_PROMPT).exists()
