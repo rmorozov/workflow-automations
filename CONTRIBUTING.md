@@ -21,7 +21,7 @@ on every user. Keep code and specification changes in the same PR.
 ## Local checks
 
 ```bash
-python -m pip install -e '.[translation,ado-triage,dev]'
+python -m pip install -e '.[translation,outline,ado-triage,dev]'
 ruff check .
 ruff format --check .
 pytest

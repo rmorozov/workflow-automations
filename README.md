@@ -7,6 +7,7 @@ upload workbook data. `ado-triage` reads (never writes) an on-premise Azure DevO
 | Tool | Purpose | Specification |
 | --- | --- | --- |
 | `xlsx-translate` | Deduplicate workbook text and apply translations by ID | [XLSX translation](docs/specs/xlsx-translation.md) |
+| `xlsx-outline` | Fold repeated left-to-right sheet values into a Markdown outline | [XLSX outline](docs/specs/xlsx-outline.md) |
 | `ado-triage` | Rank ADO change-request scope into a triage agenda and team summary | [ADO scope triage](docs/specs/ado-triage.md) |
 
 ## Install
@@ -96,6 +97,26 @@ Each extraction needs a new output directory; retain its manifest for applicatio
 The equivalent Python invocation is `python scripts/xlsx_translate.py ...`, after
 installation. `python -m workflow_automations.xlsx_translation ...` also works.
 
+## Outline a workbook
+
+```bash
+python -m pip install -e '.[outline]'
+xlsx-outline --input plan.xlsx --sheet Data --output work/plan.md
+```
+
+Each row's leftmost values become parents and only what changes nests beneath them,
+so `Platform | Core | Scheduler` and `Platform | Core | Memory` become one `Platform`
+item with one `Core` item holding both tasks. `--levels N` keeps only the first N
+selected columns in the hierarchy and lists the rest as `Heading: value` details.
+`--columns` or `--column-indices` select and reorder columns. `--heading-levels N`
+renders the top N levels as `#` headings (with an optional `--title`), and
+`--label-levels` prefixes items with their column heading. Only adjacent rows fold
+by default, keeping sheet order; `--group` also merges repeats further down. For
+sheets that leave a repeated parent blank, `--fill-down` reuses the value above
+within the same parent. Without `--output` the outline goes to standard output; an
+existing output file requires `--overwrite`. Formulas show the values Excel last
+saved.
+
 ## Triage ADO scope
 
 ```bash
@@ -119,7 +140,7 @@ output requires `--overwrite`.
 ## Development
 
 ```bash
-python -m pip install -e '.[translation,ado-triage,dev]'
+python -m pip install -e '.[translation,outline,ado-triage,dev]'
 ruff check .
 ruff format --check .
 pytest
