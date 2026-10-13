@@ -17,8 +17,12 @@ outline = ["openpyxl>=3.1.5,<4", "pyyaml>=6,<7"]
 ado-triage = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4", "azure-devops>=7.1.0b4,<8"]
 # Separate: on Linux this builds gssapi and needs system Kerberos headers (libkrb5-dev).
 ado-kerberos = ["requests-kerberos>=0.15,<1"]
+# The preserved graph tool imports its network dependencies even in analyze mode.
+ado-graph = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4", "networkx>=3,<4",
+             "pyarrow>=15,<27", "azure-devops>=7.1.0b4,<8", "msrest>=0.7.1,<0.8",
+             "requests-kerberos>=0.15,<1", "certifi>=2024.2.2", "tqdm>=4,<5"]
 # Every tool's runtime dependencies, including Kerberos (see ado-kerberos above).
-all = ["workflow-automations[translation,outline,ado-triage,ado-kerberos]"]
+all = ["workflow-automations[translation,outline,ado-triage,ado-kerberos,ado-graph]"]
 dev = ["pytest>=8,<10", "ruff==0.16.9", "build>=1.2,<2"]
 
 [project.scripts]
@@ -27,6 +31,7 @@ xlsx-outline = "workflow_automations.xlsx_outline:main"
 xlsx-unfold = "workflow_automations.xlsx_unfold:main"
 gerrit-parents = "workflow_automations.gerrit_parents:main"
 ado-triage = "workflow_automations.ado_triage:main"
+ado-graph = "workflow_automations.ado_graph:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -36,6 +41,8 @@ testpaths = ["tests"]
 addopts = "-ra"
 
 [tool.ruff]
+# User-requested verbatim import; remove this exclusion when the tool is modernized.
+extend-exclude = ["src/workflow_automations/ado_graph.py"]
 target-version = "py311"
 line-length = 100
 
