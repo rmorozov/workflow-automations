@@ -66,12 +66,14 @@ import re
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import certifi
 import networkx as nx
 import pandas as pd
+
 try:
     import openpyxl
     from openpyxl.utils import get_column_letter
@@ -80,8 +82,8 @@ except ImportError:
 from azure.devops.connection import Connection
 from azure.devops.v7_0.work_item_tracking.models import (
     TeamContext,
-    WorkItemBatchGetRequest,
     Wiql,
+    WorkItemBatchGetRequest,
 )
 from msrest.authentication import KerberosAuthentication
 from requests_kerberos import OPTIONAL
@@ -104,29 +106,29 @@ log = logging.getLogger("ado_tool")
 # Both forward and reverse relation refs so we recognise a relation regardless
 # of which WI end returned it.
 GRAPH_LINK_TYPES: set[str] = {
-    "System.LinkTypes.Hierarchy-Forward",    # Parent → Child
-#    "System.LinkTypes.Hierarchy-Reverse",    # Child  → Parent
+    "System.LinkTypes.Hierarchy-Forward",  # Parent → Child
+    #    "System.LinkTypes.Hierarchy-Reverse",    # Child  → Parent
     "Microsoft.VSTS.Common.Affects-Forward",
     "Microsoft.VSTS.Common.Affects-Reverse",
     "Microsoft.VSTS.Common.Blocks-Forward",
     "Microsoft.VSTS.Common.Blocks-Reverse",
-    "System.LinkTypes.Dependency-Forward",   # Predecessor → Successor
+    "System.LinkTypes.Dependency-Forward",  # Predecessor → Successor
     "System.LinkTypes.Dependency-Reverse",
     "Microsoft.VSTS.Common.Implements-Forward",
     "Microsoft.VSTS.Common.Implements-Reverse",
 }
 
 LINK_LABEL: dict[str, str] = {
-    "System.LinkTypes.Hierarchy-Forward":        "Parent->Child",
-    "System.LinkTypes.Hierarchy-Reverse":        "Child->Parent",
-    "Microsoft.VSTS.Common.Affects-Forward":     "Affects",
-    "Microsoft.VSTS.Common.Affects-Reverse":     "Affected By",
-    "Microsoft.VSTS.Common.Blocks-Forward":      "Blocks",
-    "Microsoft.VSTS.Common.Blocks-Reverse":      "Blocked By",
-    "System.LinkTypes.Dependency-Forward":       "Predecessor->Successor",
-    "System.LinkTypes.Dependency-Reverse":       "Successor->Predecessor",
-    "Microsoft.VSTS.Common.Implements-Forward":  "Implements",
-    "Microsoft.VSTS.Common.Implements-Reverse":  "Implemented By",
+    "System.LinkTypes.Hierarchy-Forward": "Parent->Child",
+    "System.LinkTypes.Hierarchy-Reverse": "Child->Parent",
+    "Microsoft.VSTS.Common.Affects-Forward": "Affects",
+    "Microsoft.VSTS.Common.Affects-Reverse": "Affected By",
+    "Microsoft.VSTS.Common.Blocks-Forward": "Blocks",
+    "Microsoft.VSTS.Common.Blocks-Reverse": "Blocked By",
+    "System.LinkTypes.Dependency-Forward": "Predecessor->Successor",
+    "System.LinkTypes.Dependency-Reverse": "Successor->Predecessor",
+    "Microsoft.VSTS.Common.Implements-Forward": "Implements",
+    "Microsoft.VSTS.Common.Implements-Reverse": "Implemented By",
 }
 
 # ADO batch endpoint hard limit
@@ -137,9 +139,9 @@ ADO_WIQL_PAGE = 20_000
 
 # Field renames: ADO reference name → friendly column name in DataFrames
 FIELD_RENAME: dict[str, str] = {
-    "System.Title":        "Title",
+    "System.Title": "Title",
     "System.WorkItemType": "WorkItemType",
-    "System.State":        "State",
+    "System.State": "State",
 }
 
 # Default ADO WorkItemType values excluded from export (case-insensitive match).
@@ -160,6 +162,7 @@ DEFAULT_SKIP_TYPES: tuple[str, ...] = (
 # Certificate helpers
 # ---------------------------------------------------------------------------
 
+
 def build_merged_ca_bundle(cert_dir: str | None) -> str:
     """
     Create a temporary PEM file containing:
@@ -168,9 +171,7 @@ def build_merged_ca_bundle(cert_dir: str | None) -> str:
 
     Returns the path to the merged temp file (lives for the process lifetime).
     """
-    tmp = tempfile.NamedTemporaryFile(
-        prefix="ado_ca_bundle_", suffix=".pem", delete=False
-    )
+    tmp = tempfile.NamedTemporaryFile(prefix="ado_ca_bundle_", suffix=".pem", delete=False)
     shutil.copyfile(certifi.where(), tmp.name)
     log.info("Merged CA bundle initialised from certifi (%s).", certifi.where())
 
@@ -204,6 +205,7 @@ def configure_ca_bundle(cert_dir: str | None) -> str:
 # ---------------------------------------------------------------------------
 # ADOClient  (wraps azure-devops-python-api SDK)
 # ---------------------------------------------------------------------------
+
 
 class ADOClient:
     """
@@ -256,7 +258,6 @@ class ADOClient:
                         ids.append(ref.id)
         return ids
 
-
     def filter_ids_via_wiql(
         self,
         ids: list[int],
@@ -277,11 +278,11 @@ class ADOClient:
             # System.TeamProject is the native, fully indexed way to filter projects
             # Note: WIQL escapes single quotes by doubling them ('')
             if include_projects:
-                projs = ", ".join("'{0}'".format(p.replace("'", "''")) for p in include_projects)
+                projs = ", ".join("'{}'".format(p.replace("'", "''")) for p in include_projects)
                 wiql += f" AND [System.TeamProject] IN ({projs})"
 
             if skip_types:
-                types = ", ".join("'{0}'".format(t.replace("'", "''")) for t in skip_types)
+                types = ", ".join("'{}'".format(t.replace("'", "''")) for t in skip_types)
                 wiql += f" AND [System.WorkItemType] NOT IN ({types})"
 
             try:
@@ -294,7 +295,6 @@ class ADOClient:
                 valid_ids.update(chunk)
 
         return valid_ids
-
 
     # ------------------------------------------------------------------
     # Ad-hoc WIQL (returns IDs only, used by WIIndex pre-seed)
@@ -316,12 +316,10 @@ class ADOClient:
         team_context = TeamContext(project=project) if project else None
         all_ids: list[int] = []
         base_wiql = wiql_text
-        last_id   = 0
+        last_id = 0
 
         while True:
-            current_wiql = (
-                _wiql_append_id_gt(base_wiql, last_id) if last_id else base_wiql
-            )
+            current_wiql = _wiql_append_id_gt(base_wiql, last_id) if last_id else base_wiql
             result = self.wit.query_by_wiql(
                 wiql=Wiql(query=current_wiql),
                 team_context=team_context,
@@ -331,7 +329,7 @@ class ADOClient:
             all_ids.extend(page)
 
             if len(page) < ADO_WIQL_PAGE:
-                break   # last page reached
+                break  # last page reached
 
             last_id = page[-1]
             log.debug("WIQL page: %d ids, continuing from id > %d", len(page), last_id)
@@ -382,6 +380,7 @@ class ADOClient:
 # ---------------------------------------------------------------------------
 # WIQL helpers
 # ---------------------------------------------------------------------------
+
 
 def _wiql_append_id_gt(wiql: str, last_id: int) -> str:
     """
@@ -455,6 +454,7 @@ def _build_wiql_for_project(
 # WIIndex: WIQL pre-seed for zero-cost BFS classification
 # ---------------------------------------------------------------------------
 
+
 class WIIndex:
     """
     Lightweight ID → classification lookup built from WIQL queries BEFORE
@@ -499,18 +499,18 @@ class WIIndex:
     Thread safety: not applicable — single-threaded BFS.
     """
 
-    ACCEPTED         = "accepted"
-    SKIPPED_TYPE     = "skipped_type"
+    ACCEPTED = "accepted"
+    SKIPPED_TYPE = "skipped_type"
     EXCLUDED_PROJECT = "excluded_project"
-    UNKNOWN          = "unknown"
+    UNKNOWN = "unknown"
 
     def __init__(self) -> None:
         # IDs of WIs that pass both project and type filters
-        self._accepted:  set[int]       = set()
+        self._accepted: set[int] = set()
         # IDs of WIs whose type is in skip_types (within included projects)
-        self._excl_type: dict[int, str] = {}   # id → WorkItemType
+        self._excl_type: dict[int, str] = {}  # id → WorkItemType
         # IDs of WIs from excluded projects (discovered lazily during BFS)
-        self._excl_proj: dict[int, str] = {}   # id → project name
+        self._excl_proj: dict[int, str] = {}  # id → project name
         self._built = False
 
     # ------------------------------------------------------------------
@@ -526,19 +526,15 @@ class WIIndex:
         """
         Run WIQL pre-seed for every included project and populate the index.
         """
-        log.info(
-            "WIIndex: pre-seeding from %d project(s) …", len(include_projects)
-        )
+        log.info("WIIndex: pre-seeding from %d project(s) …", len(include_projects))
         total_accepted = 0
-        total_skipped  = 0
+        total_skipped = 0
 
         for proj in sorted(include_projects):
             n_acc, n_skp = self._seed_project(client, proj, skip_types)
-            log.info(
-                "  %-35s  accepted: %6d  skipped-type: %6d", proj, n_acc, n_skp
-            )
+            log.info("  %-35s  accepted: %6d  skipped-type: %6d", proj, n_acc, n_skp)
             total_accepted += n_acc
-            total_skipped  += n_skp
+            total_skipped += n_skp
 
         log.info(
             "WIIndex ready — %d accepted IDs, %d skipped-type IDs pre-classified.",
@@ -630,6 +626,7 @@ class WIIndex:
 # Export statistics tracker
 # ---------------------------------------------------------------------------
 
+
 class ExportStats:
     """
     Tracks per-WorkItemType and per-project counts across the BFS export loop.
@@ -642,8 +639,8 @@ class ExportStats:
     """
 
     def __init__(self) -> None:
-        self.added:            collections.Counter = collections.Counter()
-        self.skipped_type:     collections.Counter = collections.Counter()
+        self.added: collections.Counter = collections.Counter()
+        self.skipped_type: collections.Counter = collections.Counter()
         self.excluded_project: collections.Counter = collections.Counter()
 
     def record_added(self, wi_type: str) -> None:
@@ -700,7 +697,7 @@ class ExportStats:
             return
         col_w = max(max(len(t) for t in all_types), 12)
         header = f"  {'WorkItemType':<{col_w}}  {'Added':>8}  {'Skipped':>8}  {'Visited':>8}"
-        sep    = "  " + "-" * (col_w + 30)
+        sep = "  " + "-" * (col_w + 30)
         print(header)
         print(sep)
         for wi_type in sorted(all_types):
@@ -709,10 +706,7 @@ class ExportStats:
             print(f"  {wi_type:<{col_w}}  {a:>8}  {s:>8}  {a + s:>8}")
         print(sep)
         tv = self.total_added + self.total_skipped_type
-        print(
-            f"  {'TOTAL':<{col_w}}  {self.total_added:>8}  "
-            f"{self.total_skipped_type:>8}  {tv:>8}"
-        )
+        print(f"  {'TOTAL':<{col_w}}  {self.total_added:>8}  {self.total_skipped_type:>8}  {tv:>8}")
         print()
 
     def _print_project_table(self) -> None:
@@ -722,7 +716,7 @@ class ExportStats:
             return
         col_w = max(max(len(p) for p in self.excluded_project), 12)
         header = f"  {'Project':<{col_w}}  {'Excluded':>10}"
-        sep    = "  " + "-" * (col_w + 14)
+        sep = "  " + "-" * (col_w + 14)
         print(header)
         print(sep)
         for project in sorted(self.excluded_project):
@@ -736,14 +730,15 @@ class ExportStats:
 # Work-item parsing
 # ---------------------------------------------------------------------------
 
+
 def _parse_wi(wi: Any) -> tuple[dict, list[dict]]:
     """
     Convert a WorkItem SDK object into:
       node_row  : flat dict { WI_ID, <all field ref names> }
       edge_rows : list of { Source_ID, Target_ID, Link_Type }
     """
-    wi_id: int    = wi.id
-    raw_fields    = wi.fields or {}
+    wi_id: int = wi.id
+    raw_fields = wi.fields or {}
 
     node_row: dict[str, Any] = {"WI_ID": wi_id}
     node_row.update(raw_fields)
@@ -777,6 +772,7 @@ def _iter_chunks(lst: list, size: int) -> Iterator[list]:
 # ---------------------------------------------------------------------------
 # Export pipeline helpers
 # ---------------------------------------------------------------------------
+
 
 def _parse_skip_types(raw: str) -> frozenset[str]:
     """Parse --skip-types into a case-normalised frozenset."""
@@ -825,9 +821,9 @@ def run_export(args: argparse.Namespace) -> None:
     if include_projects:
         log.info("Project filter active – including only: %s", ", ".join(sorted(include_projects)))
 
-    client      = ADOClient(args.ado_url)
-    project     = args.project or ""
-    batch_size  = min(args.batch_size, ADO_BATCH_LIMIT)
+    client = ADOClient(args.ado_url)
+    project = args.project or ""
+    batch_size = min(args.batch_size, ADO_BATCH_LIMIT)
 
     # 3. Initial IDs from stored query
     log.info("Running ADO query %s …", args.query_id)
@@ -837,11 +833,11 @@ def run_export(args: argparse.Namespace) -> None:
     # NOTE: The upfront WIIndex build has been removed to prevent excessive ADO load.
     # Unknown IDs are now handled natively or pruned lazily via WIQL below.
 
-    visited: set[int]         = set()
-    queued:  dict[int, None]  = dict.fromkeys(initial_ids)
+    visited: set[int] = set()
+    queued: dict[int, None] = dict.fromkeys(initial_ids)
     all_node_rows: list[dict] = []
     all_edge_rows: list[dict] = []
-    stats                     = ExportStats()
+    stats = ExportStats()
 
     log.info("Starting BFS export (batch_size=%d).", batch_size)
 
@@ -855,7 +851,9 @@ def run_export(args: argparse.Namespace) -> None:
                 candidates = list(queued.keys())
                 ids_to_prune = candidates[batch_size:]
 
-                valid_subset = client.filter_ids_via_wiql(ids_to_prune, include_projects, skip_types)
+                valid_subset = client.filter_ids_via_wiql(
+                    ids_to_prune, include_projects, skip_types
+                )
 
                 pruned_count = 0
                 for pid in ids_to_prune:
@@ -886,9 +884,9 @@ def run_export(args: argparse.Namespace) -> None:
             for wi in raw_items:
                 if wi is None:
                     continue
-                fields: dict     = wi.fields or {}
-                wi_type: str     = fields.get("System.WorkItemType", "Unknown")
-                wi_project: str  = _project_from_wi(fields)
+                fields: dict = wi.fields or {}
+                wi_type: str = fields.get("System.WorkItemType", "Unknown")
+                wi_project: str = _project_from_wi(fields)
                 node_row, edge_rows = _parse_wi(wi)
 
                 # Enqueue relation targets
@@ -928,8 +926,7 @@ def run_export(args: argparse.Namespace) -> None:
 
     stats.print_summary()
     log.info(
-        "Collected %d nodes, %d edges  "
-        "(skipped by type: %d | excluded by project: %d).",
+        "Collected %d nodes, %d edges  (skipped by type: %d | excluded by project: %d).",
         len(df_nodes),
         len(df_edges),
         stats.total_skipped_type,
@@ -941,6 +938,7 @@ def run_export(args: argparse.Namespace) -> None:
     _export_dataframes(df_nodes, df_edges, output_dir, formats)
     log.info("Export complete → %s", output_dir)
 
+
 def _export_dataframes(
     df_nodes: pd.DataFrame,
     df_edges: pd.DataFrame,
@@ -949,8 +947,8 @@ def _export_dataframes(
 ) -> None:
     dispatch = {
         "parquet": _export_parquet,
-        "csv":     _export_csv,
-        "excel":   _export_excel,
+        "csv": _export_csv,
+        "excel": _export_excel,
     }
     for fmt in formats:
         fn = dispatch.get(fmt)
@@ -981,6 +979,7 @@ def _export_excel(df_nodes: pd.DataFrame, df_edges: pd.DataFrame, d: Path) -> No
 # GraphAnalyzer
 # ---------------------------------------------------------------------------
 
+
 class GraphAnalyzer:
     """Builds a NetworkX DiGraph and runs the requested analysis steps."""
 
@@ -1003,7 +1002,13 @@ class GraphAnalyzer:
         "Implemented By": "Implements",
     }
 
-    def __init__(self, df_nodes: pd.DataFrame, df_edges: pd.DataFrame, ado_url: str = "", effort_field: str = "") -> None:
+    def __init__(
+        self,
+        df_nodes: pd.DataFrame,
+        df_edges: pd.DataFrame,
+        ado_url: str = "",
+        effort_field: str = "",
+    ) -> None:
         self.df_nodes = df_nodes
         self.df_edges = df_edges
         self.ado_url = ado_url.rstrip("/")
@@ -1028,7 +1033,7 @@ class GraphAnalyzer:
                 IterationPath=row.get("System.IterationPath", ""),
             )
 
-	# Normalize and ingest edges
+        # Normalize and ingest edges
         edge_count = 0
         for _, row in self.df_edges.iterrows():
             src, tgt, ltype = row["Source_ID"], row["Target_ID"], row["Link_Type"]
@@ -1047,7 +1052,9 @@ class GraphAnalyzer:
                 self.G.add_edge(tgt, src, link_type=normalized_type)
                 edge_count += 1
 
-        log.info("Graph built: %d nodes, %d normalized edges.", self.G.number_of_nodes(), edge_count)
+        log.info(
+            "Graph built: %d nodes, %d normalized edges.", self.G.number_of_nodes(), edge_count
+        )
 
     def _meta(self, wi_id: int, prefix: str = "") -> dict:
         """Helper: Returns standardized metadata columns for any Node."""
@@ -1061,7 +1068,6 @@ class GraphAnalyzer:
             f"{prefix}AreaPath": d.get("AreaPath", ""),
             f"{prefix}IterationPath": d.get("IterationPath", ""),
         }
-
 
     def _get_neighborhood_diagnostic(self, node_id: int) -> str:
         """Helper to generate a human-readable string of direct connections for debugging."""
@@ -1118,13 +1124,24 @@ class GraphAnalyzer:
                 rows.append(row)
         log.info("Cycles found: %d", len(cycles))
         if not rows:
-            return pd.DataFrame(columns=["Cycle_Index", "Node_ID", "Title", "WI_URL", "State", "Roadmap_State", "WorkItemType", "AreaPath", "IterationPath"])
+            return pd.DataFrame(
+                columns=[
+                    "Cycle_Index",
+                    "Node_ID",
+                    "Title",
+                    "WI_URL",
+                    "State",
+                    "Roadmap_State",
+                    "WorkItemType",
+                    "AreaPath",
+                    "IterationPath",
+                ]
+            )
         return pd.DataFrame(rows)
 
     def find_orphans(self) -> pd.DataFrame:
         orphan_ids = [
-            n for n in self.G.nodes
-            if self.G.in_degree(n) == 0 and self.G.out_degree(n) == 0
+            n for n in self.G.nodes if self.G.in_degree(n) == 0 and self.G.out_degree(n) == 0
         ]
         log.info("Orphans found: %d", len(orphan_ids))
         return self._nodes_subset(orphan_ids)
@@ -1145,7 +1162,20 @@ class GraphAnalyzer:
         cond = nx.condensation(self.G)
         if len(cond) == 0:
             log.info("Longest chain (condensed DAG hops): 0")
-            return pd.DataFrame(columns=["Chain_Rank", "SCC_Index", "WI_ID", "Title", "WI_URL", "State", "Roadmap_State", "WorkItemType", "AreaPath", "IterationPath"])
+            return pd.DataFrame(
+                columns=[
+                    "Chain_Rank",
+                    "SCC_Index",
+                    "WI_ID",
+                    "Title",
+                    "WI_URL",
+                    "State",
+                    "Roadmap_State",
+                    "WorkItemType",
+                    "AreaPath",
+                    "IterationPath",
+                ]
+            )
 
         length = nx.dag_longest_path_length(cond)
         path_scc_indices = nx.dag_longest_path(cond)
@@ -1160,7 +1190,24 @@ class GraphAnalyzer:
                 row.update(self._meta(wi_id))
                 rows.append(row)
         log.info("Longest chain (condensed DAG hops): %d", length)
-        df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["Chain_Rank", "SCC_Index", "WI_ID", "Title", "WI_URL", "State", "Roadmap_State", "WorkItemType", "AreaPath", "IterationPath"])
+        df = (
+            pd.DataFrame(rows)
+            if rows
+            else pd.DataFrame(
+                columns=[
+                    "Chain_Rank",
+                    "SCC_Index",
+                    "WI_ID",
+                    "Title",
+                    "WI_URL",
+                    "State",
+                    "Roadmap_State",
+                    "WorkItemType",
+                    "AreaPath",
+                    "IterationPath",
+                ]
+            )
+        )
         df.attrs["longest_path_length"] = length
         return df
 
@@ -1174,7 +1221,20 @@ class GraphAnalyzer:
                 rows.append(row)
         log.info("SCCs found: %d", len(sccs))
         if not rows:
-            return pd.DataFrame(columns=["SCC_Index", "WI_ID", "SCC_Size", "Title", "WI_URL", "State", "Roadmap_State", "WorkItemType", "AreaPath", "IterationPath"])
+            return pd.DataFrame(
+                columns=[
+                    "SCC_Index",
+                    "WI_ID",
+                    "SCC_Size",
+                    "Title",
+                    "WI_URL",
+                    "State",
+                    "Roadmap_State",
+                    "WorkItemType",
+                    "AreaPath",
+                    "IterationPath",
+                ]
+            )
         return pd.DataFrame(rows)
 
     def compute_metrics(self) -> pd.DataFrame:
@@ -1202,8 +1262,7 @@ class GraphAnalyzer:
 
     def _cr_reachable_set(self) -> set:
         cr_nodes = {
-            n for n, d in self.G.nodes(data=True)
-            if d.get("WorkItemType") == "Change Request"
+            n for n, d in self.G.nodes(data=True) if d.get("WorkItemType") == "Change Request"
         }
         if not cr_nodes:
             return set()
@@ -1214,19 +1273,22 @@ class GraphAnalyzer:
             reachable.update(nx.descendants(rev, cr))
         return reachable
 
-
     def analyze_cr_scope_and_impact(self) -> pd.DataFrame:
-        cr_nodes = [(n, d) for n, d in self.G.nodes(data=True) if d.get("WorkItemType") == "Change Request"]
+        cr_nodes = [
+            (n, d) for n, d in self.G.nodes(data=True) if d.get("WorkItemType") == "Change Request"
+        ]
         rows = []
         has_effort = self.effort_field in self.df_nodes.columns
-        effort_label = self.effort_field.split('.')[-1] if self.effort_field else "Effort"
+        effort_label = self.effort_field.split(".")[-1] if self.effort_field else "Effort"
 
         for cr_id, data in cr_nodes:
             descendants = list(nx.descendants(self.G, cr_id))
             total_effort = 0.0
             if has_effort:
                 subset = self.df_nodes[self.df_nodes["WI_ID"].isin([cr_id] + descendants)]
-                total_effort = pd.to_numeric(subset[self.effort_field], errors='coerce').fillna(0).sum()
+                total_effort = (
+                    pd.to_numeric(subset[self.effort_field], errors="coerce").fillna(0).sum()
+                )
 
             row = {
                 "CR_ID": cr_id,
@@ -1240,11 +1302,15 @@ class GraphAnalyzer:
 
         sort_col = f"Total_{effort_label}" if has_effort else "Impacted_WI_Count"
         if not rows:
-            return pd.DataFrame(columns=["CR_ID", "CR_Title", sort_col, "Impacted_WI_Count", "Impacted_WI_IDs"])
+            return pd.DataFrame(
+                columns=["CR_ID", "CR_Title", sort_col, "Impacted_WI_Count", "Impacted_WI_IDs"]
+            )
         return pd.DataFrame(rows).sort_values(sort_col, ascending=False)
 
     def analyze_cr_prerequisites(self) -> pd.DataFrame:
-        cr_nodes = [(n, d) for n, d in self.G.nodes(data=True) if d.get("WorkItemType") == "Change Request"]
+        cr_nodes = [
+            (n, d) for n, d in self.G.nodes(data=True) if d.get("WorkItemType") == "Change Request"
+        ]
         rows = []
         for cr_id, data in cr_nodes:
             prereqs = list(nx.ancestors(self.G, cr_id))
@@ -1257,13 +1323,16 @@ class GraphAnalyzer:
             row.update(self._meta(cr_id, prefix="CR_"))
             rows.append(row)
         if not rows:
-            return pd.DataFrame(columns=["CR_ID", "CR_Title", "Prerequisite_WI_Count", "Prerequisite_WI_IDs"])
+            return pd.DataFrame(
+                columns=["CR_ID", "CR_Title", "Prerequisite_WI_Count", "Prerequisite_WI_IDs"]
+            )
         return pd.DataFrame(rows).sort_values("Prerequisite_WI_Count", ascending=False)
-
 
     def analyze_cr_impact_unpacked(self) -> pd.DataFrame:
         """Flat 1:1 view of CRs and every individual downstream impact WI."""
-        cr_nodes = [n for n, d in self.G.nodes(data=True) if d.get("WorkItemType") == "Change Request"]
+        cr_nodes = [
+            n for n, d in self.G.nodes(data=True) if d.get("WorkItemType") == "Change Request"
+        ]
         rows = []
         for cr_id in cr_nodes:
             cr_meta = self._meta(cr_id, prefix="CR_")
@@ -1271,7 +1340,12 @@ class GraphAnalyzer:
             for desc_id in nx.descendants(self.G, cr_id):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
-                row.update({"Impacted_WI_ID": desc_id, "Impacted_Title": self.G.nodes[desc_id].get("Title", "")})
+                row.update(
+                    {
+                        "Impacted_WI_ID": desc_id,
+                        "Impacted_Title": self.G.nodes[desc_id].get("Title", ""),
+                    }
+                )
                 row.update(self._meta(desc_id, prefix="Impacted_"))
                 rows.append(row)
         log.info("Generated unpacked impact view (%d rows).", len(rows))
@@ -1281,7 +1355,9 @@ class GraphAnalyzer:
 
     def analyze_cr_prereqs_unpacked(self) -> pd.DataFrame:
         """Flat 1:1 view of CRs and every individual upstream prerequisite WI."""
-        cr_nodes = [n for n, d in self.G.nodes(data=True) if d.get("WorkItemType") == "Change Request"]
+        cr_nodes = [
+            n for n, d in self.G.nodes(data=True) if d.get("WorkItemType") == "Change Request"
+        ]
         rows = []
         for cr_id in cr_nodes:
             cr_meta = self._meta(cr_id, prefix="CR_")
@@ -1289,7 +1365,9 @@ class GraphAnalyzer:
             for asc_id in nx.ancestors(self.G, cr_id):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
-                row.update({"Prereq_WI_ID": asc_id, "Prereq_Title": self.G.nodes[asc_id].get("Title", "")})
+                row.update(
+                    {"Prereq_WI_ID": asc_id, "Prereq_Title": self.G.nodes[asc_id].get("Title", "")}
+                )
                 row.update(self._meta(asc_id, prefix="Prereq_"))
                 rows.append(row)
         log.info("Generated unpacked prerequisites view (%d rows).", len(rows))
@@ -1297,15 +1375,23 @@ class GraphAnalyzer:
             return pd.DataFrame(columns=["CR_ID", "CR_Title", "Prereq_WI_ID", "Prereq_Title"])
         return pd.DataFrame(rows)
 
+
 # ---------------------------------------------------------------------------
 # Analyze pipeline
 # ---------------------------------------------------------------------------
 
 ALL_STEPS = (
-    "cycles", "orphans", "no_cr_dep", "has_cr_dep",
-    "longest_chain", "scc", "metrics",
-    "cr_scope_impact", "cr_prereqs",
-    "cr_impact_unpacked", "cr_prereqs_unpacked"
+    "cycles",
+    "orphans",
+    "no_cr_dep",
+    "has_cr_dep",
+    "longest_chain",
+    "scc",
+    "metrics",
+    "cr_scope_impact",
+    "cr_prereqs",
+    "cr_impact_unpacked",
+    "cr_prereqs_unpacked",
 )
 
 
@@ -1323,17 +1409,17 @@ def run_analyze(args: argparse.Namespace) -> None:
 
     analyzer = GraphAnalyzer(df_nodes, df_edges, args.ado_url, args.effort_field)
     step_fn_map = {
-        "cycles":        analyzer.find_cycles,
-        "orphans":       analyzer.find_orphans,
-        "no_cr_dep":     analyzer.find_no_cr_dep,
-        "has_cr_dep":    analyzer.find_has_cr_dep,
+        "cycles": analyzer.find_cycles,
+        "orphans": analyzer.find_orphans,
+        "no_cr_dep": analyzer.find_no_cr_dep,
+        "has_cr_dep": analyzer.find_has_cr_dep,
         "longest_chain": analyzer.find_longest_chain,
-        "scc":           analyzer.find_scc,
-        "metrics":       analyzer.compute_metrics,
+        "scc": analyzer.find_scc,
+        "metrics": analyzer.compute_metrics,
         "cr_scope_impact": analyzer.analyze_cr_scope_and_impact,
-        "cr_prereqs":      analyzer.analyze_cr_prerequisites,
-        "cr_impact_unpacked":   analyzer.analyze_cr_impact_unpacked,
-        "cr_prereqs_unpacked":  analyzer.analyze_cr_prereqs_unpacked,
+        "cr_prereqs": analyzer.analyze_cr_prerequisites,
+        "cr_impact_unpacked": analyzer.analyze_cr_impact_unpacked,
+        "cr_prereqs_unpacked": analyzer.analyze_cr_prereqs_unpacked,
     }
 
     results: dict[str, pd.DataFrame] = {}
@@ -1361,7 +1447,7 @@ def run_analyze(args: argparse.Namespace) -> None:
                     try:
                         if len(str(cell.value)) > max_length:
                             max_length = len(str(cell.value))
-                    except:
+                    except Exception:
                         pass
                 adjusted_width = (max_length + 2) if max_length < 50 else 50
                 worksheet.column_dimensions[column_letter].width = adjusted_width
@@ -1374,6 +1460,7 @@ def run_analyze(args: argparse.Namespace) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ado_tool",
@@ -1382,38 +1469,44 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="mode", required=True)
 
     # ── export ────────────────────────────────────────────────────────────
-    ep = subparsers.add_parser(
-        "export", help="Fetch ADO work items and export data files."
-    )
+    ep = subparsers.add_parser("export", help="Fetch ADO work items and export data files.")
     ep.add_argument(
-        "--ado-url", required=True,
+        "--ado-url",
+        required=True,
         help="Base URL of the ADO instance, e.g. https://ado.corp.local/DefaultCollection",
     )
     ep.add_argument(
-        "--query-id", required=True,
+        "--query-id",
+        required=True,
         help="GUID of the stored WIQL query to start from.",
     )
     ep.add_argument(
-        "--project", default="",
+        "--project",
+        default="",
         help="ADO project name (needed for the WIQL endpoint on on-prem TFS/ADO).",
     )
     ep.add_argument(
-        "--batch-size", type=int, default=200,
+        "--batch-size",
+        type=int,
+        default=200,
         help=f"WI fetch batch size (max {ADO_BATCH_LIMIT}, default 200).",
     )
     ep.add_argument(
-        "--cert-dir", default=None,
+        "--cert-dir",
+        default=None,
         help=(
             "Directory of corporate CA certificates (.pem/.crt).  "
             "Merged with certifi bundle at startup.  Also: env var ADO_CERT_DIR."
         ),
     )
     ep.add_argument(
-        "--output-dir", default="./output",
+        "--output-dir",
+        default="./output",
         help="Directory for exported files (default: ./output).",
     )
     ep.add_argument(
-        "--formats", default="parquet,excel,csv",
+        "--formats",
+        default="parquet,excel,csv",
         help="Comma-separated export formats: parquet, excel, csv.",
     )
     ep.add_argument(
@@ -1439,22 +1532,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # ── analyze ───────────────────────────────────────────────────────────
-    ap = subparsers.add_parser(
-        "analyze", help="Run graph analysis on exported parquet files."
-    )
+    ap = subparsers.add_parser("analyze", help="Run graph analysis on exported parquet files.")
     ap.add_argument("--nodes-file", required=True, help="Path to nodes.parquet.")
     ap.add_argument("--edges-file", required=True, help="Path to edges.parquet.")
     ap.add_argument("--ado-url", default="", help="Base URL of the ADO instance.")
     ap.add_argument(
-        "--effort-field", default="Microsoft.VSTS.Scheduling.OriginalEstimate",
+        "--effort-field",
+        default="Microsoft.VSTS.Scheduling.OriginalEstimate",
         help="Full ADO reference name of the field used for sizing/estimates.",
     )
     ap.add_argument(
-        "--output-file", default="analysis_report.xlsx",
+        "--output-file",
+        default="analysis_report.xlsx",
         help="Output Excel report path (default: analysis_report.xlsx).",
     )
     ap.add_argument(
-        "--steps", default="all",
+        "--steps",
+        default="all",
         help=f"Comma-separated steps or 'all'.  Available: {', '.join(ALL_STEPS)}.",
     )
 

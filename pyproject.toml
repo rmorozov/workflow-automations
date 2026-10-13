@@ -41,8 +41,6 @@ testpaths = ["tests"]
 addopts = "-ra"
 
 [tool.ruff]
-# User-requested verbatim import; remove this exclusion when the tool is modernized.
-extend-exclude = ["src/workflow_automations/ado_graph.py"]
 target-version = "py311"
 line-length = 100
 
