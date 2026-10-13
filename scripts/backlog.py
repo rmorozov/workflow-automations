@@ -15,6 +15,7 @@ dependency on a missing ID counts as satisfied.
 from __future__ import annotations
 
 import argparse
+import posixpath
 import re
 import sys
 from dataclasses import dataclass, replace
@@ -93,9 +94,18 @@ def section_ranges(markdown: str) -> dict[str, range]:
     return ranges
 
 
+def canonical_path(raw: str) -> str:
+    """Normalize a repository-relative path; a trailing ``/`` marks a directory."""
+    path = posixpath.normpath(raw.replace("\\", "/"))
+    if posixpath.isabs(path) or path == ".." or path.startswith("../"):
+        raise ValueError(f"{raw}: must be a path inside the repository")
+    return path + "/" if raw.endswith("/") and path != "." else path
+
+
 def resolve_touch(touch: str, root: Path) -> Touch:
     """Map ``path#anchor`` to the anchor's line range when the file exists."""
-    path, _, anchor = touch.partition("#")
+    raw, _, anchor = touch.partition("#")
+    path = canonical_path(raw)
     if not anchor:
         return Touch(path)
     file = root / path
@@ -191,9 +201,8 @@ def load_tasks(directory: Path = BACKLOG) -> dict[str, Task]:
 
 
 def _paths_overlap(a: str, b: str) -> bool:
-    if a == b:
-        return True
-    return (a.endswith("/") and b.startswith(a)) or (b.endswith("/") and a.startswith(b))
+    a, b = a.rstrip("/"), b.rstrip("/")
+    return a == b or b.startswith(a + "/") or a.startswith(b + "/")
 
 
 def touches_conflict(a: Touch, b: Touch) -> bool:

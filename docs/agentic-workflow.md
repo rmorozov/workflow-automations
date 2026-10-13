@@ -31,10 +31,10 @@ Fable 5.1 $10/$50.
 | `implementer` | Sonnet 5.5 | medium | Most tasks are local, well-specified changes with tests as the safety net. Medium is the recommended start for agentic coding on Sonnet 5.5. |
 | `implementer` on tasks marked `model: opus` | Opus 5.5 | as the task says | Graph semantics, completeness, schema contracts and algorithmic bounds (AG-003/004/006/007/012, SH-001/003/004/007): wrong results here pass tests that encode the same misunderstanding. |
 | `task-planner` | Opus 5.5 | high | One short, read-heavy call whose mistakes multiply: a wrong `touches:` list breaks parallel scheduling, a wrong plan wastes an implementer round. |
-| `reviewer` | Opus 5.5 | high (medium for P3) | Catching a defect before merge is cheaper than any later fix; a different model from the implementer avoids shared blind spots. |
+| `reviewer` | Opus 5.5 | high (medium for P3) | Catching a defect before merge is cheaper than any later fix. Independence comes from a fresh context that reads only the task, spec and diff and reproduces findings itself; a different model from the implementer is a bonus, not the source of independence. |
 | Thread lead | Opus 5.5 | medium | Orchestrates, reads PR events, decides when to escalate. Set as the project's default model; it is not configured in this repository. |
 | Coordinator | Opus 5.5 | medium | Same as thread lead; its work is short triage turns. |
-| Escalation only | Fable 5.1 | xhigh | 2.5× Opus. Use when Opus implementer and reviewer disagree on the same finding twice, or for a design the owner asks to be stress-tested. Never a standing role. |
+| Design arbiter, on demand | Fable 5.1 | xhigh | 2.5× Opus. Settles a specific, reproduced disagreement or a hard design choice the owner asks to stress-test. Never a standing stage, and not triggered merely because rounds elapsed. |
 
 The thread lead may run a subagent at another model or effort than its definition
 when the task file's `model`/`effort` says so; that field is the owner-visible
@@ -43,20 +43,25 @@ record of the choice.
 ### Pipeline per task
 
 1. Thread lead reads the task file and claims it with the coordinator.
-2. `task-planner` when the task is P1, `model: opus`, or its `touches:` looks
-   uncertain. Correct the task file's `touches:` first if the plan differs.
+2. `task-planner` only when risk calls for it: P1, `model: opus`, or uncertain
+   `touches:`. Small tasks go straight to one implementer and a fresh review.
+   Correct the task file's `touches:` first if the plan differs, then re-plan the
+   wave.
 3. `implementer` at the task's model and effort.
 4. `checker`. Failures go back to the implementer.
-5. `reviewer`. Blocking findings go back to the implementer; after two rounds on
-   the same finding, rerun the implementer one tier up (Sonnet → Opus → Fable).
+5. `reviewer`. Blocking findings go back to the implementer. When a finding stays
+   unresolved because the implementer cannot get the semantics right, rerun it one
+   tier up (Sonnet → Opus); bring in the Fable arbiter only for a reproduced
+   disagreement about what is correct.
 6. Thread lead opens the draft PR, drives CI green, and asks the owner to review.
 
-Rough cost of one medium task (illustrative, before cache discounts): planner
-60k/8k tokens on Opus ≈ $0.40, implementer 300k/40k on Sonnet ≈ $1.00, two
-checker runs ≈ $0.01, reviewer 150k/10k on Opus ≈ $0.80, about $2.20. The same
-work entirely on Opus at high effort is roughly $3.50, entirely on Fable roughly
-$9. Measure real usage on the first few tasks and adjust the table, not the
-other way round.
+These tiers are starting defaults to pilot, not a measured optimum. As an
+illustration of scale only (assumed token counts, list prices, no cache
+discounts): planner 60k/8k tokens on Opus ≈ $0.40, implementer 300k/40k on Sonnet
+≈ $1.00, two checker runs ≈ $0.01, reviewer 150k/10k on Opus ≈ $0.80. Start with
+at most two editing threads plus one read-only reviewer, and compare a few
+completed tasks on wall time, retries, usage and escaped defects before adding
+threads or raising default tiers.
 
 ## Parallel work without merge conflicts
 
@@ -69,7 +74,8 @@ one source of shared lines.
 | `ado_graph.py` (1,458 lines) | Nearly every AG task edits one module | AG-018 splits it into `cli`, `client`, `export`, `analyze`, `report` first, as a pure move, alone. |
 | Specifications and README | Several tasks append to the same section | Tasks name the section they edit (`path#anchor`); edit only that section. |
 | `pyproject.toml`, `ci.yml`, `AGENTS.md`, `CONTRIBUTING.md` | Adjacent one-line edits | Only tasks that list them may edit them; `plan` never schedules two together. |
-| Task claims | Two threads on one task | The coordinator keeps the ledger; pass in-progress IDs to `plan --busy`. |
+| Task claims | Two threads on one task | The coordinator keeps the ledger until a claim is explicitly released; pass in-progress IDs to `plan --busy`. |
+| Shared working directory | Two writers in one checkout | Each editing thread works in its own branch and checkout; integration and merge decisions stay with one owner. |
 | Long-lived branches | Drift from `main` | One task (or one lane bundle) per branch, branched from current `main`; merge `main` in before asking for review; merge small PRs quickly. |
 
 `python scripts/backlog.py plan --busy <IDs>` groups ready tasks into waves whose
