@@ -21,7 +21,7 @@ on every user. Keep code and specification changes in the same PR.
 ## Local checks
 
 ```bash
-python -m pip install -e '.[translation,outline,ado-triage,dev]'
+python -m pip install -e '.[translation,outline,ado-triage,ado-graph,dev]'
 ruff check .
 ruff format --check .
 pytest
@@ -50,3 +50,12 @@ README table entry. CI installs the union of extras required by the test suite; 
 new extras to the installation commands. Describe input/output, overwrite behavior,
 exit codes, offline/network behavior and limits in the specification. Avoid adding
 a scheduler or external integration until the tool actually needs one.
+
+## Preserved imports
+
+`src/workflow_automations/ado_graph.py` is a byte-for-byte import requested by the
+user, not a refactor. Ruff excludes that file only; integration code and tests keep
+normal checks. A source-digest test protects the import. Run Linux Kerberos header
+installation before the development extras above (`sudo apt-get install libkrb5-dev`).
+The specification describes observed behavior; follow-up changes belong to the
+prioritized backlog. Remove the exclusion/digest guard when modernization is authorized.

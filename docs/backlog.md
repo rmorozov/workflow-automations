@@ -49,3 +49,45 @@ These are proposals, not promises made by the current specifications.
 
 - Enable branch protection/rulesets and require the shared CI checks when ready.
 - Add scheduled integrations only when a tool needs them; keep credentials outside the repository.
+
+## ADO graph/export
+
+Findings from the verbatim import and comparison with `ado-triage`. The current
+specification records these limitations; the items below are future work.
+
+| Priority / ID | Finding and concrete follow-up | Acceptance evidence |
+| --- | --- | --- |
+| P1 AG-001 | Preserve traversal through filtered bridge nodes. Queue pruning currently marks excluded IDs visited without reading relations, contradicting help. Separate traversal inclusion from output inclusion; retain filter optimization only if reachability is preserved. | Seed → skipped/excluded node → accepted descendant exports the descendant at both sides of the three-batch pruning threshold. |
+| P1 AG-002 | Add atomic publication, explicit overwrite and input/output collision checks to both modes; multi-file export needs a staged bundle. | Failed writes leave existing files intact; analysis cannot overwrite either input; overwrite requires consent via flag. |
+| P1 AG-003 | Report omitted/inaccessible IDs and completion status instead of treating `error_policy=Omit` as a complete graph. Use triage's core-vs-label failure distinction. | Missing seed/bridge IDs yield explicit incomplete/failure status and reproducible counts. |
+| P1 AG-004 | Validate graph semantics: keep relation types separate; preserve parallel links; choose hierarchy, dependency and impact subgraphs explicitly. Reverse CR reachability currently means ancestors despite the “CR dependency” name. | Synthetic CR→child, predecessor→CR and multiple-type edges have documented, distinct outputs; no labels silently overwritten. |
+| P1 AG-005 | Store exported titles/text as literal Excel cells, normalize identity objects and timezone-aware dates, and validate schemas/IDs/empty frames before writing. | Formula-like titles stay strings; realistic identity/date fields and an empty export round-trip through all formats. |
+| P2 AG-006 | Bound cycle enumeration and centrality cost; add step budgets, approximate centrality and cancellation/progress. Default all can be exponential on dense cycles. | Representative 10k/50k graphs finish under stated budgets or report a bounded partial result. |
+| P2 AG-007 | Correct Dependency_Depth to a named metric (longest DAG depth via topological DP, or rename maximum source-shortest distance); persist chain length and explain hop count vs time critical path. | A shortcut A→C plus A→B→C distinguishes shortest distance 1 from longest depth 2; report exposes the selected metric. |
+| P2 AG-008 | Harden WIQL quoting and keyset pagination. Project builder uses backslash quoting while filter builder doubles quotes; skipped-type names are interpolated unescaped; ORDER regex can match string literals. | Apostrophes and ORDER inside names, paging >20k IDs, and nonadvancing pages are covered using SDK fakes and an optional real-server contract test. |
+| P2 AG-009 | Validate positive batch size, supported formats/steps and file schemas early. Zero/negative batch sizes can leave the queue unchanged; all-unknown steps lead to an empty-workbook save failure. | Invalid input exits predictably before service calls or file creation. |
+| P2 AG-010 | Make local analysis installable without Azure SDK/Kerberos; move imports/client configuration to a network boundary. Remove import-time global logging and temporary CA/environment side effects; clean up and restore prior CA settings. | Offline analyze/help work with no network extras; importing a library does not configure root logging; CA cleanup works on failure. |
+| P2 AG-011 | Replace stale pre-seed performance claims with measured behavior and remove/deprecate unused WIIndex code. Record pruned/omitted counts independently from per-type statistics. | Counters reconcile seed, visited, fetched, pruned, omitted and exported IDs; documentation matches requests observed in tests. |
+| P2 AG-012 | Define a versioned snapshot schema and provenance manifest (query, collection, fields, filters, relation policy, timestamps, tool version, completeness); add replay and CSV/XLSX ingestion if needed. | Old/new snapshots validate; identical snapshots can feed both graph and triage pipelines offline. |
+| P3 AG-013 | Sort node/SCC/cycle/CR member outputs deterministically; add report purpose/config sheets, hyperlinks, filters and concise summary counts before detailed/unpacked sheets. | Repeat runs on the same snapshot compare stably and expose scope/completeness in the report itself. |
+
+### Sharing code with ADO scope triage
+
+Both tools use the Azure SDK, Kerberos OPTIONAL, relation URLs, batches, field
+metadata, pandas and Excel. Share small tested boundaries rather than merging the
+CLI modes or their different notions of scope. No production refactor is made in
+this import.
+
+| Candidate | Current difference and proposed boundary | Sequence |
+| --- | --- | --- |
+| ADO session/auth/CA helpers | Graph uses msrest's adapter and global merged CA; triage defines a local requests-kerberos adapter and supports ambient CA settings. Extract configurable session/auth plus scoped CA lifetime; retain per-tool errors and mutual-auth behavior. | After auth integration tests and AG-010 |
+| Saved-query ID extraction and batch helpers | Both handle flat/link results and cap batches at 200. Graph uses batch API/Omit and BFS; triage uses strict core fetch plus optional external metadata. Share pure ID extraction/chunking and transport result types, not omission policies. | First low-risk extraction after characterization |
+| Relation parsing and direction registry | Graph uses emitting-item Target_ID and forward labels; triage uses Destination_ID plus item-relative labels. Share raw reference names and endpoint parsing, with explicit adapters to each schema. Hierarchy-Reverse must remain an explicit policy. | Alongside AG-004 |
+| Snapshot/data normalization | Triage already has plain Snapshot and build_report; graph retains SDK objects until DataFrames and loses root/provenance information. Add a versioned raw snapshot and adapters to each tool; do not use graph-filtered nodes as a complete triage scope. | AG-012 after completeness fixes |
+| Work-item URLs and scalar conversions | Duplicate small pure helpers exist. Centralize them with boundary tests without pulling graph dependencies into triage. | Early, only where both contracts match |
+| Excel text/date safety and atomic publication | Triage has _excel_safe, write_excel and publish; graph writes directly. Promote tested shared IO primitives with explicit error/overwrite adapters, not a universal report-layout class. | AG-002 and AG-005 |
+| Reachability/critical-path analysis | Triage currently counts one-hop blockers; graph can supply separate normalized dependency subgraphs. Keep triage weights, capacity matching, attention scores and RAG in triage. | After AG-004/AG-007; extend existing transitive-blocker backlog |
+
+The highest-value order is completeness and safe IO → explicit graph semantics →
+small transport/normalization helpers → shared snapshot replay → performance/UX.
+Avoid a general-purpose ADO framework until both tools require the same contract.

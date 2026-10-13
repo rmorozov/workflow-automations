@@ -10,6 +10,7 @@ upload workbook data. `ado-triage` reads (never writes) an on-premise Azure DevO
 | `xlsx-outline` | Fold repeated left-to-right sheet values into a Markdown outline | [XLSX outline](docs/specs/xlsx-outline.md) |
 | `xlsx-unfold` | Turn an edited outline back into rows, or merge it into the original | [XLSX outline](docs/specs/xlsx-outline.md#unfold-outline-to-table) |
 | `gerrit-parents` | Match repositories listed in a sheet to their closest parent in a Gerrit tree outline | [Gerrit parents](docs/specs/gerrit-parents.md) |
+| `ado-graph` | Export ADO work-item graphs and analyze saved Parquet data | [ADO graph/export](docs/specs/ado-graph.md) |
 | `ado-triage` | Rank ADO change-request scope into a triage agenda and team summary | [ADO scope triage](docs/specs/ado-triage.md) |
 
 ## Install
@@ -197,3 +198,26 @@ python -m build
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the shared development workflow and
 [the backlog](docs/backlog.md) for proposed extensions. The Apache-2.0 license
 applies to repository code.
+
+## Export and analyze an ADO graph
+
+The uploaded script is preserved verbatim as `ado-graph` (its help still says
+`ado_tool`). It reads ADO in export mode; analysis reads local Parquet files.
+
+```bash
+# Linux: install libkrb5-dev first if the Kerberos dependencies need building.
+python -m pip install -e '.[ado-graph]'
+ado-graph export --ado-url https://ado.example/DefaultCollection \
+  --project Example --query-id QUERY-GUID --output-dir work/ado-graph
+ado-graph analyze --nodes-file work/ado-graph/nodes.parquet \
+  --edges-file work/ado-graph/edges.parquet \
+  --steps orphans,scc,longest_chain --output-file work/ado-graph/report.xlsx
+```
+
+This is a preserved import, with inherited limitations: it overwrites outputs,
+requires the Kerberos dependencies even for offline analysis, and its filtering can
+stop traversal through excluded work items. The default `--steps all` includes
+unbounded cycle enumeration and exact centrality; choose steps deliberately on
+large graphs. Read the [restored specification](docs/specs/ado-graph.md) and
+[prioritized findings](docs/backlog.md#ado-graphexport) before using the results.
+The equivalent script invocation is `python scripts/ado_graph.py ...` after installation.
