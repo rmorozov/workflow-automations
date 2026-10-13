@@ -7,7 +7,8 @@ one file, `<ID>.md`, so parallel branches never edit the same backlog line.
 python scripts/backlog.py              # every open task
 python scripts/backlog.py ready        # tasks whose dependencies are done
 python scripts/backlog.py plan --busy AG-018
-                                       # waves of ready tasks that touch disjoint files
+                                       # waves of ready tasks that touch disjoint files;
+                                       # tasks conflicting with busy ones are listed as waiting
 python scripts/backlog.py check        # validate the files (also run by pytest)
 ```
 
@@ -38,11 +39,13 @@ What a test or measurement must show for the task to be done.
   tools, `TR` ADO triage, `XT` XLSX translation, `XO` XLSX outline/unfold, `GP`
   Gerrit parents, `RW` repository workflow.
 - `depends_on` lists tasks whose result this one needs. A deleted task is done, so a
-  dependency on a missing ID is satisfied.
+  dependency on a missing ID is satisfied. Cycles among open tasks fail `check`.
 - `touches` lists the files the change will edit: a path, a directory ending in `/`,
   or `path#section` for one section of a shared Markdown file (the anchor of its
-  heading). Two tasks may run in parallel only when their `touches` are disjoint;
-  different sections of one file count as disjoint.
+  heading). Two tasks may run in parallel only when their `touches` are disjoint.
+  A section includes its subsections: sibling sections are disjoint, a parent and a
+  section nested in it are not. An anchor must exist in the file; a file that does
+  not exist yet is reserved whole.
 - `model` and `effort` say which tier should implement it; see
   [agentic workflow](../agentic-workflow.md#models-and-effort).
 - Titles avoid `: ` so the front matter stays one `key: value` per line.

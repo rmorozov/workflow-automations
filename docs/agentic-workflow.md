@@ -73,7 +73,8 @@ one source of shared lines.
 | Long-lived branches | Drift from `main` | One task (or one lane bundle) per branch, branched from current `main`; merge `main` in before asking for review; merge small PRs quickly. |
 
 `python scripts/backlog.py plan --busy <IDs>` groups ready tasks into waves whose
-`touches:` are disjoint. Tasks in the same tool module land in successive waves:
+`touches:` are disjoint. Wave 1 can start now; tasks that conflict with a busy one
+are listed separately as waiting until its PR merges. Tasks in the same tool module land in successive waves:
 the module, not the scheduler, is the limit.
 
 ### Recommended order
