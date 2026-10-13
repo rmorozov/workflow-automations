@@ -201,8 +201,8 @@ applies to repository code.
 
 ## Export and analyze an ADO graph
 
-The uploaded script is preserved verbatim as `ado-graph` (its help still says
-`ado_tool`). It reads ADO in export mode; analysis reads local Parquet files.
+`ado-graph` (its help still says `ado_tool`) reads ADO in export mode; analysis
+reads local Parquet files.
 
 ```bash
 # Linux: install libkrb5-dev first if the Kerberos dependencies need building.
@@ -214,10 +214,14 @@ ado-graph analyze --nodes-file work/ado-graph/nodes.parquet \
   --steps orphans,scc,longest_chain --output-file work/ado-graph/report.xlsx
 ```
 
-This is a preserved import, with inherited limitations: it overwrites outputs,
-requires the Kerberos dependencies even for offline analysis, and its filtering can
-stop traversal through excluded work items. The default `--steps all` includes
+Type and project filters mark items out of scope without stopping traversal: export
+fetches filtered items, follows their links and writes them as bridge nodes
+(`In_Scope=False`), and analysis replaces each bridge with an `Indirect` edge so a
+Feature → Task → Feature chain stays connected. Pass `--filtered-relations stop` to
+skip filtered items instead (fewer ADO calls, but items reachable only through them
+are missed). The tool still overwrites outputs and needs the Kerberos dependencies
+even for offline analysis. The default `--steps all` includes
 unbounded cycle enumeration and exact centrality; choose steps deliberately on
-large graphs. Read the [restored specification](docs/specs/ado-graph.md) and
+large graphs. Read the [specification](docs/specs/ado-graph.md) and
 [prioritized findings](docs/backlog.md#ado-graphexport) before using the results.
 The equivalent script invocation is `python scripts/ado_graph.py ...` after installation.

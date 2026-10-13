@@ -1,4 +1,4 @@
-"""Entry point for the preserved ADO graph/export tool; install the ado-graph extra."""
+"""Entry point for the ADO graph/export tool; install the ado-graph extra."""
 
 from workflow_automations.ado_graph import main
 

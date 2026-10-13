@@ -18,41 +18,25 @@ Certificates:
   ADO_CERT_DIR) is appended to it.  The merged file path is written to
   REQUESTS_CA_BUNDLE so that msrest / requests picks it up automatically.
 
-Work-item type filtering (export mode):
-  --skip-types  comma-separated list of ADO WorkItemType values to exclude from
-                the output DataFrames.  Skipped items are still traversed so
-                their relations can lead to accepted items.
-  Default skip list: Task, Bug, Test Case, Test Suite, Test Plan, Test Run,
-                     Shared Steps, Shared Parameter.
-  Pass --skip-types "" to disable all filtering.
+Work-item filtering (export mode):
+  --skip-types        comma-separated WorkItemType values to mark out of scope.
+                      Default: Task, Bug, Test Case, Test Suite, Test Plan,
+                      Test Run, Shared Steps, Shared Parameter.
+                      Pass --skip-types "" to disable type filtering.
+  --include-projects  comma-separated project names to keep in scope
+                      (case-insensitive, System.TeamProject). Omit for all.
 
-ADO project filtering (export mode):
-  --include-projects  comma-separated list of ADO project names to include
-                      (case-insensitive, matched against System.TeamProject).
-                      Work items from other projects are excluded from
-                      nodes/edges but still traversed.
-  When omitted, ALL projects are accepted.
-
-BFS optimisation — WIQL pre-seed index (WIIndex):
-  When --include-projects is given, the tool runs cheap WIQL SELECT [System.Id]
-  queries (once per included project) BEFORE the BFS starts.  This populates a
-  local ID → classification lookup so that relation targets can be resolved
-  without an ADO round-trip:
-
-    • IDs in included projects with an accepted type  → queued for full fetch
-    • IDs in included projects with a skipped type    → counted in stats,
-                                                        dropped from fetch batch
-    • IDs discovered from excluded projects           → counted in stats,
-                                                        dropped from fetch batch
-
-  Net effect: the BFS only calls get_work_items_batch for WIs that will
-  actually produce output or whose relations are unknown.  On a graph of
-  50 000 WIs with 30 % filtered out, this eliminates roughly 150 batch
-  round-trips.
+  Filtering decides output scope, not reachability.  With the default
+  --filtered-relations follow, every fetched work item's relations are
+  traversed and filtered items are exported as bridge nodes
+  (In_Scope=False), so `analyze` can keep accepted items connected through
+  them.  With --filtered-relations stop, relations of filtered items are not
+  followed and queued IDs are classified once via WIQL so filtered items are
+  not fetched at all.
 
 Export statistics:
   After each BFS batch a live line is logged showing visited / added /
-  skipped / excluded / queued counts.
+  skipped / excluded / pruned / omitted / queued counts.
   A formatted per-type and per-project table is printed when BFS completes.
 """
 
@@ -60,9 +44,9 @@ from __future__ import annotations
 
 import argparse
 import collections
+import itertools
 import logging
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -136,6 +120,9 @@ ADO_BATCH_LIMIT = 200
 
 # ADO WIQL query_by_wiql hard limit (server-side top)
 ADO_WIQL_PAGE = 20_000
+
+# IDs per WIQL filter query; keeps the query text well under WIQL length limits
+WIQL_FILTER_CHUNK = 1000
 
 # Field renames: ADO reference name → friendly column name in DataFrames
 FIELD_RENAME: dict[str, str] = {
@@ -271,7 +258,7 @@ class ADOClient:
         valid_ids = set()
 
         # Process in chunks of 1000 to avoid exceeding WIQL string length limits
-        for chunk in _iter_chunks(ids, 1000):
+        for chunk in _iter_chunks(ids, WIQL_FILTER_CHUNK):
             id_list = ",".join(map(str, chunk))
             wiql = f"SELECT [System.Id] FROM WorkItems WHERE [System.Id] IN ({id_list})"
 
@@ -297,46 +284,6 @@ class ADOClient:
         return valid_ids
 
     # ------------------------------------------------------------------
-    # Ad-hoc WIQL (returns IDs only, used by WIIndex pre-seed)
-    # ------------------------------------------------------------------
-
-    def query_wiql_ids(self, wiql_text: str, project: str = "") -> list[int]:
-        """
-        Execute an arbitrary WIQL string and return all matching WI IDs.
-
-        ADO caps query_by_wiql results at ADO_WIQL_PAGE (20 000) per call.
-        We implement ID-keyset pagination: after each page we inject
-        `AND [System.Id] > <last_id>` and re-query until a page arrives
-        with fewer rows than the page size.
-
-        The WIQL must include `ORDER BY [System.Id] ASC` (or no ORDER BY)
-        for keyset pagination to be correct; _build_wiql_for_project enforces
-        this.
-        """
-        team_context = TeamContext(project=project) if project else None
-        all_ids: list[int] = []
-        base_wiql = wiql_text
-        last_id = 0
-
-        while True:
-            current_wiql = _wiql_append_id_gt(base_wiql, last_id) if last_id else base_wiql
-            result = self.wit.query_by_wiql(
-                wiql=Wiql(query=current_wiql),
-                team_context=team_context,
-                top=ADO_WIQL_PAGE,
-            )
-            page = [ref.id for ref in (result.work_items or [])]
-            all_ids.extend(page)
-
-            if len(page) < ADO_WIQL_PAGE:
-                break  # last page reached
-
-            last_id = page[-1]
-            log.debug("WIQL page: %d ids, continuing from id > %d", len(page), last_id)
-
-        return all_ids
-
-    # ------------------------------------------------------------------
     # Batch work-item fetch (fields + relations)
     # ------------------------------------------------------------------
 
@@ -350,276 +297,10 @@ class ADOClient:
         request = WorkItemBatchGetRequest(ids=ids, expand="Relations", error_policy="Omit")
         return self.wit.get_work_items_batch(request) or []
 
-    def get_work_item_types_batch(self, ids: list[int]) -> dict[int, str]:
-        """
-        Fetch only System.WorkItemType for a list of IDs.
-        Used by WIIndex to learn the type of skipped-type IDs cheaply
-        (no relations expansion, minimal payload).
-        Returns {wi_id: WorkItemType}.
-        """
-        if not ids:
-            return {}
-        result: dict[int, str] = {}
-        for chunk in _iter_chunks(ids, ADO_BATCH_LIMIT):
-            req = WorkItemBatchGetRequest(
-                ids=chunk,
-                fields=["System.Id", "System.WorkItemType"],
-            )
-            items = self.wit.get_work_items_batch(req) or []
-            for wi in items:
-                wi_type = (wi.fields or {}).get("System.WorkItemType", "Unknown")
-                result[wi.id] = wi_type
-        return result
-
     def get_available_fields(self) -> list[str]:
         """Return all field reference names defined in the collection."""
         fields = self.wit.get_fields()
         return [f.reference_name for f in (fields or [])]
-
-
-# ---------------------------------------------------------------------------
-# WIQL helpers
-# ---------------------------------------------------------------------------
-
-
-def _wiql_append_id_gt(wiql: str, last_id: int) -> str:
-    """
-    Inject `AND [System.Id] > <last_id>` for keyset pagination.
-
-    Inserts before the ORDER BY clause if one is present, otherwise appends.
-    Handles both upper and mixed case ORDER BY.
-
-    Example:
-        SELECT [System.Id] FROM WorkItems
-        WHERE [System.TeamProject] = 'Foo'
-        ORDER BY [System.Id] ASC
-      → (last_id=5000)
-        SELECT [System.Id] FROM WorkItems
-        WHERE [System.TeamProject] = 'Foo'
-        AND [System.Id] > 5000
-        ORDER BY [System.Id] ASC
-    """
-    clause = f" AND [System.Id] > {last_id}"
-    # Case-insensitive search for ORDER
-    match = re.search(r"\bORDER\b", wiql, re.IGNORECASE)
-    if match:
-        pos = match.start()
-        return wiql[:pos].rstrip() + clause + " " + wiql[pos:]
-    return wiql.rstrip() + clause
-
-
-def _build_wiql_for_project(
-    project: str,
-    skip_types: frozenset[str],
-    *,
-    include_skipped: bool,
-) -> str:
-    """
-    Build a WIQL SELECT [System.Id] query for *project*.
-
-    When include_skipped=False: selects WIs whose type is NOT in skip_types
-    (i.e. the accepted IDs).
-    When include_skipped=True: selects WIs whose type IS in skip_types
-    (i.e. the type-skipped IDs we want to count in stats).
-
-    The query always ends with ORDER BY [System.Id] ASC so keyset pagination
-    is safe.
-    """
-    proj_safe = project.replace("'", "\\'")
-
-    if not skip_types:
-        # No type filter — all WIs in the project are accepted
-        return (
-            f"SELECT [System.Id] FROM WorkItems "
-            f"WHERE [System.TeamProject] = '{proj_safe}' "
-            f"ORDER BY [System.Id] ASC"
-        )
-
-    types_sql = ", ".join(f"'{t}'" for t in sorted(skip_types))
-
-    if include_skipped:
-        type_clause = f"AND [System.WorkItemType] IN ({types_sql})"
-    else:
-        type_clause = f"AND [System.WorkItemType] NOT IN ({types_sql})"
-
-    return (
-        f"SELECT [System.Id] FROM WorkItems "
-        f"WHERE [System.TeamProject] = '{proj_safe}' "
-        f"{type_clause} "
-        f"ORDER BY [System.Id] ASC"
-    )
-
-
-# ---------------------------------------------------------------------------
-# WIIndex: WIQL pre-seed for zero-cost BFS classification
-# ---------------------------------------------------------------------------
-
-
-class WIIndex:
-    """
-    Lightweight ID → classification lookup built from WIQL queries BEFORE
-    the BFS starts.
-
-    Why this matters
-    ────────────────
-    In a large ADO graph, the BFS discovers thousands of relation targets
-    belonging to excluded projects or filtered-out types.  Without an index,
-    every such ID must be fetched from ADO (occupying a slot in a 200-item
-    batch) just to learn it should be discarded — wasting HTTP round-trips
-    for zero output value.
-
-    The index makes classification free (O(1) set lookup) for all IDs that
-    fall into the included projects.  Concretely:
-
-      • Pre-seed fires 2 WIQL queries per included project:
-          Query A – accepted IDs (type NOT IN skip_types)
-          Query B – skipped-type IDs (type IN skip_types, type field fetched
-                    in cheap fields-only batches, no relations expansion)
-        Both queries return only [System.Id], evaluated server-side.
-        Total requests: 2×P WIQL + ceil(|skipped_ids| / 200) batch calls.
-
-      • During BFS, before each fetch batch, we sweep the candidate IDs:
-          – known-accepted     → goes into the fetch batch as normal
-          – known-skipped-type → counted in stats, removed from batch
-          – known-excl-project → counted in stats, removed from batch
-          – unknown            → goes into the fetch batch (fallback path)
-
-    Request budget vs savings (illustrative, 50 000 WIs, 30 % filtered):
-      Pre-seed cost : 2 WIQL calls + ~75 batch calls (for skipped-type types)
-      BFS savings   : ~75 batch calls that would have fetched filtered WIs
-      Break-even    : essentially immediate for any graph > ~2 000 WIs
-
-    Excluded projects
-    ─────────────────
-    We do NOT pre-enumerate excluded projects (we don't know which projects
-    exist outside include_projects without an extra API call).  Instead, when
-    BFS fetches a WI from an unknown project and discovers it is excluded, we
-    register that ID lazily so future encounters are free.
-
-    Thread safety: not applicable — single-threaded BFS.
-    """
-
-    ACCEPTED = "accepted"
-    SKIPPED_TYPE = "skipped_type"
-    EXCLUDED_PROJECT = "excluded_project"
-    UNKNOWN = "unknown"
-
-    def __init__(self) -> None:
-        # IDs of WIs that pass both project and type filters
-        self._accepted: set[int] = set()
-        # IDs of WIs whose type is in skip_types (within included projects)
-        self._excl_type: dict[int, str] = {}  # id → WorkItemType
-        # IDs of WIs from excluded projects (discovered lazily during BFS)
-        self._excl_proj: dict[int, str] = {}  # id → project name
-        self._built = False
-
-    # ------------------------------------------------------------------
-    # Build phase — called once before BFS
-    # ------------------------------------------------------------------
-
-    def build(
-        self,
-        client: ADOClient,
-        include_projects: frozenset[str],
-        skip_types: frozenset[str],
-    ) -> None:
-        """
-        Run WIQL pre-seed for every included project and populate the index.
-        """
-        log.info("WIIndex: pre-seeding from %d project(s) …", len(include_projects))
-        total_accepted = 0
-        total_skipped = 0
-
-        for proj in sorted(include_projects):
-            n_acc, n_skp = self._seed_project(client, proj, skip_types)
-            log.info("  %-35s  accepted: %6d  skipped-type: %6d", proj, n_acc, n_skp)
-            total_accepted += n_acc
-            total_skipped += n_skp
-
-        log.info(
-            "WIIndex ready — %d accepted IDs, %d skipped-type IDs pre-classified.",
-            total_accepted,
-            total_skipped,
-        )
-        self._built = True
-
-    def _seed_project(
-        self,
-        client: ADOClient,
-        project: str,
-        skip_types: frozenset[str],
-    ) -> tuple[int, int]:
-        """
-        Seed one project into the index.
-
-        Query A: accepted IDs (type NOT in skip_types, or all if no filter)
-        Query B: skipped-type IDs (type IN skip_types) — then fetch their
-                 type names via a fields-only batch so stats show per-type
-                 counts.
-
-        Returns (n_accepted, n_skipped_type).
-        """
-        # ── Query A: accepted IDs ─────────────────────────────────────────
-        wiql_a = _build_wiql_for_project(project, skip_types, include_skipped=False)
-        accepted_ids = client.query_wiql_ids(wiql_a, project=project)
-        self._accepted.update(accepted_ids)
-
-        # ── Query B: skipped-type IDs (only when type filter is active) ───
-        skipped_count = 0
-        if skip_types:
-            wiql_b = _build_wiql_for_project(project, skip_types, include_skipped=True)
-            skipped_ids = client.query_wiql_ids(wiql_b, project=project)
-
-            if skipped_ids:
-                # Fetch only WorkItemType for these IDs — no relations, cheap.
-                type_map = client.get_work_item_types_batch(skipped_ids)
-                for wi_id, wi_type in type_map.items():
-                    self._excl_type[wi_id] = wi_type
-                skipped_count = len(type_map)
-
-        return len(accepted_ids), skipped_count
-
-    # ------------------------------------------------------------------
-    # Query phase — called per queued ID during BFS sweep
-    # ------------------------------------------------------------------
-
-    def classify(self, wi_id: int) -> str:
-        """
-        Return one of ACCEPTED / SKIPPED_TYPE / EXCLUDED_PROJECT / UNKNOWN.
-
-        UNKNOWN means the ID was not seen during pre-seed (e.g. it belongs
-        to a project outside include_projects that we haven't seen yet, or
-        no project filter is active).  The BFS falls through to a normal
-        ADO batch fetch for UNKNOWN IDs.
-        """
-        if not self._built:
-            return self.UNKNOWN
-        if wi_id in self._accepted:
-            return self.ACCEPTED
-        if wi_id in self._excl_type:
-            return self.SKIPPED_TYPE
-        if wi_id in self._excl_proj:
-            return self.EXCLUDED_PROJECT
-        return self.UNKNOWN
-
-    def type_of(self, wi_id: int) -> str:
-        """Return the WorkItemType for a SKIPPED_TYPE ID."""
-        return self._excl_type.get(wi_id, "Unknown")
-
-    def project_of(self, wi_id: int) -> str:
-        """Return the project name for an EXCLUDED_PROJECT ID."""
-        return self._excl_proj.get(wi_id, "Unknown")
-
-    def register_excluded(self, wi_id: int, project: str) -> None:
-        """
-        Lazily register an ID discovered (via BFS fetch) to belong to an
-        excluded project.  Subsequent encounters of this ID are free.
-        """
-        self._excl_proj[wi_id] = project
-
-    @property
-    def size(self) -> int:
-        return len(self._accepted) + len(self._excl_type) + len(self._excl_proj)
 
 
 # ---------------------------------------------------------------------------
@@ -636,12 +317,18 @@ class ExportStats:
       skipped_type     – WIs excluded by the type filter, keyed by WorkItemType.
       excluded_project – WIs excluded by the project filter, keyed by project name.
       visited          = added + skipped_type + excluded_project (derived).
+      pruned           – queued IDs rejected by the WIQL filter and never fetched
+                         (only with --filtered-relations stop).
+      omitted          – IDs requested from ADO but not returned (deleted or
+                         inaccessible); listed in omitted_ids.
     """
 
     def __init__(self) -> None:
         self.added: collections.Counter = collections.Counter()
         self.skipped_type: collections.Counter = collections.Counter()
         self.excluded_project: collections.Counter = collections.Counter()
+        self.pruned: int = 0
+        self.omitted_ids: list[int] = []
 
     def record_added(self, wi_type: str) -> None:
         self.added[wi_type] += 1
@@ -672,11 +359,13 @@ class ExportStats:
         """Single-line progress update via logging (tqdm-friendly)."""
         log.info(
             "Progress – visited: %d | added: %d | skipped(type): %d"
-            " | excluded(project): %d | queued: %d",
+            " | excluded(project): %d | pruned: %d | omitted: %d | queued: %d",
             self.total_visited,
             self.total_added,
             self.total_skipped_type,
             self.total_excluded_project,
+            self.pruned,
+            len(self.omitted_ids),
             queue_remaining,
         )
 
@@ -685,6 +374,8 @@ class ExportStats:
         print()
         self._print_type_table()
         self._print_project_table()
+        print(f"  Pruned via WIQL (not fetched): {self.pruned:,}")
+        print(f"  Omitted by ADO (not returned): {len(self.omitted_ids):,}")
         if queue_remaining:
             print(f"  Queue remaining: {queue_remaining:,}")
         print()
@@ -800,6 +491,45 @@ def _project_from_wi(wi_fields: dict) -> str:
     return area_path.split("\\")[0] if area_path else "Unknown"
 
 
+def _preview_ids(ids: list[int], limit: int = 20) -> str:
+    shown = ", ".join(map(str, ids[:limit]))
+    return shown + (f" … (+{len(ids) - limit} more)" if len(ids) > limit else "")
+
+
+def _prune_queue_via_wiql(
+    client: ADOClient,
+    queued: dict[int, None],
+    visited: set[int],
+    wiql_checked: set[int],
+    batch_size: int,
+    include_projects: frozenset[str],
+    skip_types: frozenset[str],
+) -> int:
+    """
+    Drop queued IDs that fail the project/type filter, without fetching them.
+
+    Runs only when the next fetch batch holds an ID not yet checked, and then
+    checks up to one WIQL chunk of unchecked IDs from the queue head.  Every ID
+    is sent to WIQL at most once.  Returns the number of IDs dropped.
+    """
+    if all(wi_id in wiql_checked for wi_id in itertools.islice(queued, batch_size)):
+        return 0
+    pending = list(
+        itertools.islice((i for i in queued if i not in wiql_checked), WIQL_FILTER_CHUNK)
+    )
+    valid = client.filter_ids_via_wiql(pending, include_projects, skip_types)
+    wiql_checked.update(pending)
+    pruned = 0
+    for wi_id in pending:
+        if wi_id not in valid:
+            del queued[wi_id]
+            visited.add(wi_id)
+            pruned += 1
+    if pruned:
+        log.info("Pruned %d out-of-scope queued WIs via WIQL.", pruned)
+    return pruned
+
+
 def run_export(args: argparse.Namespace) -> None:
     """Entry point for `export` mode."""
 
@@ -830,44 +560,45 @@ def run_export(args: argparse.Namespace) -> None:
     initial_ids = client.run_query_by_id(project, args.query_id)
     log.info("Query returned %d work item(s).", len(initial_ids))
 
-    # NOTE: The upfront WIIndex build has been removed to prevent excessive ADO load.
-    # Unknown IDs are now handled natively or pruned lazily via WIQL below.
+    filtering = bool(include_projects or skip_types)
+    follow_filtered = args.filtered_relations == "follow"
 
     visited: set[int] = set()
+    # IDs already sent to the WIQL filter, so each ID is checked at most once.
+    wiql_checked: set[int] = set()
     queued: dict[int, None] = dict.fromkeys(initial_ids)
     all_node_rows: list[dict] = []
     all_edge_rows: list[dict] = []
     stats = ExportStats()
 
-    log.info("Starting BFS export (batch_size=%d).", batch_size)
+    log.info(
+        "Starting BFS export (batch_size=%d, filtered relations: %s).",
+        batch_size,
+        args.filtered_relations,
+    )
 
     with tqdm(desc="Fetching work items", unit="WI") as pbar:
         while queued:
-            # ── PRUNE QUEUE OPTIMIZATION ─────────────────────────────────
-            # Dynamically prune unvisited IDs via WIQL to prevent queue bloat.
-            # Triggered when queued is at least 3x the batch size.
-            if (include_projects or skip_types) and len(queued) >= batch_size * 3:
-                # Keep the immediate next batch, prune the rest
-                candidates = list(queued.keys())
-                ids_to_prune = candidates[batch_size:]
-
-                valid_subset = client.filter_ids_via_wiql(
-                    ids_to_prune, include_projects, skip_types
+            # ── a) Classify unchecked queued IDs (stop mode only) ─────────
+            # A WIQL filter cannot see relations, so dropping IDs before
+            # fetch is only sound when relations of filtered items are not
+            # followed anyway.
+            if filtering and not follow_filtered:
+                stats.pruned += _prune_queue_via_wiql(
+                    client,
+                    queued,
+                    visited,
+                    wiql_checked,
+                    batch_size,
+                    include_projects,
+                    skip_types,
                 )
+                if not queued:
+                    break
 
-                pruned_count = 0
-                for pid in ids_to_prune:
-                    if pid not in valid_subset:
-                        del queued[pid]
-                        visited.add(pid)  # Mark visited so we don't requeue them later
-                        pruned_count += 1
-
-                if pruned_count > 0:
-                    log.info(" Queue optimized: pruned %d out-of-scope WIs via WIQL.", pruned_count)
-
-            # ── a) Pull next candidate batch ───────────────────────────────
+            # ── b) Pull next candidate batch ───────────────────────────────
             fetch_ids = []
-            for wi_id in list(queued.keys())[:batch_size]:
+            for wi_id in list(itertools.islice(queued, batch_size)):
                 del queued[wi_id]
                 if wi_id not in visited:
                     visited.add(wi_id)
@@ -878,32 +609,46 @@ def run_export(args: argparse.Namespace) -> None:
                 continue
 
             # ── c) Batch fetch the IDs ─────────────────────────────────────
-            raw_items = client.get_work_items_batch(fetch_ids)
+            raw_items = [wi for wi in client.get_work_items_batch(fetch_ids) if wi is not None]
+            returned = {wi.id for wi in raw_items}
+            missing = [wi_id for wi_id in fetch_ids if wi_id not in returned]
+            if missing:
+                stats.omitted_ids.extend(missing)
+                log.warning(
+                    "ADO omitted %d requested work item(s) (deleted or inaccessible): %s",
+                    len(missing),
+                    _preview_ids(missing),
+                )
 
             # ── d) Process results ─────────────────────────────────────────
             for wi in raw_items:
-                if wi is None:
-                    continue
                 fields: dict = wi.fields or {}
                 wi_type: str = fields.get("System.WorkItemType", "Unknown")
                 wi_project: str = _project_from_wi(fields)
                 node_row, edge_rows = _parse_wi(wi)
 
-                # Enqueue relation targets
-                for er in edge_rows:
-                    tid: int = er["Target_ID"]
-                    if tid not in visited:
-                        queued.setdefault(tid, None)
-
-                # Standard filtering
+                # Filtering decides output scope; traversal is separate.
                 if include_projects and wi_project.lower() not in include_projects:
                     stats.record_excluded_project(wi_project)
+                    in_scope = False
                 elif skip_types and wi_type.lower() in skip_types:
                     stats.record_skipped_type(wi_type)
+                    in_scope = False
                 else:
                     stats.record_added(wi_type)
-                    all_node_rows.append(node_row)
-                    all_edge_rows.extend(edge_rows)
+                    in_scope = True
+
+                if in_scope or follow_filtered:
+                    for er in edge_rows:
+                        tid: int = er["Target_ID"]
+                        if tid not in visited:
+                            queued.setdefault(tid, None)
+
+                # Every fetched item is exported. Out-of-scope items are bridge
+                # nodes that keep accepted items connected in `analyze`.
+                node_row["In_Scope"] = in_scope
+                all_node_rows.append(node_row)
+                all_edge_rows.extend(edge_rows)
 
             pbar.update(len(fetch_ids))
             pbar.set_postfix(
@@ -926,11 +671,15 @@ def run_export(args: argparse.Namespace) -> None:
 
     stats.print_summary()
     log.info(
-        "Collected %d nodes, %d edges  (skipped by type: %d | excluded by project: %d).",
+        "Collected %d nodes (%d in scope), %d edges  "
+        "(skipped by type: %d | excluded by project: %d | pruned: %d | omitted: %d).",
         len(df_nodes),
+        stats.total_added,
         len(df_edges),
         stats.total_skipped_type,
         stats.total_excluded_project,
+        stats.pruned,
+        len(stats.omitted_ids),
     )
 
     # 7. Export
@@ -978,6 +727,19 @@ def _export_excel(df_nodes: pd.DataFrame, df_edges: pd.DataFrame, d: Path) -> No
 # ---------------------------------------------------------------------------
 # GraphAnalyzer
 # ---------------------------------------------------------------------------
+
+
+def _edge_path(edge_data: dict) -> tuple[str, ...]:
+    return edge_data.get("path") or (str(edge_data.get("link_type")),)
+
+
+def _edge_label(edge_data: dict) -> str:
+    """Link label for reports; indirect edges name their bridges and link types."""
+    label = str(edge_data.get("link_type"))
+    via = edge_data.get("via")
+    if not via:
+        return label
+    return f"{label} via {'>'.join(map(str, via))} ({', '.join(_edge_path(edge_data))})"
 
 
 class GraphAnalyzer:
@@ -1055,6 +817,44 @@ class GraphAnalyzer:
         log.info(
             "Graph built: %d nodes, %d normalized edges.", self.G.number_of_nodes(), edge_count
         )
+        self._contract_bridges()
+
+    def _contract_bridges(self) -> None:
+        """
+        Replace out-of-scope bridge nodes (In_Scope == False) with indirect edges.
+
+        For a bridge B with P -> B -> S, add P -> S labelled "Indirect", with the
+        bridge IDs in its `via` attribute and the normalized link types along the
+        way in `path`, unless P -> S already exists.  Chains of
+        bridges collapse into one edge.  A cycle passing only through bridges back
+        to the same node (P -> B -> P) is dropped rather than kept as a self-loop.
+        Exports without an In_Scope column are treated as fully in scope.
+        """
+        if "In_Scope" not in self.df_nodes.columns:
+            return
+        in_scope = self.df_nodes["In_Scope"].fillna(True).astype(bool)
+        bridges = list(self.df_nodes.loc[~in_scope, "WI_ID"])
+        added = 0
+        for bridge in bridges:
+            for pred in list(self.G.predecessors(bridge)):
+                for succ in list(self.G.successors(bridge)):
+                    if pred == succ or pred == bridge or succ == bridge:
+                        continue
+                    if self.G.has_edge(pred, succ):
+                        continue
+                    into, out = self.G[pred][bridge], self.G[bridge][succ]
+                    via = into.get("via", ()) + (bridge,) + out.get("via", ())
+                    path = _edge_path(into) + _edge_path(out)
+                    self.G.add_edge(pred, succ, link_type="Indirect", via=via, path=path)
+                    added += 1
+            self.G.remove_node(bridge)
+        self.df_nodes = self.df_nodes[in_scope].reset_index(drop=True)
+        log.info(
+            "Contracted %d bridge node(s) into %d indirect edge(s); %d in-scope nodes remain.",
+            len(bridges),
+            added,
+            self.G.number_of_nodes(),
+        )
 
     def _meta(self, wi_id: int, prefix: str = "") -> dict:
         """Helper: Returns standardized metadata columns for any Node."""
@@ -1079,13 +879,13 @@ class GraphAnalyzer:
         for pred in self.G.predecessors(node_id):
             edge_data = self.G.edges[pred, node_id]
             pred_type = self.G.nodes[pred].get("WorkItemType", "Unknown")
-            diagnostics.append(f"<- [{edge_data.get('link_type')}] from {pred_type} ({pred})")
+            diagnostics.append(f"<- [{_edge_label(edge_data)}] from {pred_type} ({pred})")
 
         # Outgoing edges (What this node points to)
         for succ in self.G.successors(node_id):
             edge_data = self.G.edges[node_id, succ]
             succ_type = self.G.nodes[succ].get("WorkItemType", "Unknown")
-            diagnostics.append(f"-> [{edge_data.get('link_type')}] to {succ_type} ({succ})")
+            diagnostics.append(f"-> [{_edge_label(edge_data)}] to {succ_type} ({succ})")
 
         return " | ".join(diagnostics) if diagnostics else "Isolated Node"
 
@@ -1461,6 +1261,16 @@ def run_analyze(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {raw!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ado_tool",
@@ -1487,9 +1297,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ep.add_argument(
         "--batch-size",
-        type=int,
+        type=_positive_int,
         default=200,
-        help=f"WI fetch batch size (max {ADO_BATCH_LIMIT}, default 200).",
+        help=f"WI fetch batch size, at least 1 (max {ADO_BATCH_LIMIT}, default 200).",
     )
     ep.add_argument(
         "--cert-dir",
@@ -1514,9 +1324,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=",".join(DEFAULT_SKIP_TYPES),
         metavar="TYPES",
         help=(
-            "Comma-separated ADO WorkItemType values to exclude (case-insensitive).  "
-            "Skipped items are still traversed.  Default: %(default)s.  "
-            "Pass '' to disable."
+            "Comma-separated ADO WorkItemType values to mark out of scope "
+            "(case-insensitive).  See --filtered-relations for traversal.  "
+            "Default: %(default)s.  Pass '' to disable."
         ),
     )
     ep.add_argument(
@@ -1524,10 +1334,21 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         metavar="PROJECTS",
         help=(
-            "Comma-separated ADO project names to include (case-insensitive).  "
-            "Work items from other projects are excluded from output but still "
-            "traversed.  When set, a WIQL pre-seed index is built to avoid "
-            "fetching filtered-out WIs.  Omit to accept all projects."
+            "Comma-separated ADO project names to keep in scope (case-insensitive).  "
+            "Work items from other projects are marked out of scope.  "
+            "Omit to accept all projects."
+        ),
+    )
+    ep.add_argument(
+        "--filtered-relations",
+        choices=("follow", "stop"),
+        default="follow",
+        help=(
+            "follow (default): fetch filtered work items, traverse their relations and "
+            "export them as bridge nodes (In_Scope=False), so accepted items reachable "
+            "only through them are found.  stop: do not traverse relations of filtered "
+            "items; queued IDs are classified once via WIQL and filtered ones are not "
+            "fetched (fewer ADO calls, smaller graph)."
         ),
     )
 
