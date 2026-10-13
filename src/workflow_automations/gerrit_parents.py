@@ -42,12 +42,14 @@ PATH_SEPARATOR = " / "
 ADDED_COLUMNS = ["Parent", "Path", "Status"]
 
 
-@dataclass(frozen=True)
+@dataclass
 class Place:
     """Where a name occurs in the tree: its ancestors from the root, outermost first."""
 
     ancestors: tuple[str, ...]
+    # First tree lines of this item and of its parent (0 at the top level).
     line: int
+    parent_line: int
     leaf: bool
 
     @property
@@ -74,16 +76,22 @@ class Match:
 def index_tree(root: Item, raw: bool) -> dict[str, list[Place]]:
     """Map every item name to the distinct places it occurs, in document order."""
     places: dict[str, list[Place]] = {}
+    first: dict[tuple[str, ...], int] = {(): 0}
 
     def walk(item: Item, ancestors: tuple[str, ...]) -> None:
         for child in item.children:
             name = unescape(child.text, raw)
             if not name:
                 raise ValidationError(f"Tree line {child.line} has an empty item")
+            line = first.setdefault((*ancestors, name), child.line)
             seen = places.setdefault(name, [])
-            # The same name listed twice under the same parent is one project.
-            if all(place.ancestors != ancestors for place in seen):
-                seen.append(Place(ancestors, child.line, not child.children))
+            # The same name listed twice under the same parent is one project: it keeps
+            # its first position and has children if any of its listings has them.
+            same = [place for place in seen if place.ancestors == ancestors]
+            if same:
+                same[0].leaf &= not child.children
+            else:
+                seen.append(Place(ancestors, line, first[ancestors], not child.children))
             walk(child, (*ancestors, name))
 
     walk(root, ())
@@ -121,14 +129,17 @@ def render(results: list[Match], indent: int, raw: bool) -> str:
     show = (lambda value: value) if raw else escape
     pad = " " * indent
     groups: dict[tuple[str, ...], dict[str, int]] = {}
+    parent_lines: dict[tuple[str, ...], int] = {}
     for result in results:
         if result.status == MATCHED:
-            groups.setdefault(result.path, {})[result.repo] = result.places[0].line
+            place = result.places[0]
+            groups.setdefault(result.path, {})[result.repo] = place.line
+            parent_lines[result.path] = place.parent_line
     # Two parents with the same name in different branches are told apart by path.
     names = [path[-1] for path in groups]
     out: list[str] = []
     # Parents and their repositories follow the tree's order.
-    for path in sorted(groups, key=lambda path: min(groups[path].values())):
+    for path in sorted(groups, key=parent_lines.__getitem__):
         label = path[-1] if names.count(path[-1]) == 1 else PATH_SEPARATOR.join(path)
         out.append(f"- {show(label)}")
         repos = groups[path]

@@ -133,6 +133,29 @@ def test_duplicate_listing_under_same_parent_is_one_project(tmp_path, capsys):
     assert out == "- some-projects\n  - repo1\n"
 
 
+def test_parents_follow_their_own_tree_position(tmp_path, capsys):
+    # ParentA's own repository comes after the subtree of ParentB, nested inside it.
+    text = "- All-Projects\n  - ParentA\n    - ParentB\n      - repoB\n    - repoA\n"
+    for order in (["repoA", "repoB"], ["repoB", "repoA"]):
+        source = workbook(tmp_path, [["repos"], *([name] for name in order)])
+        status, out, _ = run(capsys, "--input", source, "--tree", tree(tmp_path, text))
+        assert status == 0
+        assert out == "- ParentA\n  - repoA\n- ParentB\n  - repoB\n"
+
+
+@pytest.mark.parametrize("children_first", [False, True])
+def test_duplicate_listing_with_children_is_not_a_leaf(tmp_path, capsys, children_first):
+    listings = ["  - repoA\n", "  - repoA\n    - repoB\n"]
+    if children_first:
+        listings.reverse()
+    source = workbook(tmp_path, [["repos"], ["repoA"]])
+    text = "- All-Projects\n" + "".join(listings)
+    status, out, err = run(capsys, "--input", source, "--tree", tree(tmp_path, text))
+    assert status == 0
+    assert out == "- All-Projects\n  - repoA\n"
+    assert "have children of their own (1): repoA" in err
+
+
 def test_same_parent_name_in_two_branches_shows_paths(tmp_path, capsys):
     text = "- a\n  - common\n    - x\n- b\n  - common\n    - y\n"
     source = workbook(tmp_path, [["repos"], ["x"], ["y"]])

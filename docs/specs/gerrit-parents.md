@@ -56,7 +56,8 @@ title rather than a project. Markdown backslash escapes are removed (`my\_repo` 
 
 - A repository matches a tree item with exactly the same name (case-sensitive).
 - Its parent is the item directly above it; its path is every ancestor from the root.
-- The same name listed twice under the same parent counts once.
+- The same name listed twice under the same parent counts once, at its first position;
+  it has children if any of its listings has them.
 - A name not in the tree is `not found`; a name under two or more different parents is
   `ambiguous`; a top-level item is `no parent`. None of these is guessed.
 - An item that has children of its own still matches; the summary lists such names,
@@ -71,7 +72,8 @@ repository rows included. The sheet keeps its name unless `--output-sheet` is gi
 A sheet that already has a `Parent`, `Path` or `Status` column is rejected.
 
 `--outline` writes Markdown: each parent once, repositories beneath it, duplicates
-removed. Parents and repositories follow the tree's order. When two parents in
+removed. Parents follow their own first position in the tree, and repositories
+their positions within it. When two parents in
 different branches have the same name, both are labelled with their full path.
 Unresolved names follow in sections `(top level, no parent)`, `(under more than one
 parent)` (with candidate paths) and `(not found in tree)`. Text is Markdown-escaped
