@@ -9,6 +9,7 @@ upload workbook data. `ado-triage` reads (never writes) an on-premise Azure DevO
 | `xlsx-translate` | Deduplicate workbook text and apply translations by ID | [XLSX translation](docs/specs/xlsx-translation.md) |
 | `xlsx-outline` | Fold repeated left-to-right sheet values into a Markdown outline | [XLSX outline](docs/specs/xlsx-outline.md) |
 | `xlsx-unfold` | Turn an edited outline back into rows, or merge it into the original | [XLSX outline](docs/specs/xlsx-outline.md#unfold-outline-to-table) |
+| `gerrit-parents` | Match repositories listed in a sheet to their closest parent in a Gerrit tree outline | [Gerrit parents](docs/specs/gerrit-parents.md) |
 | `ado-triage` | Rank ADO change-request scope into a triage agenda and team summary | [ADO scope triage](docs/specs/ado-triage.md) |
 
 ## Install
@@ -145,6 +146,23 @@ merging needs them, and the new-workbook mode uses them to restore duplicate row
 fingerprint that stops a merge into a sheet changed since. If your editor drops or
 mangles front matter, leave it out and pass `--columns`, `--details` (and any other
 outline options you used) to `xlsx-unfold` instead. Neither mode modifies its inputs.
+
+## Find Gerrit parents
+
+```bash
+python -m pip install -e '.[outline]'
+gerrit-parents --input repos.xlsx --column repos --tree gerrit-tree.md \
+  --output work/repos-parents.xlsx --outline work/parents.md
+```
+
+The tree is a Markdown outline of Gerrit projects (nested bullets or headings, the
+same syntax `xlsx-unfold` reads). Each repository in the column is looked up by its
+exact name and its parent is the item directly above it. `--output` writes a new
+workbook with the sheet's columns plus `Parent`, `Path` and `Status`; `--outline`
+writes each parent once with its repositories beneath it, in tree order. With
+neither, the outline goes to standard output. Names missing from the tree, listed
+under more than one parent, or at the top level are reported (and listed at the
+end of the outline) instead of guessed; the exit code is then 4.
 
 ## Triage ADO scope
 

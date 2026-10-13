@@ -26,6 +26,12 @@ These are proposals, not promises made by the current specifications.
 - Detail columns as a Markdown table under each leaf instead of one line per row.
 - CSV input.
 
+## Gerrit parents
+
+- Match by Gerrit path (`platform/tools/repo`) as well as by the last path segment.
+- Read the tree directly from Gerrit (`gerrit ls-projects --tree` or the REST API).
+- Add the Parent column into a copy of the original workbook, keeping types and formatting.
+
 ## ADO scope triage
 
 - Per-team output (one small workbook or sheet per team lead) to route actions to owners.
