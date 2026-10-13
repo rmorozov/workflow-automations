@@ -26,13 +26,13 @@ Work-item filtering (export mode):
   --include-projects  comma-separated project names to keep in scope
                       (case-insensitive, System.TeamProject). Omit for all.
 
-  Filtering decides output scope, not reachability.  With the default
-  --filtered-relations follow, every fetched work item's relations are
+  Filtering decides output scope.  With the default --filtered-relations
+  stop, relations of filtered items are not followed and queued IDs are
+  classified once via WIQL so filtered items are usually not fetched at all.
+  With --filtered-relations follow, every fetched work item's relations are
   traversed and filtered items are exported as bridge nodes
   (In_Scope=False), so `analyze` can keep accepted items connected through
-  them.  With --filtered-relations stop, relations of filtered items are not
-  followed and queued IDs are classified once via WIQL so filtered items are
-  not fetched at all.
+  them; this can reach many unrelated projects.
 
 Export statistics:
   After each BFS batch a live line is logged showing visited / added /
@@ -1342,13 +1342,14 @@ def build_parser() -> argparse.ArgumentParser:
     ep.add_argument(
         "--filtered-relations",
         choices=("follow", "stop"),
-        default="follow",
+        default="stop",
         help=(
-            "follow (default): fetch filtered work items, traverse their relations and "
-            "export them as bridge nodes (In_Scope=False), so accepted items reachable "
-            "only through them are found.  stop: do not traverse relations of filtered "
-            "items; queued IDs are classified once via WIQL and filtered ones are not "
-            "fetched (fewer ADO calls, smaller graph)."
+            "stop (default): do not traverse relations of filtered items; queued IDs "
+            "are classified once via WIQL and filtered ones are not fetched (fewer ADO "
+            "calls, smaller graph).  follow: fetch filtered work items, traverse their "
+            "relations and export them as bridge nodes (In_Scope=False), so accepted "
+            "items reachable only through them are found; excluded-project items are "
+            "followed too, which can reach many unrelated projects."
         ),
     )
 

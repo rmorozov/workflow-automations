@@ -32,7 +32,7 @@ scores, RAG bands, or triage decisions.
 | `--formats` | Comma-separated `parquet,excel,csv` by default; unknown names logged/skipped |
 | `--skip-types` | Case-insensitive comma list of types marked out of scope; empty string disables |
 | `--include-projects` | Case-insensitive comma list of projects kept in scope; empty means all |
-| `--filtered-relations` | `follow` (default) or `stop`; whether relations of filtered items are traversed |
+| `--filtered-relations` | `stop` (default) or `follow`; whether relations of filtered items are traversed |
 
 Default excluded types: Task, Bug, Test Case, Test Suite, Test Plan, Test Run,
 Shared Steps, Shared Parameter.
@@ -51,13 +51,16 @@ Each batch requests relations with `error_policy="Omit"`. Project is
 `System.TeamProject`, falling back to the first AreaPath segment. Filters decide an
 item's output scope (`In_Scope`), not whether it is reachable.
 
-With `--filtered-relations follow` (default) every fetched item's recognized relation
+With `--filtered-relations follow` every fetched item's recognized relation
 targets are queued, whether or not the item is in scope. No WIQL pre-filtering
 happens, because a WIQL filter cannot see relations: an accepted item reachable only
 through a Task, Bug or excluded-project item is still found. This fetches every
-reachable filtered item, so it costs more ADO requests than `stop`.
+reachable filtered item, so it costs more ADO requests than `stop`. Excluded-project
+items are followed too, so `--include-projects` limits output, not the walk: links
+from a query's items can pull in dozens of unrelated projects.
 
-With `--filtered-relations stop`, relations of out-of-scope items are not followed.
+With `--filtered-relations stop` (default), relations of out-of-scope items are not
+followed.
 Before a fetch batch that contains IDs not yet checked, up to 1,000 unchecked queued
 IDs from the head of the queue are sent to one WIQL filter query; IDs it rejects are
 dropped without being fetched and counted as pruned. Each ID is sent to WIQL at most
