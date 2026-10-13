@@ -1,10 +1,8 @@
-# ADO graph/export specification — preserved import
+# ADO graph/export specification
 
-Status: observed contract restored from the supplied `Pasted text.txt`, not a
-redesign. `src/workflow_automations/ado_graph.py` preserves all 1,477 lines byte for
-byte (SHA-256 `3dba9aef1314d52c73510cdd72c976a47e2c02312e09706591812cd93372c015`).
-The original module docstring describes an older pre-seed implementation; where it
-conflicts with executable code, the behavior below takes precedence.
+Status: started as a verbatim import of the user's script (PR #11) and is now being
+reworked under normal checks. Sections below describe current behavior; known
+limitations not yet addressed stay listed here and in the backlog.
 
 Entry points after installation: `ado-graph`, `python scripts/ado_graph.py`, and
 `python -m workflow_automations.ado_graph`. Argument help retains `prog=ado_tool`.
@@ -28,12 +26,13 @@ scores, RAG bands, or triage decisions.
 | `--ado-url` | Required collection URL; trailing slash removed by client |
 | `--query-id` | Required saved-query GUID; flat results or source/target IDs from links |
 | `--project` | Query team context; default empty |
-| `--batch-size` | Default 200; upper-clamped to 200, no positive-value validation |
+| `--batch-size` | Default 200; upper-clamped to 200; values below 1 are rejected before any service call |
 | `--cert-dir` | Corporate certificate directory; falls back to `ADO_CERT_DIR` |
 | `--output-dir` | Default `./output`; directory created |
 | `--formats` | Comma-separated `parquet,excel,csv` by default; unknown names logged/skipped |
-| `--skip-types` | Case-insensitive comma list; empty string disables filtering |
-| `--include-projects` | Case-insensitive comma list; empty means all projects |
+| `--skip-types` | Case-insensitive comma list of types marked out of scope; empty string disables |
+| `--include-projects` | Case-insensitive comma list of projects kept in scope; empty means all |
+| `--filtered-relations` | `follow` (default) or `stop`; whether relations of filtered items are traversed |
 
 Default excluded types: Task, Bug, Test Case, Test Suite, Test Plan, Test Run,
 Shared Steps, Shared Parameter.
@@ -48,22 +47,28 @@ cache. No password/PAT options or retry/timeout policy are exposed.
 ### Traversal, filtering and completeness
 
 The saved query seeds an insertion-ordered queue; visited IDs avoid repeated fetches.
-Each batch requests relations with `error_policy="Omit"`. Omitted IDs are not retried
-or reported individually. Returned work items enqueue recognized relation targets
-before output filtering, so fetched excluded items can normally bridge to accepted
-items. Project is `System.TeamProject`, falling back to the first AreaPath segment.
+Each batch requests relations with `error_policy="Omit"`. Project is
+`System.TeamProject`, falling back to the first AreaPath segment. Filters decide an
+item's output scope (`In_Scope`), not whether it is reachable.
 
-When filters are active and the queue contains at least three batches, the next
-batch is retained and the remaining IDs are filtered in WIQL chunks of 1,000. IDs
-rejected by that query are marked visited without being fetched or traversed.
-Consequently this optimization can lose accepted descendants reachable only through
-filtered items. The help text's unconditional traversal promise is not true in this
-case. Failed WIQL chunks warn and retain candidates for normal fetch/filtering. Surviving
-IDs are not memoized: subsequent batches re-filter the same queue tail, producing
-quadratic aggregate WIQL work for a large all-accepted queue.
+With `--filtered-relations follow` (default) every fetched item's recognized relation
+targets are queued, whether or not the item is in scope. No WIQL pre-filtering
+happens, because a WIQL filter cannot see relations: an accepted item reachable only
+through a Task, Bug or excluded-project item is still found. This fetches every
+reachable filtered item, so it costs more ADO requests than `stop`.
 
-`WIIndex` and its project-wide keyset/pre-seed routines remain in the source but
-are not used by `run_export`. No up-front whole-project pre-seed occurs.
+With `--filtered-relations stop`, relations of out-of-scope items are not followed.
+Before a fetch batch that contains IDs not yet checked, up to 1,000 unchecked queued
+IDs from the head of the queue are sent to one WIQL filter query; IDs it rejects are
+dropped without being fetched and counted as pruned. Each ID is sent to WIQL at most
+once, so WIQL work is linear in the number of distinct queued IDs. If a WIQL chunk
+fails, it warns and its IDs are fetched and filtered after fetch instead; they are not
+re-sent to WIQL. Accepted items reachable only through filtered items are not
+exported in this mode.
+
+IDs requested but not returned by ADO (deleted or inaccessible) are counted as
+omitted and logged with a warning listing up to 20 IDs. They are not retried, and the
+run still exits 0; there is no separate incomplete-run status yet.
 
 Recognized relations: hierarchy forward, affects forward/reverse, blocks
 forward/reverse, dependency forward/reverse, implements forward/reverse. Hierarchy
@@ -72,16 +77,17 @@ Other links and URLs whose final component is not an integer are ignored.
 
 ### Exported data
 
-Nodes contain `WI_ID` and every returned field. Three names are changed:
+Nodes contain `WI_ID`, every returned field and a boolean `In_Scope`. Every fetched
+work item is a node: in-scope items have `In_Scope=True`; items excluded by type or
+project have `In_Scope=False` and act as bridge nodes for analysis. Three names are changed:
 `System.Title` → `Title`, `System.WorkItemType` → `WorkItemType`, `System.State` →
 `State`. All other ADO field reference names remain unchanged. No source snapshot,
 root marker, completeness manifest or export-schema version is added.
 
 Edges contain `Source_ID`, `Target_ID`, `Link_Type`; direction is the emitting
-item to its relation target. Rows are deduplicated by all three columns. Only
-accepted emitting items contribute edges; targets may be absent from the node file. Even without pruning, filtered bridge
-items contribute neither nodes nor edges: a Feature→Task→Feature chain loses its
-connection in the analyzer and can make both Features appear isolated.
+item to its relation target. Rows are deduplicated by all three columns. Every
+fetched item contributes its edges; targets may be absent from the node file (not
+fetched, pruned, or omitted).
 
 | Format | Files/sheets |
 | --- | --- |
@@ -89,9 +95,9 @@ connection in the analyzer and can make both Features appear isolated.
 | CSV | `nodes.csv`, `edges.csv`; pandas defaults, header and no index |
 | Excel | `work_items.xlsx`, sheets `Nodes`, `Edges`; pandas/openpyxl defaults |
 
-Batch progress and per-type/project statistics are printed. WIQL-pruned or omitted
-IDs are not included in the per-type/project totals, so those totals are not a
-complete account of every encountered ID.
+Batch progress and per-type/project statistics are printed, followed by the pruned
+(WIQL-rejected, not fetched) and omitted (not returned by ADO) totals. Per-type and
+per-project totals count fetched items only.
 
 ## Analyze CLI and graph contract
 
@@ -106,8 +112,16 @@ Optional node metadata: Title, WorkItemType, State, `KL.Roadmap_State`,
 `System.AreaPath`, `System.IterationPath`, configured effort field. Schema/ID
 validation is not performed; missing required columns raise exceptions.
 
-The analyzer uses a `DiGraph`, includes every exported node, and drops edges whose
-either endpoint is absent. Reverse labels flip direction and normalize to their
+The analyzer uses a `DiGraph`, adds every exported node, and drops edges whose
+either endpoint is absent. When the node file has an `In_Scope` column, each
+out-of-scope bridge node B is then contracted: for every P → B → S it adds
+P → S with `link_type` `Indirect`, the bridge IDs in `via` and the normalized link
+types along the path in `path`, unless a direct P → S edge already exists (a direct
+link wins). Chains of bridges collapse into one edge; a path that returns to its
+own start through bridges only is dropped rather than kept as a self-loop. Bridge
+nodes are then removed, so no report lists them and CR effort sums ignore them. The
+neighbor debug column shows indirect edges as `Indirect via 2>3 (Parent->Child, Blocks)`.
+Node files without `In_Scope` (older exports) are treated as fully in scope. Reverse labels flip direction and normalize to their
 forward label. Forward directions are parent→child, affects→affected, blocks→blocked,
 predecessor→successor, implements→implemented. Parallel relation types on the same
 pair collapse to one edge; the last label wins. All relation families participate
@@ -146,19 +160,18 @@ large result may fail after all graph computation and leave a partial workbook.
 Outputs are written directly and overwrite existing files without an overwrite
 flag, input-path protection, staging or rollback. Failed runs may leave partial
 files. This inherited behavior differs from the other tools' publication contract
-and is retained only for this verbatim import. Work in a fresh output directory.
-Zero batch size spins in a busy infinite loop; negative sizes can consume part of
-the queue then stall indefinitely. Empty exports do not preserve a stable node schema; all-unknown steps can fail
+and has not been reworked yet. Work in a fresh output directory. Empty exports do not preserve a stable node schema; all-unknown steps can fail
 when saving a workbook with no sheets. Exceptions normally propagate; successful
 `main()` returns None (CLI exit 0), argparse errors/help use its usual exits.
 There is no standardized partial-result status. Text beginning with `=` can be
 written as an Excel formula by pandas/openpyxl; arbitrary identity/datetime field
-objects may fail serialization. No actual ADO server was used in offline tests.
+objects may fail serialization.
 
 ## Verification and next steps
 
-Tests use synthetic SDK-like objects and Parquet/XLSX files: import integrity,
-CLI help, saved-query result shapes, edge normalization, scope/prerequisite
-orientation, report publication, and the filtered-bridge regression. Known defects
-are characterized, not silently corrected. Prioritized fixes and shared-code
+Tests use synthetic SDK-like objects and Parquet/XLSX files: CLI help and argument
+validation, saved-query result shapes, edge normalization, scope/prerequisite
+orientation, report publication, traversal through filtered bridges in both
+relation modes, once-per-ID WIQL classification, omitted-ID reporting, and bridge
+contraction. No actual ADO server was used. Remaining fixes and shared-code
 opportunities with ADO scope triage are in [the backlog](../backlog.md#ado-graphexport).

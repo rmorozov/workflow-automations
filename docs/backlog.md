@@ -53,21 +53,22 @@ These are proposals, not promises made by the current specifications.
 ## ADO graph/export
 
 Findings from the verbatim import and comparison with `ado-triage`. The current
-specification records these limitations; the items below are future work.
+specification records these limitations; the items below are future work. AG-001,
+AG-014 and AG-015 (traversal through filtered bridges, once-per-ID WIQL filtering,
+bridge nodes kept connected in analysis) are implemented.
 
 | Priority / ID | Finding and concrete follow-up | Acceptance evidence |
 | --- | --- | --- |
-| P1 AG-001 | Preserve traversal through filtered bridge nodes. Queue pruning currently marks excluded IDs visited without reading relations, contradicting help. Separate traversal inclusion from output inclusion; retain filter optimization only if reachability is preserved. | Seed → skipped/excluded node → accepted descendant exports the descendant at both sides of the three-batch pruning threshold. |
 | P1 AG-002 | Add atomic publication, explicit overwrite and input/output collision checks to both modes; multi-file export needs a staged bundle. | Failed writes leave existing files intact; analysis cannot overwrite either input; overwrite requires consent via flag. |
-| P1 AG-003 | Report omitted/inaccessible IDs and completion status instead of treating `error_policy=Omit` as a complete graph. Use triage's core-vs-label failure distinction. | Missing seed/bridge IDs yield explicit incomplete/failure status and reproducible counts. |
+| P1 AG-003 | Omitted IDs are now counted and logged; still missing: a completion status/exit code instead of treating `error_policy=Omit` as a complete graph. Use triage's core-vs-label failure distinction. | Missing seed/bridge IDs yield explicit incomplete/failure status and reproducible counts. |
 | P1 AG-004 | Validate graph semantics: keep relation types separate; preserve parallel links; choose hierarchy, dependency and impact subgraphs explicitly. Reverse CR reachability currently means ancestors despite the “CR dependency” name. | Synthetic CR→child, predecessor→CR and multiple-type edges have documented, distinct outputs; no labels silently overwritten. |
 | P1 AG-005 | Store exported titles/text as literal Excel cells, normalize identity objects and timezone-aware dates, and validate schemas/IDs/empty frames before writing. | Formula-like titles stay strings; realistic identity/date fields and an empty export round-trip through all formats. |
 | P2 AG-006 | Bound cycle enumeration and centrality cost; add step budgets, approximate centrality and cancellation/progress. Default all can be exponential on dense cycles. | Representative 10k/50k graphs finish under stated budgets or report a bounded partial result. |
 | P2 AG-007 | Correct Dependency_Depth to a named metric (longest DAG depth via topological DP, or rename maximum source-shortest distance); persist chain length and explain hop count vs time critical path. | A shortcut A→C plus A→B→C distinguishes shortest distance 1 from longest depth 2; report exposes the selected metric. |
 | P2 AG-008 | Harden WIQL quoting and keyset pagination. Project builder uses backslash quoting while filter builder doubles quotes; skipped-type names are interpolated unescaped; ORDER regex can match string literals. | Apostrophes and ORDER inside names, paging >20k IDs, and nonadvancing pages are covered using SDK fakes and an optional real-server contract test. |
-| P2 AG-009 | Validate positive batch size, supported formats/steps and file schemas early. Zero batch size causes a busy infinite loop; negative sizes eventually stall and hang; all-unknown steps lead to an empty-workbook save failure. | Invalid input exits predictably before service calls or file creation. |
+| P2 AG-009 | Validate supported formats/steps and file schemas early (batch size is now validated). All-unknown steps lead to an empty-workbook save failure. | Invalid input exits predictably before service calls or file creation. |
 | P2 AG-010 | Make local analysis installable without Azure SDK/Kerberos; move imports/client configuration to a network boundary. Remove import-time global logging and temporary CA/environment side effects; clean up and restore prior CA settings. | Offline analyze/help work with no network extras; importing a library does not configure root logging; CA cleanup works on failure. |
-| P2 AG-011 | Replace stale pre-seed performance claims with measured behavior and remove/deprecate unused WIIndex code. Record pruned/omitted counts independently from per-type statistics. | Counters reconcile seed, visited, fetched, pruned, omitted and exported IDs; documentation matches requests observed in tests. |
+| P2 AG-011 | Unused WIIndex code is removed and pruned/omitted counts are recorded. Still missing: measured request counts in documentation. | Counters reconcile seed, visited, fetched, pruned, omitted and exported IDs; documentation matches requests observed in tests. |
 | P2 AG-012 | Define a versioned snapshot schema and provenance manifest (query, collection, fields, filters, relation policy, timestamps, tool version, completeness); add replay and CSV/XLSX ingestion if needed. | Old/new snapshots validate; identical snapshots can feed both graph and triage pipelines offline. |
 | P3 AG-013 | Sort node/SCC/cycle/CR member outputs deterministically; add report purpose/config sheets, hyperlinks, filters and concise summary counts before detailed/unpacked sheets. | Repeat runs on the same snapshot compare stably and expose scope/completeness in the report itself. |
 
@@ -75,18 +76,11 @@ specification records these limitations; the items below are future work.
 
 | Priority / ID | Finding and concrete follow-up | Acceptance evidence |
 | --- | --- | --- |
-| P1 AG-014 | Avoid repeatedly WIQL-filtering queue survivors. Every fetch batch currently rechecks the whole tail while the queue is at least three batches: 2,000 accepted seed IDs at batch 100 send 18,900 IDs to WIQL. Memoize successfully classified IDs or classify once at enqueue time; failed chunks must remain retryable. Coordinate with AG-001 so optimization cannot sacrifice traversal. | SDK fake: each stable ID is classified at most once; request counts scale linearly, and filter failures/changes have an explicit policy. |
-| P1 AG-015 | Preserve graph connections through filtered bridge nodes even when BFS visits them. Feature 1 → Task 2 → Feature 3 exports nodes {1,3} and edge (1,2); analysis discards that edge and reports both Features as orphans. This is independent of AG-001 queue pruning. Prefer flagged bridge nodes (`In_Scope=False`) or explicit type-aware contracted paths with provenance; do not blindly equate mixed link types with dependency. | Small-queue test has no pruning, reaches node 3, and retains an explainable path 1→3 for the chosen relation family; CR scope/prerequisites remain connected. |
 | P2 AG-016 | Preflight Excel's row/column/cell limits before publication; CR×reachable and cycle-member sheets can exceed 1,048,575 data rows plus header. Spill large detail sheets to Parquet/CSV with pointers in the workbook, or fail before any output is replaced. Replace the full openpyxl cell walk for widths with bounded sampling; vectorized full-column sizing remains O(cells). Remove the bare except and report sizing failures explicitly. | Boundary tests for supported counts and spill behavior; existing outputs survive overflow; large-report benchmarks separate graph compute, writing and sizing time. |
 | P3 AG-017 | Make custom metadata fields configurable. `KL.Roadmap_State` is currently embedded in graph metadata despite being organization-specific. Add explicit field mapping/extra-fields configuration, keeping existing names as an opt-in compatibility preset. | Synthetic custom fields appear under configured labels; absent fields are reported/omitted according to policy; defaults need no organization-specific field. |
 
-AG-014 and AG-015 should be addressed with AG-001 in one traversal/emission redesign,
-then AG-010 (offline dependency split), AG-002/AG-005/AG-016 (safe export), and the
-remaining relation/depth semantics. These observations are documented, not fixed
-in the preserved source. Characterization tests intentionally assert current
-behavior; when a future contract is chosen, replace the corresponding assertions
-with regressions for that contract. Strict xfail tests are an option for an agreed
-future behavior, but not a substitute for current-import verification.
+Next: AG-010 (offline dependency split), then AG-002/AG-005/AG-016 (safe export), and
+the remaining relation/depth semantics (AG-004, AG-007).
 
 ### Sharing code with ADO scope triage
 

@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 from openpyxl import load_workbook
 
 from workflow_automations import ado_graph as tool
@@ -103,143 +104,38 @@ def test_saved_query_flat_and_link_results():
     assert client.run_query_by_id("Example", "query") == [1, 2]
 
 
-def test_export_filtered_bridge_is_pruned_before_traversal(tmp_path, monkeypatch):
-    """AG-001: accepted 4 is lost when the skipped bridge 3 is pruned."""
-    calls = []
+def wi(wi_id, wi_type="Feature", targets=(), rel="System.LinkTypes.Hierarchy-Forward"):
+    return SimpleNamespace(
+        id=wi_id,
+        fields={"System.WorkItemType": wi_type, "System.TeamProject": "Example"},
+        relations=[SimpleNamespace(rel=rel, url=f"https://ado.example/{t}") for t in targets],
+    )
 
-    def item(wi_id, wi_type="Feature", targets=()):
-        return SimpleNamespace(
-            id=wi_id,
-            fields={"System.WorkItemType": wi_type, "System.TeamProject": "Example"},
-            relations=[
-                SimpleNamespace(rel="System.LinkTypes.Hierarchy-Forward", url=f"https://x/{i}")
-                for i in targets
-            ],
-        )
+
+def fake_client(items, seeds, rejected=(), log=None):
+    """SDK-like client; `rejected` IDs fail the WIQL filter, absent IDs are omitted."""
+    log = log if log is not None else {"fetched": [], "filtered": []}
 
     class Client:
         def __init__(self, _url):
             pass
 
         def run_query_by_id(self, _project, _query):
-            return [1, 2, 3]
+            return list(seeds)
 
         def filter_ids_via_wiql(self, ids, _projects, _types):
-            return set(ids) - {3}
+            log["filtered"].extend(ids)
+            return set(ids) - set(rejected)
 
         def get_work_items_batch(self, ids):
-            calls.extend(ids)
-            items = {1: item(1), 2: item(2), 3: item(3, "Task", [4]), 4: item(4)}
-            return [items[i] for i in ids]
+            log["fetched"].extend(ids)
+            return [items[i] for i in ids if i in items]
 
-    monkeypatch.setattr(tool, "ADOClient", Client)
-    monkeypatch.setattr(tool, "configure_ca_bundle", lambda _path: None)
-    tool.main(
-        [
-            "export",
-            "--ado-url",
-            "https://ado.example",
-            "--query-id",
-            "synthetic",
-            "--batch-size",
-            "1",
-            "--output-dir",
-            str(tmp_path),
-            "--formats",
-            "parquet",
-        ]
-    )
-    exported = pd.read_parquet(tmp_path / "nodes.parquet")
-    assert calls == [1, 2]
-    assert set(exported["WI_ID"]) == {1, 2}
-    assert 4 not in set(exported["WI_ID"])
+    return Client, log
 
 
-def test_queue_survivors_are_repeatedly_sent_to_wiql(tmp_path, monkeypatch):
-    """AG-014: quantify repeated work independently of filtered-bridge loss."""
-    filtered = []
-    fetched = []
-
-    class Client:
-        def __init__(self, _url):
-            pass
-
-        def run_query_by_id(self, _project, _query):
-            return list(range(1, 2001))
-
-        def filter_ids_via_wiql(self, ids, _projects, _types):
-            filtered.extend(ids)
-            return set(ids)
-
-        def get_work_items_batch(self, ids):
-            fetched.extend(ids)
-            return [
-                SimpleNamespace(
-                    id=wi_id,
-                    fields={"System.WorkItemType": "Feature", "System.TeamProject": "Example"},
-                    relations=[],
-                )
-                for wi_id in ids
-            ]
-
-    monkeypatch.setattr(tool, "ADOClient", Client)
-    monkeypatch.setattr(tool, "configure_ca_bundle", lambda _path: None)
-    tool.main(
-        [
-            "export",
-            "--ado-url",
-            "https://ado.example",
-            "--query-id",
-            "synthetic",
-            "--batch-size",
-            "100",
-            "--output-dir",
-            str(tmp_path),
-            "--formats",
-            "parquet",
-        ]
-    )
-    assert len(fetched) == len(set(fetched)) == 2000
-    assert len(filtered) == 18900
-    assert len(set(filtered)) == 1900
-
-
-def test_filtered_bridge_breaks_analysis_even_without_pruning(tmp_path, monkeypatch):
-    """AG-015: traversal reaches the descendant, but exported edges lose the path."""
-    fetched = []
-
-    class Client:
-        def __init__(self, _url):
-            pass
-
-        def run_query_by_id(self, _project, _query):
-            return [1]
-
-        def filter_ids_via_wiql(self, *_args):
-            raise AssertionError("Small-queue fixture must not use pruning")
-
-        def get_work_items_batch(self, ids):
-            fetched.extend(ids)
-            return [
-                SimpleNamespace(
-                    id=wi_id,
-                    fields={
-                        "System.WorkItemType": "Task" if wi_id == 2 else "Feature",
-                        "System.TeamProject": "Example",
-                    },
-                    relations=[
-                        SimpleNamespace(
-                            rel="System.LinkTypes.Hierarchy-Forward",
-                            url=f"https://ado.example/{wi_id + 1}",
-                        )
-                    ]
-                    if wi_id < 3
-                    else [],
-                )
-                for wi_id in ids
-            ]
-
-    monkeypatch.setattr(tool, "ADOClient", Client)
+def run_export(monkeypatch, tmp_path, client, *extra):
+    monkeypatch.setattr(tool, "ADOClient", client)
     monkeypatch.setattr(tool, "configure_ca_bundle", lambda _path: None)
     tool.main(
         [
@@ -252,15 +148,107 @@ def test_filtered_bridge_breaks_analysis_even_without_pruning(tmp_path, monkeypa
             str(tmp_path),
             "--formats",
             "parquet",
+            *extra,
         ]
     )
-    assert fetched == [1, 2, 3]
-    exported_nodes = pd.read_parquet(tmp_path / "nodes.parquet")
-    exported_edges = pd.read_parquet(tmp_path / "edges.parquet")
-    assert set(exported_nodes["WI_ID"]) == {1, 3}
-    assert list(exported_edges[["Source_ID", "Target_ID"]].itertuples(index=False, name=None)) == [
-        (1, 2)
-    ]
-    analyzer = tool.GraphAnalyzer(exported_nodes, exported_edges)
-    assert analyzer.G.number_of_edges() == 0
-    assert set(analyzer.find_orphans()["WI_ID"]) == {1, 3}
+    return pd.read_parquet(tmp_path / "nodes.parquet"), pd.read_parquet(tmp_path / "edges.parquet")
+
+
+def test_follow_traverses_filtered_bridge_at_pruning_scale(tmp_path, monkeypatch):
+    """AG-001: a queue of three batches no longer prunes the skipped bridge 3."""
+    items = {1: wi(1), 2: wi(2), 3: wi(3, "Task", [4]), 4: wi(4)}
+    client, log = fake_client(items, [1, 2, 3])
+    nodes, _ = run_export(monkeypatch, tmp_path, client, "--batch-size", "1")
+    assert log["filtered"] == []
+    assert log["fetched"] == [1, 2, 3, 4]
+    assert dict(zip(nodes["WI_ID"], nodes["In_Scope"], strict=True)) == {
+        1: True,
+        2: True,
+        3: False,
+        4: True,
+    }
+
+
+def test_filtered_bridge_keeps_features_connected_in_analysis(tmp_path, monkeypatch):
+    """AG-015: Feature 1 -> Task 2 -> Feature 3 stays one connected path."""
+    items = {1: wi(1, targets=[2]), 2: wi(2, "Task", [3]), 3: wi(3)}
+    client, _ = fake_client(items, [1])
+    nodes, edges = run_export(monkeypatch, tmp_path, client)
+    assert set(edges[["Source_ID", "Target_ID"]].itertuples(index=False, name=None)) == {
+        (1, 2),
+        (2, 3),
+    }
+    analyzer = tool.GraphAnalyzer(nodes, edges)
+    assert set(analyzer.G.nodes) == {1, 3}
+    assert analyzer.G[1][3]["link_type"] == "Indirect"
+    assert analyzer.G[1][3]["via"] == (2,)
+    assert analyzer.find_orphans().empty
+    assert "via 2 (Parent->Child, Parent->Child)" in analyzer._get_neighborhood_diagnostic(3)
+
+
+def test_bridge_chains_contract_and_direct_links_win():
+    graph_nodes = pd.DataFrame(
+        [
+            {"WI_ID": 1, "WorkItemType": "Change Request", "In_Scope": True, "Effort": 1},
+            {"WI_ID": 2, "WorkItemType": "Task", "In_Scope": False, "Effort": 100},
+            {"WI_ID": 3, "WorkItemType": "Bug", "In_Scope": False, "Effort": 100},
+            {"WI_ID": 4, "WorkItemType": "Feature", "In_Scope": True, "Effort": 2},
+            {"WI_ID": 5, "WorkItemType": "Feature", "In_Scope": True, "Effort": 3},
+        ]
+    )
+    links = pd.DataFrame(
+        [
+            (1, 2, "Parent->Child"),
+            (2, 3, "Blocks"),
+            (4, 3, "Affected By"),
+            (1, 5, "Blocks"),
+            (2, 5, "Parent->Child"),
+        ],
+        columns=["Source_ID", "Target_ID", "Link_Type"],
+    )
+    analyzer = tool.GraphAnalyzer(graph_nodes, links, effort_field="Effort")
+    assert set(analyzer.G.edges) == {(1, 4), (1, 5)}
+    assert analyzer.G[1][4]["via"] == (2, 3)
+    assert analyzer.G[1][4]["path"] == ("Parent->Child", "Blocks", "Affects")
+    assert analyzer.G[1][5]["link_type"] == "Blocks"
+    impact = analyzer.analyze_cr_scope_and_impact().iloc[0]
+    assert impact["Impacted_WI_Count"] == 2
+    assert impact["Total_Effort"] == 6  # bridge efforts are not counted
+
+
+def test_stop_mode_classifies_each_queued_id_once(tmp_path, monkeypatch):
+    """AG-014: 2,000 seeds at batch 100 send each ID to WIQL once (was 18,900)."""
+    items = {i: wi(i) for i in range(1, 2001)}
+    client, log = fake_client(items, range(1, 2001), rejected={7})
+    nodes, _ = run_export(
+        monkeypatch, tmp_path, client, "--batch-size", "100", "--filtered-relations", "stop"
+    )
+    assert len(log["filtered"]) == len(set(log["filtered"])) == 2000
+    assert 7 not in log["fetched"]
+    assert len(log["fetched"]) == len(set(log["fetched"])) == 1999
+    assert len(nodes) == 1999
+
+
+def test_stop_mode_does_not_follow_filtered_items(tmp_path, monkeypatch):
+    items = {1: wi(1, targets=[2, 3]), 2: wi(2, "Task", [4]), 3: wi(3, "Bug", [5]), 4: wi(4)}
+    items[5] = wi(5)
+    # 3 passes WIQL (as after a failed WIQL chunk), so it is fetched but not followed.
+    client, log = fake_client(items, [1], rejected={2})
+    nodes, _ = run_export(monkeypatch, tmp_path, client, "--filtered-relations", "stop")
+    assert log["fetched"] == [1, 3]
+    assert dict(zip(nodes["WI_ID"], nodes["In_Scope"], strict=True)) == {1: True, 3: False}
+
+
+def test_omitted_ids_are_reported(tmp_path, monkeypatch, capsys):
+    """AG-003 (partial): IDs ADO does not return are counted, not silently lost."""
+    client, _ = fake_client({1: wi(1, targets=[2])}, [1])
+    nodes, _ = run_export(monkeypatch, tmp_path, client)
+    assert list(nodes["WI_ID"]) == [1]
+    assert "Omitted by ADO (not returned): 1" in capsys.readouterr().out
+
+
+def test_batch_size_must_be_positive(tmp_path, monkeypatch):
+    client, log = fake_client({1: wi(1)}, [1])
+    with pytest.raises(SystemExit):
+        run_export(monkeypatch, tmp_path, client, "--batch-size", "0")
+    assert log["fetched"] == []
