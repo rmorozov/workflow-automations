@@ -82,6 +82,13 @@ def test_dependency_cycles_are_rejected(backlog_dir, deps):
     assert backlog.main(["check", "--dir", str(backlog_dir)]) == 1
 
 
+@pytest.mark.parametrize("touch", ["/etc/passwd", "../outside.py", "src/../../x.py"])
+def test_paths_outside_the_repository_are_rejected(backlog_dir, touch):
+    write_task(backlog_dir, "AG-001", touch)
+    with pytest.raises(ValueError, match="inside the repository"):
+        backlog.load_tasks(backlog_dir)
+
+
 def spans(backlog_dir, *touches):
     return [backlog.resolve_touch(t, backlog_dir.parents[1]) for t in touches]
 
@@ -98,6 +105,8 @@ def spans(backlog_dir, *touches):
         ("docs/spec.md#analyze", "docs/spec.md#analyze", True),
         ("docs/spec.md", "docs/spec.md#analyze", True),
         ("docs/new.md#later", "docs/new.md#other", True),
+        ("./src/x.py", "src/pkg/../x.py", True),
+        ("src/pkg", "src/pkg/", True),
     ],
 )
 def test_touch_conflicts(backlog_dir, a, b, expected):
