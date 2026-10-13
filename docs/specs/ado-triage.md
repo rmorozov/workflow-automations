@@ -181,4 +181,4 @@ failures to exit 5. A real ADO server and Kerberos handshake are not exercised.
 
 Hour thresholds (16 h, 1–20 h), flag weights and RAG bands are fixed in this
 version. Field names in the `my.*` namespace are fixed. Only one previous report is
-compared. See the [backlog](../backlog.md) for proposed extensions.
+compared. See the [backlog](../backlog/README.md) for proposed extensions.

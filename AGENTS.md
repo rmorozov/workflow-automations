@@ -8,4 +8,7 @@
 - Run `ruff check .`, `ruff format --check .`, `pytest`, and `python -m build` before a PR.
 - Keep dependency extras per tool. Add the extras needed by new tests to CI installation.
 - Preserve input files. Overwriting outputs must be explicit and documented.
-- Prefer a focused PR; keep deferred features in `docs/backlog.md`.
+- Prefer a focused PR; keep deferred features as task files in `docs/backlog/`.
+- Edit only the files and spec sections your task's `touches:` lists; parallel branches rely on it.
+- Get new backlog IDs from the coordinator; delete a task file in the PR that completes it.
+- Roles, models and the parallel-work rules are in `docs/agentic-workflow.md`.
