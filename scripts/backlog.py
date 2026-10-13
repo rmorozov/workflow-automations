@@ -17,7 +17,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 BACKLOG = Path(__file__).resolve().parent.parent / "docs" / "backlog"
@@ -26,6 +26,14 @@ REQUIRED = ("id", "title", "tool", "priority", "depends_on", "touches", "model",
 PRIORITIES = ("P1", "P2", "P3")
 MODELS = ("haiku", "sonnet", "opus", "fable")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+@dataclass(frozen=True)
+class Touch:
+    """A declared edit: a path, a directory (``dir/``) or lines of one Markdown section."""
+
+    path: str
+    lines: range | None = None  # None means the whole file or directory
 
 
 @dataclass(frozen=True)
@@ -39,6 +47,7 @@ class Task:
     model: str
     effort: str
     path: Path
+    spans: tuple[Touch, ...] = ()
 
 
 def parse_front_matter(text: str) -> dict[str, str | list[str]]:
@@ -60,7 +69,46 @@ def parse_front_matter(text: str) -> dict[str, str | list[str]]:
     return fields
 
 
-def load_task(path: Path) -> Task:
+def slugify(heading: str) -> str:
+    """GitHub-style heading anchor: lower case, punctuation dropped, spaces to hyphens."""
+    text = re.sub(r"[^\w\- ]", "", heading.strip().lower())
+    return text.replace(" ", "-")
+
+
+def section_ranges(markdown: str) -> dict[str, range]:
+    """Line range of each heading's section, including its subsections."""
+    headings: list[tuple[int, int, str]] = []
+    fenced = False
+    lines = markdown.splitlines()
+    for number, line in enumerate(lines):
+        if line.startswith("```"):
+            fenced = not fenced
+        match = None if fenced else re.match(r"^(#{1,6})\s+(.*?)\s*#*\s*$", line)
+        if match:
+            headings.append((number, len(match.group(1)), slugify(match.group(2))))
+    ranges: dict[str, range] = {}
+    for index, (start, level, slug) in enumerate(headings):
+        end = next((n for n, lvl, _ in headings[index + 1 :] if lvl <= level), len(lines))
+        ranges.setdefault(slug, range(start, end))
+    return ranges
+
+
+def resolve_touch(touch: str, root: Path) -> Touch:
+    """Map ``path#anchor`` to the anchor's line range when the file exists."""
+    path, _, anchor = touch.partition("#")
+    if not anchor:
+        return Touch(path)
+    file = root / path
+    if not file.is_file():
+        return Touch(path)  # a file to be created: reserve all of it
+    ranges = section_ranges(file.read_text(encoding="utf-8"))
+    if anchor not in ranges:
+        raise ValueError(f"{touch}: no heading with anchor #{anchor}")
+    return Touch(path, ranges[anchor])
+
+
+def load_task(path: Path, root: Path | None = None) -> Task:
+    root = root if root is not None else path.resolve().parents[2]
     fields = parse_front_matter(path.read_text(encoding="utf-8"))
     missing = [key for key in REQUIRED if key not in fields]
     if missing:
@@ -92,24 +140,54 @@ def load_task(path: Path) -> Task:
         problems.append("touches must name at least one path")
     if task.id in task.depends_on or any(not ID_RE.match(d) for d in task.depends_on):
         problems.append("depends_on must list other task IDs")
+    spans: list[Touch] = []
+    for touch in task.touches:
+        try:
+            spans.append(resolve_touch(touch, root))
+        except ValueError as exc:
+            problems.append(str(exc))
     if problems:
         raise ValueError(f"{path.name}: " + "; ".join(problems))
-    return task
+    return replace(task, spans=tuple(spans))
+
+
+def find_cycle(tasks: dict[str, Task]) -> list[str] | None:
+    """A dependency cycle among open tasks, as IDs from first to repeated, or None."""
+    state: dict[str, int] = {}  # 1 visiting, 2 done
+    stack: list[str] = []
+
+    def visit(task_id: str) -> list[str] | None:
+        state[task_id] = 1
+        stack.append(task_id)
+        for dep in sorted(tasks[task_id].depends_on):
+            if dep not in tasks:  # deleted: done
+                continue
+            if state.get(dep) == 1:
+                return stack[stack.index(dep) :] + [dep]
+            if dep not in state and (cycle := visit(dep)):
+                return cycle
+        stack.pop()
+        state[task_id] = 2
+        return None
+
+    for task_id in sorted(tasks):
+        if task_id not in state and (cycle := visit(task_id)):
+            return cycle
+    return None
 
 
 def load_tasks(directory: Path = BACKLOG) -> dict[str, Task]:
+    root = directory.resolve().parents[1]
     tasks: dict[str, Task] = {}
     for path in sorted(directory.glob("*.md")):
         if path.name == "README.md":
             continue
-        task = load_task(path)
+        task = load_task(path, root)
         tasks[task.id] = task
+    cycle = find_cycle(tasks)
+    if cycle:
+        raise ValueError("dependency cycle: " + " -> ".join(cycle))
     return tasks
-
-
-def _split(touch: str) -> tuple[str, str]:
-    path, _, section = touch.partition("#")
-    return path, section
 
 
 def _paths_overlap(a: str, b: str) -> bool:
@@ -118,17 +196,21 @@ def _paths_overlap(a: str, b: str) -> bool:
     return (a.endswith("/") and b.startswith(a)) or (b.endswith("/") and a.startswith(b))
 
 
-def touches_conflict(a: str, b: str) -> bool:
-    """Two touches conflict unless they name different sections of one file."""
-    path_a, section_a = _split(a)
-    path_b, section_b = _split(b)
-    if not _paths_overlap(path_a, path_b):
+def touches_conflict(a: Touch, b: Touch) -> bool:
+    """Touches conflict when their paths overlap, unless both name disjoint sections.
+
+    A section includes its subsections, so a parent section conflicts with any
+    section nested in it, while sibling sections do not.
+    """
+    if not _paths_overlap(a.path, b.path):
         return False
-    return not (section_a and section_b and section_a != section_b)
+    if a.lines is None or b.lines is None:
+        return True
+    return a.lines.start < b.lines.stop and b.lines.start < a.lines.stop
 
 
 def conflicts(a: Task, b: Task) -> bool:
-    return any(touches_conflict(x, y) for x in a.touches for y in b.touches)
+    return any(touches_conflict(x, y) for x in a.spans for y in b.spans)
 
 
 def ready(tasks: dict[str, Task]) -> list[Task]:
@@ -136,30 +218,40 @@ def ready(tasks: dict[str, Task]) -> list[Task]:
     return [t for t in tasks.values() if not any(d in tasks for d in t.depends_on)]
 
 
+def waiting_on_busy(tasks: dict[str, Task], busy: set[str]) -> list[Task]:
+    """Ready tasks that conflict with a task in progress; they wait for its PR."""
+    locked = [tasks[i] for i in busy if i in tasks]
+    return sorted(
+        (
+            t
+            for t in ready(tasks)
+            if t.id not in busy and any(conflicts(t, other) for other in locked)
+        ),
+        key=lambda t: (t.priority, t.id),
+    )
+
+
 def plan(tasks: dict[str, Task], busy: set[str]) -> list[list[Task]]:
     """Group ready tasks into waves whose members touch disjoint files.
 
-    Tasks already in progress (``busy``) are not scheduled, and nothing that
-    conflicts with them is placed in the first wave.
+    Tasks in progress (``busy``) and tasks that conflict with them are left out
+    entirely (see ``waiting_on_busy``): they can be planned once the busy task
+    is merged and its file deleted. Wave 1 can therefore always start now.
     """
-    locked = [tasks[i] for i in busy if i in tasks]
+    waiting = {t.id for t in waiting_on_busy(tasks, busy)}
     pending = sorted(
-        (t for t in ready(tasks) if t.id not in busy), key=lambda t: (t.priority, t.id)
+        (t for t in ready(tasks) if t.id not in busy and t.id not in waiting),
+        key=lambda t: (t.priority, t.id),
     )
     waves: list[list[Task]] = []
     while pending:
         wave: list[Task] = []
         rest: list[Task] = []
         for task in pending:
-            blockers = wave + (locked if not waves else [])
-            (rest if any(conflicts(task, other) for other in blockers) else wave).append(task)
-        if not wave:
-            waves.append([])
-            locked = []
-            continue
+            (rest if any(conflicts(task, other) for other in wave) else wave).append(task)
         waves.append(wave)
         pending = rest
-    return [w for w in waves if w]
+    return waves
 
 
 def _row(task: Task) -> str:
@@ -194,6 +286,11 @@ def main(argv: list[str] | None = None) -> int:
         for number, wave in enumerate(plan(tasks, busy), start=1):
             print(f"Wave {number}:")
             for task in wave:
+                print("  " + _row(task))
+        waiting = waiting_on_busy(tasks, busy)
+        if waiting:
+            print("Waiting for in-progress tasks to merge:")
+            for task in waiting:
                 print("  " + _row(task))
     return 0
 
