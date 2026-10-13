@@ -55,7 +55,8 @@ a scheduler or external integration until the tool actually needs one.
 
 `src/workflow_automations/ado_graph.py` is a byte-for-byte import requested by the
 user, not a refactor. Ruff excludes that file only; integration code and tests keep
-normal checks. A source-digest test protects the import. Run Linux Kerberos header
+normal checks. A source-digest test protects the import; `.gitattributes` disables
+line-ending conversion for that file, including on Windows. Run Linux Kerberos header
 installation before the development extras above (`sudo apt-get install libkrb5-dev`).
 The specification describes observed behavior; follow-up changes belong to the
 prioritized backlog. Remove the exclusion/digest guard when modernization is authorized.

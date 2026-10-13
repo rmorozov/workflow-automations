@@ -58,7 +58,9 @@ batch is retained and the remaining IDs are filtered in WIQL chunks of 1,000. ID
 rejected by that query are marked visited without being fetched or traversed.
 Consequently this optimization can lose accepted descendants reachable only through
 filtered items. The help text's unconditional traversal promise is not true in this
-case. Failed WIQL chunks warn and retain candidates for normal fetch/filtering.
+case. Failed WIQL chunks warn and retain candidates for normal fetch/filtering. Surviving
+IDs are not memoized: subsequent batches re-filter the same queue tail, producing
+quadratic aggregate WIQL work for a large all-accepted queue.
 
 `WIIndex` and its project-wide keyset/pre-seed routines remain in the source but
 are not used by `run_export`. No up-front whole-project pre-seed occurs.
@@ -77,7 +79,9 @@ root marker, completeness manifest or export-schema version is added.
 
 Edges contain `Source_ID`, `Target_ID`, `Link_Type`; direction is the emitting
 item to its relation target. Rows are deduplicated by all three columns. Only
-accepted emitting items contribute edges; targets may be absent from the node file.
+accepted emitting items contribute edges; targets may be absent from the node file. Even without pruning, filtered bridge
+items contribute neither nodes nor edges: a Feature→Task→Feature chain loses its
+connection in the analyzer and can make both Features appear isolated.
 
 | Format | Files/sheets |
 | --- | --- |
@@ -133,6 +137,9 @@ The graph has no duration/capacity model, so longest chain is not a time critica
 Analysis writes requested sheets, no index, with widths capped at 50. `all` runs
 every step, including unbounded simple-cycle enumeration and exact centrality.
 No budgets, sampling, cancellation or progress policy are provided for analysis.
+Width sizing walks every written cell in Python. Unpacked/cycle outputs have no
+preflight check against Excel's 1,048,576-row limit (including the header), so a
+large result may fail after all graph computation and leave a partial workbook.
 
 ## Files, errors and current limitations
 
@@ -140,7 +147,8 @@ Outputs are written directly and overwrite existing files without an overwrite
 flag, input-path protection, staging or rollback. Failed runs may leave partial
 files. This inherited behavior differs from the other tools' publication contract
 and is retained only for this verbatim import. Work in a fresh output directory.
-Empty exports do not preserve a stable node schema; all-unknown steps can fail
+Zero batch size spins in a busy infinite loop; negative sizes can consume part of
+the queue then stall indefinitely. Empty exports do not preserve a stable node schema; all-unknown steps can fail
 when saving a workbook with no sheets. Exceptions normally propagate; successful
 `main()` returns None (CLI exit 0), argparse errors/help use its usual exits.
 There is no standardized partial-result status. Text beginning with `=` can be

@@ -161,3 +161,114 @@ def test_export_filtered_bridge_is_pruned_before_traversal(tmp_path, monkeypatch
     assert calls == [1, 2]
     assert set(exported["WI_ID"]) == {1, 2}
     assert 4 not in set(exported["WI_ID"])
+
+
+def test_queue_survivors_are_repeatedly_sent_to_wiql(tmp_path, monkeypatch):
+    """AG-014: quantify repeated work independently of filtered-bridge loss."""
+    filtered = []
+    fetched = []
+
+    class Client:
+        def __init__(self, _url):
+            pass
+
+        def run_query_by_id(self, _project, _query):
+            return list(range(1, 2001))
+
+        def filter_ids_via_wiql(self, ids, _projects, _types):
+            filtered.extend(ids)
+            return set(ids)
+
+        def get_work_items_batch(self, ids):
+            fetched.extend(ids)
+            return [
+                SimpleNamespace(
+                    id=wi_id,
+                    fields={"System.WorkItemType": "Feature", "System.TeamProject": "Example"},
+                    relations=[],
+                )
+                for wi_id in ids
+            ]
+
+    monkeypatch.setattr(tool, "ADOClient", Client)
+    monkeypatch.setattr(tool, "configure_ca_bundle", lambda _path: None)
+    tool.main(
+        [
+            "export",
+            "--ado-url",
+            "https://ado.example",
+            "--query-id",
+            "synthetic",
+            "--batch-size",
+            "100",
+            "--output-dir",
+            str(tmp_path),
+            "--formats",
+            "parquet",
+        ]
+    )
+    assert len(fetched) == len(set(fetched)) == 2000
+    assert len(filtered) == 18900
+    assert len(set(filtered)) == 1900
+
+
+def test_filtered_bridge_breaks_analysis_even_without_pruning(tmp_path, monkeypatch):
+    """AG-015: traversal reaches the descendant, but exported edges lose the path."""
+    fetched = []
+
+    class Client:
+        def __init__(self, _url):
+            pass
+
+        def run_query_by_id(self, _project, _query):
+            return [1]
+
+        def filter_ids_via_wiql(self, *_args):
+            raise AssertionError("Small-queue fixture must not use pruning")
+
+        def get_work_items_batch(self, ids):
+            fetched.extend(ids)
+            return [
+                SimpleNamespace(
+                    id=wi_id,
+                    fields={
+                        "System.WorkItemType": "Task" if wi_id == 2 else "Feature",
+                        "System.TeamProject": "Example",
+                    },
+                    relations=[
+                        SimpleNamespace(
+                            rel="System.LinkTypes.Hierarchy-Forward",
+                            url=f"https://ado.example/{wi_id + 1}",
+                        )
+                    ]
+                    if wi_id < 3
+                    else [],
+                )
+                for wi_id in ids
+            ]
+
+    monkeypatch.setattr(tool, "ADOClient", Client)
+    monkeypatch.setattr(tool, "configure_ca_bundle", lambda _path: None)
+    tool.main(
+        [
+            "export",
+            "--ado-url",
+            "https://ado.example",
+            "--query-id",
+            "synthetic",
+            "--output-dir",
+            str(tmp_path),
+            "--formats",
+            "parquet",
+        ]
+    )
+    assert fetched == [1, 2, 3]
+    exported_nodes = pd.read_parquet(tmp_path / "nodes.parquet")
+    exported_edges = pd.read_parquet(tmp_path / "edges.parquet")
+    assert set(exported_nodes["WI_ID"]) == {1, 3}
+    assert list(exported_edges[["Source_ID", "Target_ID"]].itertuples(index=False, name=None)) == [
+        (1, 2)
+    ]
+    analyzer = tool.GraphAnalyzer(exported_nodes, exported_edges)
+    assert analyzer.G.number_of_edges() == 0
+    assert set(analyzer.find_orphans()["WI_ID"]) == {1, 3}

@@ -1,0 +1,2 @@
+# Preserve the supplied source bytes, including under core.autocrlf=true.
+src/workflow_automations/ado_graph.py -text
