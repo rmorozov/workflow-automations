@@ -196,7 +196,7 @@ python -m build
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the shared development workflow and
-[the backlog](docs/backlog.md) for proposed extensions. The Apache-2.0 license
+[the backlog](docs/backlog/README.md) for proposed extensions. The Apache-2.0 license
 applies to repository code.
 
 ## Export and analyze an ADO graph
@@ -224,5 +224,5 @@ and `analyze --bridges drop` skips contraction. The tool still overwrites output
 even for offline analysis. The default `--steps all` includes
 unbounded cycle enumeration and exact centrality; choose steps deliberately on
 large graphs. Read the [specification](docs/specs/ado-graph.md) and
-[prioritized findings](docs/backlog.md#ado-graphexport) before using the results.
+[prioritized findings](docs/backlog/README.md#ado-graph-and-triage-sharing) before using the results.
 The equivalent script invocation is `python scripts/ado_graph.py ...` after installation.

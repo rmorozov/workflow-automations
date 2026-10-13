@@ -287,4 +287,4 @@ and with fill-down; and outline and merge validation errors.
 
 The value-bearing table is read into memory. Only cells stored in the file are
 visited, so formatting far outside the data does not enlarge the work. Deferred items are listed in the
-[backlog](../backlog.md).
+[backlog](../backlog/README.md).

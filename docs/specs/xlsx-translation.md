@@ -267,4 +267,4 @@ must be re-verified; extraction about 7 s.
 Deferred: JSON configuration, reusable translation memories, one bundle with
 multiple languages, pending-only batch regeneration, row-context keys, token-aware
 batching, source CSV tables, placeholder validators, full Excel fidelity and API
-translation. See [backlog](../backlog.md).
+translation. See [backlog](../backlog/README.md).

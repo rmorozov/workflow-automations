@@ -11,7 +11,9 @@ specification, command help, example, and tests without prior conversation conte
 | `scripts/` | Thin Python-script entry points where useful |
 | `docs/specs/<tool>.md` | Current implemented behavior and explicit limitations |
 | `tests/<tool>/` | Synthetic fixtures and meaningful behavior tests |
-| `docs/backlog.md` | Proposed extensions, separate from implemented requirements |
+| `docs/backlog/<ID>.md` | Proposed extensions, one task per file, separate from implemented requirements |
+| `docs/agentic-workflow.md` | Agent roles, models and rules for parallel branches |
+| `.claude/agents/` | Subagent definitions used by Claude sessions |
 | `.github/workflows/` | Shared CI |
 
 Keep each tool independent. Introduce shared abstractions when a second tool needs
@@ -26,6 +28,7 @@ ruff check .
 ruff format --check .
 pytest
 python -m build
+python scripts/backlog.py check
 ```
 
 Use `ruff format .` to format changes. Tests generate their workbooks in temporary
