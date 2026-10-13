@@ -25,6 +25,7 @@ dev = ["pytest>=8,<10", "ruff==0.16.9", "build>=1.2,<2"]
 xlsx-translate = "workflow_automations.xlsx_translation:main"
 xlsx-outline = "workflow_automations.xlsx_outline:main"
 xlsx-unfold = "workflow_automations.xlsx_unfold:main"
+gerrit-parents = "workflow_automations.gerrit_parents:main"
 ado-triage = "workflow_automations.ado_triage:main"
 
 [tool.setuptools.packages.find]

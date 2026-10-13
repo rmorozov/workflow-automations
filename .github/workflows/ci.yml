@@ -58,5 +58,7 @@ jobs:
           python -m workflow_automations.xlsx_outline --help
           xlsx-unfold --help
           python -m workflow_automations.xlsx_unfold --help
+          gerrit-parents --help
+          python -m workflow_automations.gerrit_parents --help
           ado-triage --help
           python -m workflow_automations.ado_triage --help
