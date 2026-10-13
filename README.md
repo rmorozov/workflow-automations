@@ -218,7 +218,9 @@ By default, type and project filters stop traversal at filtered items, which are
 classified once via WIQL and not fetched. Pass `--filtered-relations follow` to also
 fetch filtered items, follow their links (including into other projects) and write
 them as bridge nodes (`In_Scope=False`); analysis then replaces each bridge with an
-`Indirect` edge so a Feature → Task → Feature chain stays connected. The tool still overwrites outputs and needs the Kerberos dependencies
+`Indirect` edge so a Feature → Task → Feature chain stays connected. A bridge with many
+links can multiply edges; `--max-indirect-edges` caps that (exiting before writing),
+and `analyze --bridges drop` skips contraction. The tool still overwrites outputs and needs the Kerberos dependencies
 even for offline analysis. The default `--steps all` includes
 unbounded cycle enumeration and exact centrality; choose steps deliberately on
 large graphs. Read the [specification](docs/specs/ado-graph.md) and

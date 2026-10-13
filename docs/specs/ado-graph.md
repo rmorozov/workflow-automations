@@ -80,16 +80,19 @@ Other links and URLs whose final component is not an integer are ignored.
 
 ### Exported data
 
-Nodes contain `WI_ID`, every returned field and a boolean `In_Scope`. Every fetched
-work item is a node: in-scope items have `In_Scope=True`; items excluded by type or
-project have `In_Scope=False` and act as bridge nodes for analysis. Three names are changed:
+Nodes contain `WI_ID`, every returned field and a boolean `In_Scope`. In `stop`
+mode only in-scope items are exported (all `In_Scope=True`); an out-of-scope item
+fetched after a WIQL failure is dropped, so the export is the same whether or not
+the WIQL filter succeeded. In `follow` mode every fetched work item is a node, and
+items excluded by type or project have `In_Scope=False` and act as bridge nodes for
+analysis. Three names are changed:
 `System.Title` → `Title`, `System.WorkItemType` → `WorkItemType`, `System.State` →
 `State`. All other ADO field reference names remain unchanged. No source snapshot,
 root marker, completeness manifest or export-schema version is added.
 
 Edges contain `Source_ID`, `Target_ID`, `Link_Type`; direction is the emitting
 item to its relation target. Rows are deduplicated by all three columns. Every
-fetched item contributes its edges; targets may be absent from the node file (not
+exported node contributes its edges; targets may be absent from the node file (not
 fetched, pruned, or omitted).
 
 | Format | Files/sheets |
@@ -108,7 +111,9 @@ Required: `--nodes-file`, `--edges-file` (Parquet only; CSV/Excel exports cannot
 loaded by this mode). Optional: `--ado-url` (default empty, for report URLs),
 `--effort-field` (default `Microsoft.VSTS.Scheduling.OriginalEstimate`),
 `--output-file` (default `analysis_report.xlsx`), `--steps` (default `all`, or a
-comma-separated list). Unknown steps warn and are skipped.
+comma-separated list). Unknown steps warn and are skipped. `--bridges` (`contract`
+by default, or `drop`) and `--max-indirect-edges` (default 1,000,000) control bridge
+nodes, below.
 
 Minimum input columns: nodes `WI_ID`; edges `Source_ID`, `Target_ID`, `Link_Type`.
 Optional node metadata: Title, WorkItemType, State, `KL.Roadmap_State`,
@@ -124,7 +129,14 @@ link wins). Chains of bridges collapse into one edge; a path that returns to its
 own start through bridges only is dropped rather than kept as a self-loop. Bridge
 nodes are then removed, so no report lists them and CR effort sums ignore them. The
 neighbor debug column shows indirect edges as `Indirect via 2>3 (Parent->Child, Blocks)`.
-Node files without `In_Scope` (older exports) are treated as fully in scope. Reverse labels flip direction and normalize to their
+Node files without `In_Scope` (older exports) are treated as fully in scope.
+Contraction runs while the analyzer is built, before any step and before output is
+created, so it is paid even for `--steps orphans`. Each bridge costs in-degree ×
+out-degree candidate edges (a bridge with 5,000 links on each side would cost 25
+million). The running total is checked before each bridge is contracted; above
+`--max-indirect-edges` the command exits with an error naming the bridge, and no
+report file or directory is created. `--bridges drop` removes bridges and their
+edges without adding indirect edges, which matches `stop` export semantics. Reverse labels flip direction and normalize to their
 forward label. Forward directions are parent→child, affects→affected, blocks→blocked,
 predecessor→successor, implements→implemented. Parallel relation types on the same
 pair collapse to one edge; the last label wins. All relation families participate

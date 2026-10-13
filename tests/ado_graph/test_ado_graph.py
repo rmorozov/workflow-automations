@@ -232,11 +232,33 @@ def test_default_stop_mode_classifies_each_queued_id_once(tmp_path, monkeypatch)
 def test_stop_mode_does_not_follow_filtered_items(tmp_path, monkeypatch):
     items = {1: wi(1, targets=[2, 3]), 2: wi(2, "Task", [4]), 3: wi(3, "Bug", [5]), 4: wi(4)}
     items[5] = wi(5)
-    # 3 passes WIQL (as after a failed WIQL chunk), so it is fetched but not followed.
+    # 3 passes WIQL (as after a failed WIQL chunk), so it is fetched but neither
+    # followed nor exported.
     client, log = fake_client(items, [1], rejected={2})
     nodes, _ = run_export(monkeypatch, tmp_path, client, "--filtered-relations", "stop")
     assert log["fetched"] == [1, 3]
-    assert dict(zip(nodes["WI_ID"], nodes["In_Scope"], strict=True)) == {1: True, 3: False}
+    assert dict(zip(nodes["WI_ID"], nodes["In_Scope"], strict=True)) == {1: True}
+
+
+def test_stop_mode_output_is_the_same_with_and_without_wiql_fallback(tmp_path, monkeypatch):
+    """Review finding: stop-mode results must not depend on the WIQL filter succeeding."""
+    items = {1: wi(1, targets=[2]), 2: wi(2, "Task", [3]), 3: wi(3)}
+    results = []
+    for name, rejected in (("pruned", {2}), ("fallback", set())):
+        client, log = fake_client(items, [1, 3], rejected=rejected)
+        out = tmp_path / name
+        nodes, edges = run_export(monkeypatch, out, client)
+        analyzer = tool.GraphAnalyzer(nodes, edges)
+        results.append(
+            (
+                sorted(nodes["WI_ID"]),
+                sorted(edges[["Source_ID", "Target_ID"]].itertuples(index=False, name=None)),
+                sorted(analyzer.G.edges),
+                sorted(analyzer.find_orphans()["WI_ID"]),
+            )
+        )
+        assert (2 in log["fetched"]) == (name == "fallback")
+    assert results[0] == results[1] == ([1, 3], [(1, 2)], [], [1, 3])
 
 
 def test_omitted_ids_are_reported(tmp_path, monkeypatch, capsys):
@@ -252,3 +274,52 @@ def test_batch_size_must_be_positive(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         run_export(monkeypatch, tmp_path, client, "--batch-size", "0")
     assert log["fetched"] == []
+
+
+def fan_bridge(fan):
+    """Bridge 0 with `fan` in-scope predecessors and `fan` in-scope successors."""
+    preds, succs = range(1, fan + 1), range(fan + 1, 2 * fan + 1)
+    graph_nodes = pd.DataFrame(
+        [{"WI_ID": 0, "WorkItemType": "Task", "In_Scope": False}]
+        + [{"WI_ID": i, "WorkItemType": "Feature", "In_Scope": True} for i in [*preds, *succs]]
+    )
+    links = pd.DataFrame(
+        [(p, 0, "Blocks") for p in preds] + [(0, s, "Blocks") for s in succs],
+        columns=["Source_ID", "Target_ID", "Link_Type"],
+    )
+    return graph_nodes, links
+
+
+def test_bridge_contraction_budget():
+    graph_nodes, links = fan_bridge(50)
+    assert tool.GraphAnalyzer(graph_nodes, links).G.number_of_edges() == 2500
+    with pytest.raises(tool.ContractionBudgetExceeded, match="2,500"):
+        tool.GraphAnalyzer(graph_nodes, links, max_indirect_edges=2499)
+    dropped = tool.GraphAnalyzer(graph_nodes, links, bridges="drop", max_indirect_edges=1)
+    assert dropped.G.number_of_edges() == 0
+    assert 0 not in dropped.G
+
+
+def test_exceeded_budget_fails_before_writing_report(tmp_path):
+    graph_nodes, links = fan_bridge(50)
+    node_file, edge_file = tmp_path / "nodes.parquet", tmp_path / "edges.parquet"
+    graph_nodes.to_parquet(node_file, index=False)
+    links.to_parquet(edge_file, index=False)
+    output = tmp_path / "out" / "report.xlsx"
+    with pytest.raises(SystemExit, match="--max-indirect-edges"):
+        tool.main(
+            [
+                "analyze",
+                "--nodes-file",
+                str(node_file),
+                "--edges-file",
+                str(edge_file),
+                "--output-file",
+                str(output),
+                "--steps",
+                "orphans",
+                "--max-indirect-edges",
+                "100",
+            ]
+        )
+    assert not output.parent.exists()
