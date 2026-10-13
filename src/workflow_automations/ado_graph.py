@@ -644,11 +644,15 @@ def run_export(args: argparse.Namespace) -> None:
                         if tid not in visited:
                             queued.setdefault(tid, None)
 
-                # Every fetched item is exported. Out-of-scope items are bridge
-                # nodes that keep accepted items connected in `analyze`.
-                node_row["In_Scope"] = in_scope
-                all_node_rows.append(node_row)
-                all_edge_rows.extend(edge_rows)
+                # In follow mode every fetched item is exported; out-of-scope
+                # items are bridge nodes that keep accepted items connected in
+                # `analyze`.  In stop mode an out-of-scope item is only fetched
+                # when WIQL could not classify it, so it is not exported: the
+                # output must not depend on whether the WIQL filter succeeded.
+                if in_scope or follow_filtered:
+                    node_row["In_Scope"] = in_scope
+                    all_node_rows.append(node_row)
+                    all_edge_rows.extend(edge_rows)
 
             pbar.update(len(fetch_ids))
             pbar.set_postfix(
@@ -729,6 +733,13 @@ def _export_excel(df_nodes: pd.DataFrame, df_edges: pd.DataFrame, d: Path) -> No
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_MAX_INDIRECT_EDGES = 1_000_000
+
+
+class ContractionBudgetExceeded(ValueError):
+    """Bridge contraction would create more indirect edges than allowed."""
+
+
 def _edge_path(edge_data: dict) -> tuple[str, ...]:
     return edge_data.get("path") or (str(edge_data.get("link_type")),)
 
@@ -770,11 +781,15 @@ class GraphAnalyzer:
         df_edges: pd.DataFrame,
         ado_url: str = "",
         effort_field: str = "",
+        bridges: str = "contract",
+        max_indirect_edges: int = DEFAULT_MAX_INDIRECT_EDGES,
     ) -> None:
         self.df_nodes = df_nodes
         self.df_edges = df_edges
         self.ado_url = ado_url.rstrip("/")
         self.effort_field = effort_field
+        self.bridges = bridges
+        self.max_indirect_edges = max_indirect_edges
         self.G: nx.DiGraph = nx.DiGraph()
         self._build_graph()
 
@@ -829,13 +844,30 @@ class GraphAnalyzer:
         bridges collapse into one edge.  A cycle passing only through bridges back
         to the same node (P -> B -> P) is dropped rather than kept as a self-loop.
         Exports without an In_Scope column are treated as fully in scope.
+
+        Each bridge costs predecessors × successors candidate pairs.  Before a
+        bridge is contracted, the running total is checked against
+        max_indirect_edges and ContractionBudgetExceeded is raised, so a dense
+        bridge fails fast instead of materializing millions of edges.  With
+        bridges="drop", bridges are removed without adding indirect edges.
         """
         if "In_Scope" not in self.df_nodes.columns:
             return
         in_scope = self.df_nodes["In_Scope"].fillna(True).astype(bool)
         bridges = list(self.df_nodes.loc[~in_scope, "WI_ID"])
         added = 0
+        work = 0
         for bridge in bridges:
+            if self.bridges == "drop":
+                self.G.remove_node(bridge)
+                continue
+            work += self.G.in_degree(bridge) * self.G.out_degree(bridge)
+            if work > self.max_indirect_edges:
+                raise ContractionBudgetExceeded(
+                    f"bridge contraction needs more than {self.max_indirect_edges:,} candidate "
+                    f"indirect edges (reached {work:,} at bridge {bridge}); rerun with a larger "
+                    "--max-indirect-edges or with --bridges drop"
+                )
             for pred in list(self.G.predecessors(bridge)):
                 for succ in list(self.G.successors(bridge)):
                     if pred == succ or pred == bridge or succ == bridge:
@@ -850,7 +882,8 @@ class GraphAnalyzer:
             self.G.remove_node(bridge)
         self.df_nodes = self.df_nodes[in_scope].reset_index(drop=True)
         log.info(
-            "Contracted %d bridge node(s) into %d indirect edge(s); %d in-scope nodes remain.",
+            "%s %d bridge node(s); added %d indirect edge(s); %d in-scope nodes remain.",
+            "Dropped" if self.bridges == "drop" else "Contracted",
             len(bridges),
             added,
             self.G.number_of_nodes(),
@@ -1207,7 +1240,18 @@ def run_analyze(args: argparse.Namespace) -> None:
         else [s.strip().lower() for s in args.steps.split(",")]
     )
 
-    analyzer = GraphAnalyzer(df_nodes, df_edges, args.ado_url, args.effort_field)
+    try:
+        analyzer = GraphAnalyzer(
+            df_nodes,
+            df_edges,
+            args.ado_url,
+            args.effort_field,
+            bridges=args.bridges,
+            max_indirect_edges=args.max_indirect_edges,
+        )
+    except ContractionBudgetExceeded as exc:
+        # Raised before any output is created.
+        raise SystemExit(f"error: {exc}") from None
     step_fn_map = {
         "cycles": analyzer.find_cycles,
         "orphans": analyzer.find_orphans,
@@ -1372,6 +1416,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--steps",
         default="all",
         help=f"Comma-separated steps or 'all'.  Available: {', '.join(ALL_STEPS)}.",
+    )
+    ap.add_argument(
+        "--bridges",
+        choices=("contract", "drop"),
+        default="contract",
+        help=(
+            "How to treat out-of-scope bridge nodes (In_Scope=False, from export "
+            "--filtered-relations follow).  contract (default): replace each bridge with "
+            "Indirect edges between its neighbours.  drop: remove bridges and their edges."
+        ),
+    )
+    ap.add_argument(
+        "--max-indirect-edges",
+        type=_positive_int,
+        default=DEFAULT_MAX_INDIRECT_EDGES,
+        help=(
+            "Budget of candidate indirect edges for bridge contraction (sum over bridges "
+            "of in-degree × out-degree).  Exceeding it exits with an error before any "
+            f"output is written.  Default: {DEFAULT_MAX_INDIRECT_EDGES:,}."
+        ),
     )
 
     return parser
