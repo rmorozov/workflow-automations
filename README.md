@@ -214,12 +214,11 @@ ado-graph analyze --nodes-file work/ado-graph/nodes.parquet \
   --steps orphans,scc,longest_chain --output-file work/ado-graph/report.xlsx
 ```
 
-Type and project filters mark items out of scope without stopping traversal: export
-fetches filtered items, follows their links and writes them as bridge nodes
-(`In_Scope=False`), and analysis replaces each bridge with an `Indirect` edge so a
-Feature → Task → Feature chain stays connected. Pass `--filtered-relations stop` to
-skip filtered items instead (fewer ADO calls, but items reachable only through them
-are missed). The tool still overwrites outputs and needs the Kerberos dependencies
+By default, type and project filters stop traversal at filtered items, which are
+classified once via WIQL and not fetched. Pass `--filtered-relations follow` to also
+fetch filtered items, follow their links (including into other projects) and write
+them as bridge nodes (`In_Scope=False`); analysis then replaces each bridge with an
+`Indirect` edge so a Feature → Task → Feature chain stays connected. The tool still overwrites outputs and needs the Kerberos dependencies
 even for offline analysis. The default `--steps all` includes
 unbounded cycle enumeration and exact centrality; choose steps deliberately on
 large graphs. Read the [specification](docs/specs/ado-graph.md) and

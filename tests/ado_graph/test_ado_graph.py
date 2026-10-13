@@ -158,7 +158,9 @@ def test_follow_traverses_filtered_bridge_at_pruning_scale(tmp_path, monkeypatch
     """AG-001: a queue of three batches no longer prunes the skipped bridge 3."""
     items = {1: wi(1), 2: wi(2), 3: wi(3, "Task", [4]), 4: wi(4)}
     client, log = fake_client(items, [1, 2, 3])
-    nodes, _ = run_export(monkeypatch, tmp_path, client, "--batch-size", "1")
+    nodes, _ = run_export(
+        monkeypatch, tmp_path, client, "--batch-size", "1", "--filtered-relations", "follow"
+    )
     assert log["filtered"] == []
     assert log["fetched"] == [1, 2, 3, 4]
     assert dict(zip(nodes["WI_ID"], nodes["In_Scope"], strict=True)) == {
@@ -173,7 +175,7 @@ def test_filtered_bridge_keeps_features_connected_in_analysis(tmp_path, monkeypa
     """AG-015: Feature 1 -> Task 2 -> Feature 3 stays one connected path."""
     items = {1: wi(1, targets=[2]), 2: wi(2, "Task", [3]), 3: wi(3)}
     client, _ = fake_client(items, [1])
-    nodes, edges = run_export(monkeypatch, tmp_path, client)
+    nodes, edges = run_export(monkeypatch, tmp_path, client, "--filtered-relations", "follow")
     assert set(edges[["Source_ID", "Target_ID"]].itertuples(index=False, name=None)) == {
         (1, 2),
         (2, 3),
@@ -216,13 +218,11 @@ def test_bridge_chains_contract_and_direct_links_win():
     assert impact["Total_Effort"] == 6  # bridge efforts are not counted
 
 
-def test_stop_mode_classifies_each_queued_id_once(tmp_path, monkeypatch):
-    """AG-014: 2,000 seeds at batch 100 send each ID to WIQL once (was 18,900)."""
+def test_default_stop_mode_classifies_each_queued_id_once(tmp_path, monkeypatch):
+    """Default mode; AG-014: 2,000 seeds at batch 100 send each ID to WIQL once (was 18,900)."""
     items = {i: wi(i) for i in range(1, 2001)}
     client, log = fake_client(items, range(1, 2001), rejected={7})
-    nodes, _ = run_export(
-        monkeypatch, tmp_path, client, "--batch-size", "100", "--filtered-relations", "stop"
-    )
+    nodes, _ = run_export(monkeypatch, tmp_path, client, "--batch-size", "100")
     assert len(log["filtered"]) == len(set(log["filtered"])) == 2000
     assert 7 not in log["fetched"]
     assert len(log["fetched"]) == len(set(log["fetched"])) == 1999
