@@ -5,15 +5,15 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import os
 import re
-import tempfile
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from workflow_automations.ado_common.excel import excel_safe, keep_text_literal, publish_all
 
 try:
     import openpyxl
@@ -48,31 +48,6 @@ def export_paths(output_dir: Path, formats: list[str]) -> list[Path]:
     """Paths an export with these formats publishes; unknown formats add none."""
     names = dict.fromkeys(name for fmt in formats for name in EXPORT_FILES.get(fmt, ()))
     return [output_dir / name for name in names]
-
-
-def publish_all(targets: Sequence[tuple[Path, Callable[[Path], None]]], overwrite: bool) -> None:
-    """Write every target to a sibling temp file, then rename them all into place.
-
-    The same approach as ``ado-triage``: a failure while writing (permissions, full
-    disk, a serialization error) leaves every existing target unchanged.
-    """
-    for path, _ in targets:
-        if path.exists() and not overwrite:
-            raise FileExistsError(f"{path} exists; pass --overwrite to replace it")
-    staged: list[tuple[Path, Path]] = []
-    try:
-        for path, write in targets:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=path.suffix, dir=path.parent)
-            os.close(fd)
-            staged.append((Path(tmp), path))
-            write(Path(tmp))
-        for tmp, path in staged:
-            os.replace(tmp, path)
-    finally:
-        for tmp, _ in staged:
-            if tmp.exists():
-                tmp.unlink()
 
 
 NODE_KEY = "WI_ID"
@@ -248,17 +223,8 @@ def _export_dataframes(
 def _write_excel(df_nodes: pd.DataFrame, df_edges: pd.DataFrame, path: Path) -> None:
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for sheet, frame in (("Nodes", df_nodes), ("Edges", df_edges)):
-            frame.to_excel(writer, sheet_name=sheet, index=False)
-            _keep_text_literal(writer.sheets[sheet])
-
-
-def _keep_text_literal(worksheet: Any) -> None:
-    """Store text that openpyxl would read as a formula (``=...``) as a string cell."""
-    for row in worksheet.iter_rows(min_row=2):
-        for cell in row:
-            if cell.data_type == "f":
-                cell.data_type = "s"
-                cell.quotePrefix = True
+            excel_safe(frame).to_excel(writer, sheet_name=sheet, index=False)
+            keep_text_literal(writer.sheets[sheet])
 
 
 # Column widths come from the heading and at most this many evenly spaced rows.
