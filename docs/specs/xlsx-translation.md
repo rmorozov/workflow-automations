@@ -11,8 +11,8 @@ deduplication/counting, CSV IO, and the ID join; openpyxl supplies cell metadata
 Excel IO. There are no LLM calls, credentials, or network operations in the tool.
 
 Original input is XLSX. Mapping input is a batch of CSV files, XLSX workbooks, or a
-mixture. Each invocation applies one target language. Separate extractions can
-target different languages; reusable dictionaries across languages are deferred.
+mixture. One extraction can serve several target languages; each `apply` invocation
+applies one of them.
 
 ## Input and matching
 
@@ -79,10 +79,26 @@ files never need to repeat source text. Mapping row/file order is irrelevant.
 | `sources/c0002.csv` | Per-column source dictionary (global mode uses `global.csv`) |
 | `translations/c0002.csv` | Corresponding blank translation template |
 | `batches/c0002.part001.csv` | Optional source dictionary chunks |
-| `manifest.json` | Schema, settings, dictionary, cell references, source fingerprint, batch inventory |
+| `manifest.json` | Schema, settings, target languages, dictionary, cell references, source fingerprint, batch inventory |
 | `summary.json` | Unique/eligible counts, character totals, per-column counts |
 | `prompt.txt` | Languages, column context, and response instructions |
 | `agent_prompt.md` | Agent-mode instructions and work-unit checklist; written only when CSV units exist |
+
+`--target-language` accepts one or more tags, which must differ ignoring case because
+they appear in file names. Sources, batches, IDs and the manifest's dictionary,
+references and fingerprint are produced once and shared by every target language;
+only templates and instructions are per language. With one target language the
+layout is the one above. With several, each language-specific output carries its tag:
+`translations/<language>/c0002.csv`, `translations.<language>.xlsx`,
+`prompt.<language>.txt` and `agent_prompt.<language>.md`, whose replies go to
+`replies/<language>/` and whose apply command names `--target-language`. The manifest
+records `target_languages` in the given order and `target_language` as the first of
+them; a manifest without the list has only `target_language`. `apply
+--target-language` selects the language to write and is required when the manifest
+lists several; it may also name a language the extraction did not list, so an
+earlier bundle serves a new language without re-extraction, although the bundle then
+has no template or prompt for it. Each language applies to its own output, or to the
+previous language's output, which still holds the unchanged source sheet.
 
 Column IDs are based on physical positions, not arbitrary heading text; filenames
 and sheet names remain safe. Selected columns with no eligible text get empty
@@ -133,7 +149,8 @@ Directory/glob expansion and configuration files are deferred; the script never
 automatically loads source dictionary files as translation replies.
 
 CSV and every sheet of an input XLSX mapping must contain exactly the two headers
-`text_id,translated_text_<manifest target language>` in that order. Extra metadata
+`text_id,translated_text_<target language>` in that order, where the target language
+is `--target-language` or, when omitted, the manifest's single target language. Extra metadata
 or source-text columns/sheets are rejected. Target language tags are constrained to
 letters followed by letters/digits/hyphens/underscores, up to 35 characters.
 
@@ -250,7 +267,8 @@ See [README](../../README.md) for a complete extraction/application example.
 Tests use generated, synthetic real workbooks to cover repeated values, per-column
 versus global scope, XLSX/CSV/mixed replies, reply reordering, NA/leading-zero text,
 embedded CSV punctuation/newlines, blanks/numbers/dates/booleans/formulas, literal
-formula-like text, strict/partial completeness, foreign IDs, conflicts, batch
+formula-like text, two target languages applied from one bundle (separately and
+into one workbook), strict/partial completeness, foreign IDs, conflicts, batch
 coverage/limits, headings, changed source, manifest validation, safe overwrite, an
 agent-mode round trip that follows the prompt's checklist and apply command, CSV
 reply diagnostics, XML and openpyxl writers producing identical cells, Excel-style
@@ -264,7 +282,6 @@ synthetic 50,000-row, 10-column sheet with two translated columns: apply took 21
 before this design, 2.8 s with an unchanged source and about 10 s when the source
 must be re-verified; extraction about 7 s.
 
-Deferred: JSON configuration, reusable translation memories, one bundle with
-multiple languages, pending-only batch regeneration, row-context keys, token-aware
+Deferred: JSON configuration, reusable translation memories, pending-only batch regeneration, row-context keys, token-aware
 batching, source CSV tables, placeholder validators, full Excel fidelity and API
 translation. See [backlog](../backlog/README.md).

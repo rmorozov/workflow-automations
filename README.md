@@ -49,6 +49,12 @@ The bundle contains:
 - `manifest.json`: the authoritative dictionary, cell references, and source fingerprint.
 - `summary.json`: deduplication and per-column counts.
 
+For several languages from one extraction, pass `--target-language en de`. Sources,
+batches and IDs are shared; templates and prompts are written per language
+(`translations/de/*.csv`, `translations.de.xlsx`, `prompt.de.txt`,
+`agent_prompt.de.md`), and each `apply` names its language with
+`--target-language de`.
+
 Translate source dictionaries or batches externally. Return **only two columns**:
 
 ```csv
