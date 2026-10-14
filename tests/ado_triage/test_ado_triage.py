@@ -91,6 +91,81 @@ def test_blast_radius_counts_only_items_this_item_obstructs(snapshot):
     assert rows.loc[3, tool.COL_BLOCKS_COUNT] == 0
 
 
+def chain_snapshot(*links):
+    """Items 1-6 in one team; each link is (source, relation, target)."""
+    items = {i: item(i, TEAM_X, f"Item {i}", rw=10) for i in range(1, 7)}
+    for src, kind, dst in links:
+        items[src]["relations"].append(rel(kind, dst))
+    return tool.Snapshot(items=list(items.values()))
+
+
+def test_transitive_chain_reports_length_and_path():
+    # A=1 blocks B=2 blocks C=3.
+    snap = chain_snapshot((1, tool.REL_BLOCKS_FORWARD, 2), (2, tool.REL_BLOCKS_FORWARD, 3))
+    rows = by_id(tool.build_report(snap, {}, settings()))
+    assert rows.loc[1, tool.COL_CHAIN_LENGTH] == 2
+    assert rows.loc[1, tool.COL_CHAIN] == "1 > 2 > 3"
+    assert rows.loc[1, tool.COL_BLOCKS_COUNT] == 1  # one-hop count is unchanged
+    assert rows.loc[2, tool.COL_CHAIN_LENGTH] == 1
+    assert rows.loc[3, tool.COL_CHAIN_LENGTH] == 0
+    assert rows.loc[3, tool.COL_CHAIN] == ""
+
+
+def test_chain_takes_longest_branch_and_reads_reverse_links():
+    # 1 blocks 2 and 4; 4 -> 5 -> 6 is recorded only as reverse links on the blocked items.
+    snap = chain_snapshot(
+        (1, tool.REL_SUCCESSOR, 2),
+        (1, tool.REL_BLOCKS_FORWARD, 4),
+        (5, tool.REL_BLOCKS_REVERSE, 4),
+        (6, tool.REL_PREDECESSOR, 5),
+    )
+    rows = by_id(tool.build_report(snap, {}, settings()))
+    assert rows.loc[1, tool.COL_CHAIN] == "1 > 4 > 5 > 6"
+    assert rows.loc[1, tool.COL_CHAIN_LENGTH] == 3
+
+
+def test_chain_crosses_items_outside_the_query():
+    # 2 blocks 99 (not queried) and 3 is blocked by 99: the chain still reaches 3.
+    snap = chain_snapshot((2, tool.REL_BLOCKS_FORWARD, 99), (3, tool.REL_BLOCKS_REVERSE, 99))
+    rows = by_id(tool.build_report(snap, {}, settings()))
+    assert rows.loc[2, tool.COL_CHAIN] == "2 > 99 > 3"
+
+
+def test_mirrored_links_are_not_counted_twice():
+    snap = chain_snapshot((1, tool.REL_BLOCKS_FORWARD, 2), (2, tool.REL_BLOCKS_REVERSE, 1))
+    rows = by_id(tool.build_report(snap, {}, settings()))
+    assert rows.loc[1, tool.COL_CHAIN_LENGTH] == 1
+
+
+def test_dependency_cycle_terminates_and_counts_members_once():
+    # 1 -> 2 -> 3 -> 1 cycle, with 3 also blocking 4.
+    snap = chain_snapshot(
+        (1, tool.REL_BLOCKS_FORWARD, 2),
+        (2, tool.REL_BLOCKS_FORWARD, 3),
+        (3, tool.REL_BLOCKS_FORWARD, 1),
+        (3, tool.REL_BLOCKS_FORWARD, 4),
+    )
+    rows = by_id(tool.build_report(snap, {}, settings()))
+    assert rows.loc[1, tool.COL_CHAIN] == "1 > 2 > 3 > 4"
+    assert rows.loc[2, tool.COL_CHAIN] == "2 > 1 > 3 > 4"
+    assert rows.loc[4, tool.COL_CHAIN_LENGTH] == 0
+
+
+def test_top_blockers_sorts_by_chain_length():
+    # 3 blocks two items directly; 1 heads a longer chain with one direct link.
+    snap = chain_snapshot(
+        (3, tool.REL_BLOCKS_FORWARD, 5),
+        (3, tool.REL_BLOCKS_FORWARD, 6),
+        (1, tool.REL_BLOCKS_FORWARD, 2),
+        (2, tool.REL_BLOCKS_FORWARD, 4),
+        (4, tool.REL_BLOCKS_FORWARD, 6),
+    )
+    report = tool.build_report(snap, {}, settings())
+    view = tool.view_blockers(report.master, report.relations, {}, settings())
+    assert list(view[tool.FIELD_ID])[:2] == [1, 2]
+    assert {tool.COL_CHAIN_LENGTH, tool.COL_CHAIN} <= set(view.columns)
+
+
 def test_root_follows_parent_field_and_child_links_are_kept(snapshot):
     report = tool.build_report(snapshot, CAPACITY, settings())
     rows = by_id(report)
