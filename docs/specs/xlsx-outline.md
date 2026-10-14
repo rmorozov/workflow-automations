@@ -41,7 +41,16 @@ Example input:
 ## Input
 
 The input is an `.xlsx` workbook; it is opened for reading and never modified.
-`--sheet` names the sheet; the default is the first sheet. The table begins at A1,
+`--sheet` names the sheet; the default is the first sheet. `--all-sheets` (exclusive
+with `--sheet`) outlines every worksheet in workbook order, hidden ones included, and
+skips sheets with no values (all of them empty is an error). Each sheet becomes one
+section: a `#` heading with the sheet name, then that sheet's outline one level
+down. A section is exactly what `--sheet Name --title Name` writes, so it unfolds
+back on its own with `xlsx-unfold --title` and the sheet's column names, once it is
+cut out at its `#` heading (the combined file does not unfold in one pass). Column and
+level options apply to every sheet, and an error names the sheet it came from.
+`--title` and `--front-matter` describe a single sheet and are refused with
+`--all-sheets`. The table begins at A1,
 row 1 holds headings, and the table ends at the last nonblank cell. Every selected
 column needs a nonempty heading; selected headings must be unique.
 
