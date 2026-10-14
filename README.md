@@ -49,6 +49,12 @@ The bundle contains:
 - `manifest.json`: the authoritative dictionary, cell references, and source fingerprint.
 - `summary.json`: deduplication and per-column counts.
 
+For several languages from one extraction, pass `--target-language en de`. Sources,
+batches and IDs are shared; templates and prompts are written per language
+(`translations/de/*.csv`, `translations.de.xlsx`, `prompt.de.txt`,
+`agent_prompt.de.md`), and each `apply` names its language with
+`--target-language de`.
+
 Translate source dictionaries or batches externally. Return **only two columns**:
 
 ```csv
@@ -97,7 +103,9 @@ reply path to write, the reply rules and column context, and the final `apply`
 command with every reply path filled in. The agent reads one unit at a time, writes
 `replies/<unit>.csv`, checks it, and skips units that already have a complete reply,
 so a small context window and an interrupted run both work. Use `--batch-max-rows`
-to keep each unit small. The prompt is written only when CSV units exist.
+to keep each unit small. The prompt is written only when CSV units exist. With
+several target languages there is one prompt per language, such as
+`agent_prompt.de.md`, writing to `replies/de/`.
 
 Use `--formats csv` or `--formats xlsx` to select extraction formats. Deduplication
 is per column by default; `--dedupe-scope global` shares a dictionary across columns
@@ -137,6 +145,7 @@ xlsx-outline --input plan.xlsx --levels 3 --row-ids --front-matter --output work
 
 # 1. Unfold into a new workbook (text values, outline columns only)
 xlsx-unfold --input work/plan.md --output work/plan-table.xlsx
+#    add --retype to write numbers and dates as typed cells
 # 2. Merge into a copy of the original, keeping other columns, types and formatting
 xlsx-unfold --input work/plan.md --into plan.xlsx --output work/plan-merged.xlsx
 ```
@@ -147,6 +156,9 @@ merging needs them, and the new-workbook mode uses them to restore duplicate row
 fingerprint that stops a merge into a sheet changed since. If your editor drops or
 mangles front matter, leave it out and pass `--columns`, `--details` (and any other
 outline options you used) to `xlsx-unfold` instead. Neither mode modifies its inputs.
+`--retype`, in either mode, writes text that is exactly how `xlsx-outline` prints a
+number or date (`42`, `0.1`, `2024-01-02`) as a typed cell; IDs with leading zeros,
+other spellings and Text-formatted cells stay text.
 
 ## Find Gerrit parents
 

@@ -13,12 +13,14 @@ import re
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from pathlib import Path
 from zipfile import BadZipFile
 
 import yaml
 from openpyxl import Workbook, load_workbook
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, TIME_FORMATS
+from openpyxl.styles.numbers import is_date_format
 
 from workflow_automations.xlsx_outline import (
     FRONT_MATTER_KEY,
@@ -27,6 +29,7 @@ from workflow_automations.xlsx_outline import (
     fill_down,
     fingerprint,
     read_table,
+    text,
 )
 
 HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
@@ -34,6 +37,11 @@ BULLET = re.compile(r"^( *)(?:[-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?$")
 # CommonMark: a backslash before ASCII punctuation is an escape.
 ESCAPED = re.compile(r"\\([!-/:-@\[-`{-~])")
 ROW_TAG = re.compile(r"[ \t]*<!--[ \t]*rows?:[ \t]*([0-9][0-9 ,]*?)[ \t]*-->[ \t]*$")
+NUMBER = re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:e[+-][0-9]+)?")
+# Excel keeps 15 significant digits; longer whole numbers (IDs) stay text.
+MAX_WHOLE = 10**15
+# Quoted text, [colour]/[locale] tags and escaped characters in a number format.
+FORMAT_LITERALS = re.compile(r'"[^"]*"|\[[^\]]*\]|\\.')
 
 
 @dataclass
@@ -265,9 +273,77 @@ def validate_sheet_name(name: str) -> None:
         raise ValidationError("Invalid sheet name (maximum 31 characters, no \\ / * ? : [ ])")
 
 
-def literal(ws, row: int, column: int, value: str | None) -> None:
+def retyped(value: str):
+    """Return the number, date or time that xlsx-outline renders as `value`, else None.
+
+    Only text the outline itself would print for that value, and that Excel can store
+    exactly, is retyped: leading zeros, `1.50`, `1e3`, other date spellings, time
+    zones and sub-millisecond times stay text.
+    """
+    parsed = None
+    if NUMBER.fullmatch(value):
+        parsed = float(value) if any(c in value for c in ".e") else int(value)
+        if isinstance(parsed, int) and abs(parsed) >= MAX_WHOLE:
+            return None
+        # Floats beyond 15 significant digits or Excel's normal range would change.
+        if isinstance(parsed, float) and (
+            float(f"{parsed:.15g}") != parsed or not 2.3e-308 < abs(parsed) < 1e308
+        ):
+            return None
+    else:
+        for kind in (datetime, time):
+            try:
+                parsed = kind.fromisoformat(value)
+                break
+            except ValueError:
+                continue
+        # Excel stores whole milliseconds and no time zone.
+        if parsed is None or parsed.tzinfo is not None or parsed.microsecond % 1000:
+            return None
+        if isinstance(parsed, datetime):
+            if parsed.year < 1900:
+                return None
+            # A date at midnight is stored as a date, so it keeps a date-only format.
+            if parsed.time() == time(0):
+                parsed = parsed.date()
+    rendered = text(datetime.combine(parsed, time(0)) if type(parsed) is date else parsed)
+    return parsed if rendered == value else None
+
+
+def date_parts(number_format: str) -> tuple[bool, bool]:
+    """Whether a date number format shows a date part and a time part."""
+    plain = FORMAT_LITERALS.sub("", number_format.lower())
+    return any(c in plain for c in "yd"), any(c in plain for c in "hs")
+
+
+def retype_cell(cell, value: str) -> bool:
+    """Write `value` typed when it reads as a number or date the cell can hold."""
+    typed = retyped(value)
+    # A Text-formatted cell (a merge target) keeps text, such as IDs.
+    if typed is None or cell.number_format == "@":
+        return False
+    if isinstance(typed, date) and cell.parent.parent.epoch.date() >= (
+        typed.date() if isinstance(typed, datetime) else typed
+    ):
+        # Serial 0 or below: invalid in Excel, or read back as a time (1904 epoch).
+        return False
+    cell.value = typed
+    if isinstance(typed, (date, time)):
+        # Keep a date format only when it shows the same parts as the value.
+        wanted = (not isinstance(typed, time), isinstance(typed, (datetime, time)))
+        if date_parts(cell.number_format) != wanted:
+            cell.number_format = TIME_FORMATS[type(typed)]
+    elif is_date_format(cell.number_format):
+        # A number written over a date-formatted cell would otherwise display as a date.
+        cell.number_format = "General"
+    return True
+
+
+def literal(ws, row: int, column: int, value: str | None, retype: bool = False) -> None:
     if value is None:
         ws.cell(row, column).value = None
+        return
+    if retype and retype_cell(ws.cell(row, column), value):
         return
     if len(value.encode("utf-16-le")) // 2 > 32767 or ILLEGAL_CHARACTERS_RE.search(value):
         raise ValidationError(
@@ -279,14 +355,16 @@ def literal(ws, row: int, column: int, value: str | None) -> None:
     cell.data_type = "s"
 
 
-def new_workbook(sheet: str, headings: list[str], rows):
+def new_workbook(sheet: str, headings: list[str], rows, retype: bool = False):
     workbook = Workbook()
     ws = workbook.active
     ws.title = sheet
-    for row_number, values in enumerate([headings, *(values for _, values in rows)], 1):
+    for column, value in enumerate(headings, 1):
+        literal(ws, 1, column, value)
+    for row_number, (_, values) in enumerate(rows, 2):
         for column, value in enumerate(values, 1):
             if value is not None:
-                literal(ws, row_number, column, value)
+                literal(ws, row_number, column, value, retype)
     return workbook
 
 
@@ -301,7 +379,14 @@ def copy_cell(source, target) -> None:
         target.comment = copy.copy(source.comment)
 
 
-def merge(settings: Settings, headings: list[str], rows, into: Path, sheet: str | None):
+def merge(
+    settings: Settings,
+    headings: list[str],
+    rows,
+    into: Path,
+    sheet: str | None,
+    retype: bool = False,
+):
     """Rewrite the original sheet's data rows in outline order; return workbook and counts."""
     if settings.levels is None:
         raise ValidationError("Merging needs level column names (front matter or --columns)")
@@ -371,7 +456,7 @@ def merge(settings: Settings, headings: list[str], rows, into: Path, sheet: str 
         for column, value, original in zip(columns, values, before, strict=True):
             if tag is not None and value == original:
                 continue
-            literal(ws, target, column + 1, value)
+            literal(ws, target, column + 1, value, retype)
             changed = True
         updated += changed and tag is not None
     for row in range(len(plan) + 2, last + 1):
@@ -415,9 +500,9 @@ def run(args) -> str:
     root = parse_outline(lines, offset, settings.title)
     headings, rows = unfold(root, settings)
     if args.into is None:
-        save(new_workbook(args.sheet or "Outline", headings, rows), args.output)
+        save(new_workbook(args.sheet or "Outline", headings, rows, args.retype), args.output)
         return f"Unfolded {len(rows)} rows into {len(headings)} columns: {args.output}"
-    workbook, title, counts = merge(settings, headings, rows, args.into, args.sheet)
+    workbook, title, counts = merge(settings, headings, rows, args.into, args.sheet, args.retype)
     try:
         save(workbook, args.output)
     finally:
@@ -456,6 +541,11 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--blank-label", help="Item text that stands for a blank cell")
     root.add_argument("--raw", action="store_true", help="Do not unescape Markdown characters")
+    root.add_argument(
+        "--retype",
+        action="store_true",
+        help="Write number and date text in xlsx-outline's own format as typed cells",
+    )
     root.add_argument(
         "--fill-down",
         action="store_true",

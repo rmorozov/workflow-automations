@@ -938,3 +938,203 @@ def test_other_relationship_references_never_reach_the_copy(tmp_path):
     status, output = application(path, bundle, [returned], tmp_path)
     assert status == 0 and report_writer(output) == "openpyxl"
     assert load_workbook(output)["Data_en"]["A2"].value == "EN:Открыто"
+
+
+def multilingual(source, tmp_path, *options, languages=("en", "de")):
+    bundle = tmp_path / "bundle"
+    status = tool.main(
+        [
+            "extract",
+            "--input",
+            str(source),
+            "--sheet",
+            "Data",
+            "--source-language",
+            "ru",
+            "--target-language",
+            *languages,
+            "--output-dir",
+            str(bundle),
+            *options,
+        ]
+    )
+    return status, bundle
+
+
+def language_reply(path, language, records):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["text_id", f"translated_text_{language}"])
+        writer.writerows(records)
+    return path
+
+
+def test_one_bundle_applies_two_languages_with_shared_ids_and_checks(source, tmp_path):
+    status, bundle = multilingual(source, tmp_path)
+    assert status == 0
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert manifest["target_languages"] == ["en", "de"]
+    assert manifest["target_language"] == "en"
+    # One source dictionary; templates and prompts per language, all with the same IDs.
+    ids = pd.read_csv(bundle / "sources/c0001.csv", keep_default_na=False)["text_id"].tolist()
+    for language in ["en", "de"]:
+        template = pd.read_csv(bundle / f"translations/{language}/c0001.csv", keep_default_na=False)
+        assert list(template.columns) == ["text_id", f"translated_text_{language}"]
+        assert template["text_id"].tolist() == ids
+        workbook = load_workbook(bundle / f"translations.{language}.xlsx", read_only=True)
+        assert next(workbook["c0001"].values) == ("text_id", f"translated_text_{language}")
+        workbook.close()
+        prompt = (bundle / f"prompt.{language}.txt").read_text(encoding="utf-8")
+        assert f"Translate from ru to {language}." in prompt
+    assert not (bundle / "prompt.txt").exists() and not (bundle / "translations/c0001.csv").exists()
+
+    outputs = {}
+    for language in ["en", "de"]:
+        returned = language_reply(
+            tmp_path / f"{language}.csv",
+            language,
+            [(e["text_id"], f"{language}:" + e["source_text"]) for e in manifest["entries"]],
+        )
+        status, output = application(
+            source, bundle, [returned], tmp_path, "--target-language", language, "--overwrite"
+        )
+        assert status == 0
+        outputs[language] = tmp_path / f"translated.{language}.xlsx"
+        output.rename(outputs[language])
+        report = json.loads(output.with_suffix(".report.json").read_text())
+        assert report["target_language"] == language
+        assert report["bundle_id"] == manifest["bundle_id"]
+        assert report["source_check"] == "unchanged"
+        assert report["translated_cells"] == len(manifest["references"])
+    for language, output in outputs.items():
+        sheet = load_workbook(output)[f"Data_{language}"]
+        assert sheet["A2"].value == f"{language}:Открыто"
+        assert sheet["B3"].value == f'{language}:line, one\nline "two"'
+
+    # The English output still holds the source sheet, so German can be added to it;
+    # its bytes changed, so the shared fingerprint and cell checks run in full.
+    returned = tmp_path / "de.csv"
+    status, both = application(
+        outputs["en"], bundle, [returned], tmp_path, "--target-language", "de", "--overwrite"
+    )
+    assert status == 0
+    assert json.loads(both.with_suffix(".report.json").read_text())["source_check"] == "cells"
+    result = load_workbook(both)
+    assert result.sheetnames == ["Data", "Other", "Data_en", "Data_de"]
+    assert result["Data_en"]["A2"].value == "en:Открыто"
+    assert result["Data_de"]["A2"].value == "de:Открыто"
+
+
+def test_multilingual_apply_needs_a_language_matching_the_replies(source, tmp_path, capsys):
+    status, bundle = multilingual(source, tmp_path)
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    records = [(e["text_id"], "EN:" + e["source_text"]) for e in manifest["entries"]]
+    english = language_reply(tmp_path / "en.csv", "en", records)
+    status, output = application(source, bundle, [english], tmp_path)
+    assert status == 2 and not output.exists()
+    assert "several target languages (en, de); choose one" in capsys.readouterr().err
+    status, output = application(source, bundle, [english], tmp_path, "--target-language", "de")
+    assert status == 2 and not output.exists()
+    assert "expected 'text_id,translated_text_de'" in capsys.readouterr().err
+
+
+def test_target_languages_must_differ_beyond_case(source, tmp_path, capsys):
+    status, bundle = multilingual(source, tmp_path, languages=("en", "EN"))
+    assert status == 2 and not bundle.exists()
+    assert "distinct, ignoring case" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "languages", [["de", "en"], ["en", "en"], ["en", "EN"], [], "en", ["en", "bad tag"]]
+)
+def test_manifest_target_languages_validated(source, tmp_path, languages):
+    bundle, manifest = extraction(source, tmp_path)
+    manifest["target_languages"] = languages
+    (bundle / "manifest.json").write_text(json.dumps(manifest))
+    status, output = application(source, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 2 and not output.exists()
+
+
+def test_single_language_manifest_without_language_list_keeps_fast_check(source, tmp_path):
+    bundle, manifest = extraction(source, tmp_path)
+    assert manifest["target_languages"] == ["en"]
+    # A manifest written before language lists existed.
+    del manifest["target_languages"], manifest["fast_check"]
+    manifest["fast_check"] = tool.fast_check(source, manifest)
+    (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    status, output = application(source, bundle, [reply(tmp_path, manifest)], tmp_path)
+    assert status == 0
+    report = json.loads(output.with_suffix(".report.json").read_text())
+    assert report["source_check"] == "unchanged" and report["target_language"] == "en"
+
+
+def test_multilingual_agent_prompts_follow_their_own_checklists(source, tmp_path):
+    status, bundle = multilingual(source, tmp_path, "--batch-max-rows", "2")
+    assert status == 0
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    assert not (bundle / tool.AGENT_PROMPT).exists()
+    for language in ["en", "de"]:
+        text = (bundle / f"agent_prompt.{language}.md").read_text(encoding="utf-8")
+        rows = re.findall(r"^\| `(.+?)` \| (\d+) \| `(.+?)` \|$", text, re.MULTILINE)
+        mappings = re.findall(r"^    (replies/\S+) \\$", text, re.MULTILINE)
+        assert [unit for unit, _, _ in rows] == [b["path"] for b in manifest["batches"]]
+        assert all(out.startswith(f"replies/{language}/") for _, _, out in rows)
+        assert f"  --target-language {language} \\" in text
+        assert f"--output translated.{language}.xlsx" in text
+        for unit, _, out in rows:
+            frame = pd.read_csv(bundle / unit, na_filter=False, dtype=str)
+            pairs = zip(frame["text_id"], frame["source_text"], strict=True)
+            language_reply(bundle / out, language, [(i, f"{language}:" + s) for i, s in pairs])
+        status, output = application(
+            source,
+            bundle,
+            [bundle / m for m in mappings],
+            tmp_path,
+            "--target-language",
+            language,
+            "--overwrite",
+        )
+        assert status == 0
+        assert load_workbook(output)[f"Data_{language}"]["A2"].value == f"{language}:Открыто"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_apply_names_a_language_the_extraction_did_not_list(source, tmp_path, legacy):
+    if legacy:
+        bundle, manifest = extraction(source, tmp_path)
+        del manifest["target_languages"]
+        (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False))
+    else:
+        status, bundle = multilingual(source, tmp_path)
+        manifest = json.loads((bundle / "manifest.json").read_text())
+    records = [(e["text_id"], "FR:" + e["source_text"]) for e in manifest["entries"]]
+    french = language_reply(tmp_path / "fr.csv", "fr", records)
+    status, output = application(source, bundle, [french], tmp_path, "--target-language", "fr")
+    assert status == 0
+    assert json.loads(output.with_suffix(".report.json").read_text())["target_language"] == "fr"
+    assert load_workbook(output)["Data_fr"]["A2"].value == "FR:Открыто"
+
+
+def test_case_variant_of_a_listed_language_means_that_language(source, tmp_path):
+    status, bundle = multilingual(source, tmp_path)
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    records = [(e["text_id"], "DE:" + e["source_text"]) for e in manifest["entries"]]
+    german = language_reply(tmp_path / "de.csv", "de", records)
+    status, output = application(source, bundle, [german], tmp_path, "--target-language", "DE")
+    assert status == 0
+    assert json.loads(output.with_suffix(".report.json").read_text())["target_language"] == "de"
+    assert "Data_de" in load_workbook(output).sheetnames
+
+
+def test_missing_language_choice_fails_before_reading_the_source(source, tmp_path, monkeypatch):
+    status, bundle = multilingual(source, tmp_path)
+    english = language_reply(tmp_path / "en.csv", "en", [])
+
+    def unread(*_args):
+        raise AssertionError("source read before the language was chosen")
+
+    monkeypatch.setattr(tool, "read_source", unread)
+    monkeypatch.setattr(tool, "open_source", unread)
+    status, output = application(source, bundle, [english], tmp_path)
+    assert status == 2 and not output.exists()

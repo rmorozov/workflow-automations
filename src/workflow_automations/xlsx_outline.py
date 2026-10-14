@@ -73,12 +73,42 @@ def escape(value: str) -> str:
     return re.sub(r"^(\d{1,9})([.)])(?=\s|$)", r"\1\\\2", value)
 
 
-def read_table(path: Path, sheet: str | None) -> tuple[str, list[str], list[list[str | None]]]:
-    """Return the sheet title, row-1 headings and rendered data rows (from sheet row 2)."""
+def open_workbook(path: Path):
     if path.suffix.lower() != ".xlsx":
         raise ValidationError("Input must be an .xlsx workbook")
     # data_only reads the values Excel cached for formulas when the file was last saved.
-    workbook = load_workbook(path, data_only=True)
+    return load_workbook(path, data_only=True)
+
+
+def sheet_table(ws) -> tuple[str, list[str], list[list[str | None]]] | None:
+    """Return the sheet title, row-1 headings and rendered data rows; None when empty."""
+    # Visit only stored cells: iter_rows() would create every cell up to the sheet's
+    # dimensions, which stray formatting can stretch far beyond the data.
+    cells = {
+        coordinate: cell.value for coordinate, cell in ws._cells.items() if cell.value is not None
+    }
+    # A merged range displays its top-left value in every covered cell.
+    for area in ws.merged_cells.ranges:
+        value = cells.get((area.min_row, area.min_col))
+        if value is not None:
+            for row in range(area.min_row, area.max_row + 1):
+                for column in range(area.min_col, area.max_col + 1):
+                    cells[(row, column)] = value
+    if not cells:
+        return None
+    rows = max(row for row, _ in cells)
+    columns = max(column for _, column in cells)
+    headings = [text(cells.get((1, column))) or "" for column in range(1, columns + 1)]
+    data = [
+        [text(cells.get((row, column))) for column in range(1, columns + 1)]
+        for row in range(2, rows + 1)
+    ]
+    return ws.title, headings, data
+
+
+def read_table(path: Path, sheet: str | None) -> tuple[str, list[str], list[list[str | None]]]:
+    """Return the sheet title, row-1 headings and rendered data rows (from sheet row 2)."""
+    workbook = open_workbook(path)
     try:
         if sheet is None:
             ws = workbook.worksheets[0]
@@ -86,32 +116,24 @@ def read_table(path: Path, sheet: str | None) -> tuple[str, list[str], list[list
             ws = workbook[sheet]
         else:
             raise ValidationError(f"Sheet does not exist: {sheet}")
-        # Visit only stored cells: iter_rows() would create every cell up to the sheet's
-        # dimensions, which stray formatting can stretch far beyond the data.
-        cells = {
-            coordinate: cell.value
-            for coordinate, cell in ws._cells.items()
-            if cell.value is not None
-        }
-        # A merged range displays its top-left value in every covered cell.
-        for area in ws.merged_cells.ranges:
-            value = cells.get((area.min_row, area.min_col))
-            if value is not None:
-                for row in range(area.min_row, area.max_row + 1):
-                    for column in range(area.min_col, area.max_col + 1):
-                        cells[(row, column)] = value
-        if not cells:
+        table = sheet_table(ws)
+        if table is None:
             raise ValidationError("Sheet is empty")
-        rows = max(row for row, _ in cells)
-        columns = max(column for _, column in cells)
-        headings = [text(cells.get((1, column))) or "" for column in range(1, columns + 1)]
-        data = [
-            [text(cells.get((row, column))) for column in range(1, columns + 1)]
-            for row in range(2, rows + 1)
-        ]
-        return ws.title, headings, data
+        return table
     finally:
         workbook.close()
+
+
+def read_tables(path: Path) -> list[tuple[str, list[str], list[list[str | None]]]]:
+    """Return every worksheet that holds a value, in workbook order."""
+    workbook = open_workbook(path)
+    try:
+        tables = [table for ws in workbook.worksheets if (table := sheet_table(ws)) is not None]
+    finally:
+        workbook.close()
+    if not tables:
+        raise ValidationError("Every sheet is empty")
+    return tables
 
 
 def select_columns(
@@ -322,17 +344,12 @@ def write_output(output: Path, content: str, protected: Path, overwrite: bool) -
         temp.unlink(missing_ok=True)
 
 
-def convert(args) -> tuple[str, int, int]:
-    sheet, headings, data = read_table(args.input, args.sheet)
-    selected = select_columns(headings, args.columns, args.column_indices)
-    levels = len(selected) if args.levels is None else args.levels
-    if not 1 <= levels <= len(selected):
-        raise ValidationError(f"--levels must be between 1 and {len(selected)}")
-    heading_levels = args.heading_levels
-    if heading_levels < 0 or heading_levels > levels:
-        raise ValidationError(f"--heading-levels must be between 0 and {levels}")
-    if heading_levels + (1 if args.title else 0) > MAX_HEADING_LEVEL:
-        raise ValidationError("Markdown supports six heading levels, including the title")
+def validate_options(args) -> None:
+    """Check the options that do not depend on a sheet's columns."""
+    if args.all_sheets and args.title:
+        raise ValidationError("--all-sheets titles each sheet; it cannot be combined with --title")
+    if args.all_sheets and args.front_matter:
+        raise ValidationError("--front-matter describes one sheet; omit it with --all-sheets")
     if args.indent < 1:
         raise ValidationError("--indent must be a positive integer")
     # A leading backslash marks literal text equal to the label, which needs punctuation.
@@ -342,6 +359,20 @@ def convert(args) -> tuple[str, int, int]:
             "--blank-label must start with ASCII punctuation and need no Markdown escaping, "
             "such as (blank) or (empty)"
         )
+
+
+def outline_sheet(args, sheet: str, headings, data, title: str | None) -> tuple[str, int, int]:
+    """Render one sheet; return the Markdown, rows used and items written."""
+    selected = select_columns(headings, args.columns, args.column_indices)
+    levels = len(selected) if args.levels is None else args.levels
+    if not 1 <= levels <= len(selected):
+        raise ValidationError(f"--levels must be between 1 and {len(selected)}")
+    heading_levels = args.heading_levels
+    if heading_levels < 0 or heading_levels > levels:
+        raise ValidationError(f"--heading-levels must be between 0 and {levels}")
+    if heading_levels + (1 if title else 0) > MAX_HEADING_LEVEL:
+        top = "sheet heading" if args.all_sheets else "title"
+        raise ValidationError(f"Markdown supports six heading levels, including the {top}")
     rows = [[row[column] for column in selected] for row in data]
     root = build_tree(rows, levels, args.fill_down, args.group)
     names = [headings[column] for column in selected]
@@ -350,7 +381,7 @@ def convert(args) -> tuple[str, int, int]:
         names[:levels],
         names[levels:],
         heading_levels=heading_levels,
-        title=args.title,
+        title=title,
         label_levels=args.label_levels,
         indent=args.indent,
         raw=args.raw,
@@ -368,10 +399,34 @@ def convert(args) -> tuple[str, int, int]:
     return content, used, count(root)
 
 
+def convert(args) -> tuple[str, int, int]:
+    validate_options(args)
+    if not args.all_sheets:
+        sheet, headings, data = read_table(args.input, args.sheet)
+        return outline_sheet(args, sheet, headings, data, args.title)
+    # Each section is the sheet's own outline titled with its name, so it unfolds alone.
+    sections, used, items = [], 0, 0
+    for sheet, headings, data in read_tables(args.input):
+        try:
+            content, rows, count = outline_sheet(args, sheet, headings, data, sheet)
+        except ValidationError as exc:
+            raise ValidationError(f"Sheet {sheet}: {exc}") from exc
+        sections.append(content)
+        used += rows
+        items += count
+    return "\n".join(sections), used, items
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--input", type=Path, required=True)
-    root.add_argument("--sheet", help="Sheet name (default: the first sheet)")
+    source = root.add_mutually_exclusive_group()
+    source.add_argument("--sheet", help="Sheet name (default: the first sheet)")
+    source.add_argument(
+        "--all-sheets",
+        action="store_true",
+        help="Outline every nonempty sheet under a # heading named after it",
+    )
     root.add_argument("--output", type=Path, help="Markdown file (default: standard output)")
     root.add_argument("--overwrite", action="store_true", help="Replace an existing --output")
     selection = root.add_mutually_exclusive_group()

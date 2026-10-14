@@ -1,6 +1,7 @@
 """Behavior contracts for ado-triage using synthetic snapshots; no ADO access."""
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -318,6 +319,235 @@ def test_csv_output_is_master_data(snapshot, tmp_path, monkeypatch):
     frame = pd.read_csv(out)
     assert {tool.COL_FLAGS, tool.COL_SCORE} <= set(frame.columns)
     assert len(frame) == len(snapshot.items)
+
+
+# --- per-team reports (--team-dir) ---
+
+
+def team_ids(team_report):
+    """Work item ids per sheet, by the column that names the row's own item."""
+    ids = {}
+    for name, frame in team_report.sheets.items():
+        for key in (tool.REL_COL_SOURCE_ID, tool.FIELD_ID):
+            if key in frame.columns:
+                ids[name] = set(frame[key])
+                break
+    return ids
+
+
+def cross_pairs(report):
+    cross = report.sheets["11. Cross-Team Deps"]
+    return list(zip(cross[tool.REL_COL_SOURCE_ID], cross[tool.REL_COL_DEST_ID], strict=True))
+
+
+def test_team_reports_partition_every_sheet_by_team(snapshot):
+    snapshot.items[0]["relations"].append(rel(tool.REL_SUCCESSOR, 4))  # X item blocks a Y item
+    combined = tool.build_report(snapshot, CAPACITY, settings())
+    teams, notes = tool.build_team_reports(combined, CAPACITY, settings())
+    assert list(teams) == [TEAM_X, TEAM_Y] and notes == []
+    own = {TEAM_X: {1, 2, 3}, TEAM_Y: {4, 5, 6}}
+    for team, report in teams.items():
+        assert report.team == team
+        sheet_ids = team_ids(report)
+        assert set(report.sheets) - set(sheet_ids) == {tool.SHEET_SUMMARY, "4. Capacity Triage"}
+        for name, ids in sheet_ids.items():
+            assert ids <= own[team], (team, name, ids)
+        assert set(report.sheets[tool.SHEET_SUMMARY]["Team"]) == {team}
+        assert set(report.sheets["4. Capacity Triage"][tool.COL_LEVEL]) == {team}
+    assert len(teams[TEAM_X].master) + len(teams[TEAM_Y].master) == len(combined.master)
+    # The cross-team dependency is listed for the team whose item stores the link.
+    assert cross_pairs(teams[TEAM_X]) == [(1, 4)]
+    assert "11. Cross-Team Deps" in teams[TEAM_Y].omitted
+    # Flags and scores come from the combined run; the agenda is ranked within the team.
+    combined_rows = by_id(combined)
+    for report in teams.values():
+        for wi_id, row in report.master.set_index(tool.FIELD_ID).iterrows():
+            assert row[tool.COL_SCORE] == combined_rows.loc[wi_id, tool.COL_SCORE]
+    assert set(teams[TEAM_Y].sheets[tool.SHEET_AGENDA][tool.FIELD_ID]) == {4, 5}
+
+
+def test_mirrored_dependency_is_listed_by_each_team():
+    a = item(1, TEAM_X, "A")
+    b = item(2, TEAM_Y, "B")
+    a["relations"] = [rel(tool.REL_SUCCESSOR, 2)]
+    b["relations"] = [rel(tool.REL_PREDECESSOR, 1)]
+    combined = tool.build_report(tool.Snapshot(items=[a, b]), {}, settings())
+    teams, _ = tool.build_team_reports(combined, {}, settings())
+    for team, pair in ((TEAM_X, (1, 2)), (TEAM_Y, (2, 1))):
+        assert cross_pairs(teams[team]) == [pair]
+    combined_cross = combined.sheets["11. Cross-Team Deps"]
+    assert len(combined_cross) == 1  # the combined report still lists it once
+
+
+def test_resolved_items_go_to_current_or_previous_team(snapshot, tmp_path):
+    first = tool.build_report(snapshot, CAPACITY, settings())
+    path = tmp_path / "week1.xlsx"
+    tool.write_excel(path, first, {"As of": "2026-10-01"})
+    previous = tool.read_previous_master(path)
+    snapshot.items[3] = item(4, TEAM_Y, "Dormant and unowned", rw=10)  # flags cleared
+    del snapshot.items[4]  # item 5 (TEAM_Y, flagged) dropped from the query
+    second = tool.build_report(snapshot, CAPACITY, settings(), previous)
+    teams, notes = tool.build_team_reports(second, CAPACITY, settings(), previous)
+    resolved = teams[TEAM_Y].sheets[tool.SHEET_RESOLVED].set_index(tool.FIELD_ID)
+    assert resolved["Resolution"].to_dict() == {4: "Flags cleared", 5: "Dropped from query"}
+    assert tool.SHEET_RESOLVED in teams[TEAM_X].omitted and notes == []
+    assert teams[TEAM_X].notes == second.notes  # team files carry only the run's warnings
+
+    # A dropped item whose old team has no rows now is reported, not misfiled.
+    snapshot.items = [i for i in snapshot.items if i["id"] in (1, 2, 3)]
+    third = tool.build_report(snapshot, CAPACITY, settings(), previous)
+    teams, notes = tool.build_team_reports(third, CAPACITY, settings(), previous)
+    assert list(teams) == [TEAM_X] and notes[0].endswith("[4, 5]")
+    assert not any("no current team" in note for note in teams[TEAM_X].notes)
+    assert set(third.sheets[tool.SHEET_RESOLVED][tool.FIELD_ID]) == {4, 5}
+
+
+def test_items_without_area_path_form_their_own_team():
+    items = [item(1, TEAM_X, "A"), item(2, None, "No area")]
+    combined = tool.build_report(tool.Snapshot(items=items), {}, settings())
+    teams, _ = tool.build_team_reports(combined, {}, settings())
+    assert {t: set(r.master[tool.FIELD_ID]) for t, r in teams.items()} == {"": {2}, TEAM_X: {1}}
+
+
+def test_dropped_item_without_area_path_stays_with_the_blank_team(tmp_path):
+    items = [item(1, None, "No area", owner=None), item(2, None, "Also no area")]
+    first = tool.build_report(tool.Snapshot(items=items), {}, settings())
+    path = tmp_path / "week1.xlsx"
+    tool.write_excel(path, first, {})
+    previous = tool.read_previous_master(path)  # blank team reads back as NaN
+    second = tool.build_report(tool.Snapshot(items=items[1:]), {}, settings(), previous)
+    teams, notes = tool.build_team_reports(second, {}, settings(), previous)
+    assert notes == [] and list(teams[""].sheets[tool.SHEET_RESOLVED][tool.FIELD_ID]) == [1]
+
+
+@pytest.mark.parametrize(
+    ("team", "name"),
+    [
+        ("Proj\\Dept\\Team A", "Proj_Dept_Team A"),
+        ('a/b:c*d?"e<f>g|h', "a_b_c_d_e_f_g_h"),
+        ("", "NO_AREA"),
+        (" .Team. ", "Team"),
+        ("Proj\\", "Proj"),
+    ],
+)
+def test_team_filename_is_safe_on_windows(team, name):
+    assert tool.team_filename(team) == name
+
+
+def test_team_paths_reject_names_that_collide():
+    paths = tool.team_paths(Path("r/w1.xlsx"), Path("teams"), ["P\\A", "P\\B"])
+    assert paths == {"P\\A": Path("teams/w1.P_A.xlsx"), "P\\B": Path("teams/w1.P_B.xlsx")}
+    with pytest.raises(tool.TriageError, match="same file"):
+        tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\A", "P/A"])
+    with pytest.raises(tool.TriageError, match="same file"):
+        tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\a", "P\\A"])
+    # Unicode: composed and decomposed forms are one name on macOS; ß and ss are two.
+    with pytest.raises(tool.TriageError, match="same file"):
+        tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\Caf\u00e9", "P\\Cafe\u0301"])
+    assert len(tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\Stra\u00dfe", "P\\Strasse"])) == 2
+    with pytest.raises(tool.TriageError, match="over 255 bytes"):
+        tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\" + "x" * 250])
+
+
+def workbook_sheets(path):
+    sheets = pd.read_excel(path, sheet_name=None, header=None)
+    config = sheets[tool.SHEET_CONFIG]
+    sheets[tool.SHEET_CONFIG] = config[config[0] != "Generated"].reset_index(drop=True)
+    return sheets
+
+
+def test_cli_team_dir_writes_one_workbook_per_team_and_keeps_combined(
+    snapshot, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
+    plain = tmp_path / "plain" / "w1.xlsx"
+    split = tmp_path / "split" / "w1.xlsx"
+    teams = tmp_path / "split" / "teams"
+    prev = tmp_path / "w0.xlsx"
+    tool.write_excel(prev, tool.build_report(snapshot, CAPACITY, settings()), {})
+    snapshot.items[3] = item(4, TEAM_Y, "Dormant and unowned", rw=10)  # resolved since w0
+    since = ("--previous-file", str(prev))
+    assert tool.main(cli(tmp_path, "--output", str(plain), *since)) == 0
+    assert tool.main(cli(tmp_path, "--output", str(split), *since, "--team-dir", str(teams))) == 0
+    assert tool.SHEET_RESOLVED in load_workbook(plain).sheetnames
+
+    expected, actual = workbook_sheets(plain), workbook_sheets(split)
+    assert list(expected) == list(actual)
+    for name in expected:
+        pd.testing.assert_frame_equal(expected[name], actual[name])
+
+    files = sorted(p.name for p in teams.iterdir())
+    assert files == ["w1.Proj_TeamX.xlsx", "w1.Proj_TeamY.xlsx"]
+    team_x = pd.read_excel(teams / files[0], sheet_name=None, header=2)
+    assert set(team_x[tool.SHEET_MASTER][tool.FIELD_ID]) == {1, 2, 3}
+    config = pd.read_excel(teams / files[0], sheet_name=tool.SHEET_CONFIG, header=2)
+    assert config.iloc[0, :2].tolist() == ["Team", TEAM_X]
+    # A team workbook is a valid --previous-file for that team's next run.
+    assert set(tool.read_previous_master(teams / files[1])[tool.FIELD_ID]) == {4, 5, 6}
+
+
+def test_cli_team_dir_refuses_existing_files_before_writing_any(snapshot, tmp_path, monkeypatch):
+    monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
+    out = tmp_path / "w1.csv"
+    teams = tmp_path / "teams"
+    teams.mkdir()
+    existing = teams / "w1.Proj_TeamY.csv"
+    existing.write_text("keep")
+    args = cli(tmp_path, "--output", str(out), "--format", "csv", "--team-dir", str(teams))
+    assert tool.main(args) == tool.EXIT_VALIDATION
+    assert not out.exists() and existing.read_text() == "keep"
+    assert sorted(p.name for p in teams.iterdir()) == ["w1.Proj_TeamY.csv"]
+
+    assert tool.main([*args, "--overwrite"]) == 0
+    assert set(pd.read_csv(existing)[tool.FIELD_ID]) == {4, 5, 6}
+    assert set(pd.read_csv(teams / "w1.Proj_TeamX.csv")[tool.FIELD_ID]) == {1, 2, 3}
+    assert len(pd.read_csv(out)) == len(snapshot.items)
+
+
+def test_cli_team_dir_guards_inputs(snapshot, tmp_path, monkeypatch):
+    def unreachable(url, query):
+        raise AssertionError("network must not be touched")
+
+    monkeypatch.setattr(tool, "fetch_snapshot", unreachable)
+    not_a_dir = tmp_path / "teams"
+    not_a_dir.write_text("")
+    for team_dir in (not_a_dir, not_a_dir / "nested"):
+        args = cli(tmp_path, "--output", str(tmp_path / "r.xlsx"), "--team-dir", str(team_dir))
+        assert tool.main(args) == tool.EXIT_VALIDATION
+
+    # A team file may not replace the previous report it is computed from.
+    monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
+    prev = tmp_path / "w1.Proj_TeamX.xlsx"
+    tool.write_excel(prev, tool.build_report(snapshot, CAPACITY, settings()), {})
+    before = prev.read_bytes()
+    args = cli(
+        tmp_path,
+        *("--output", str(tmp_path / "out" / "w1.xlsx"), "--team-dir", str(tmp_path)),
+        *("--previous-file", str(prev), "--overwrite"),
+    )
+    assert tool.main(args) == tool.EXIT_VALIDATION
+    assert prev.read_bytes() == before and not (tmp_path / "out").exists()
+
+
+def test_cli_team_write_failure_leaves_no_output(snapshot, tmp_path, monkeypatch):
+    monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
+    real_write = tool.write_excel
+
+    def failing_for_team_y(path, report, meta):
+        if report.team == TEAM_Y:
+            raise OSError("disk full")
+        real_write(path, report, meta)
+
+    monkeypatch.setattr(tool, "write_excel", failing_for_team_y)
+    out = tmp_path / "w1.xlsx"
+    teams = tmp_path / "teams"
+    args = cli(tmp_path, "--output", str(out), "--team-dir", str(teams))
+    assert tool.main(args) == tool.EXIT_IO
+    assert not out.exists() and list(teams.iterdir()) == []  # no outputs, no temp files
+    assert [p.name for p in tmp_path.iterdir() if p.is_file()] == []
+
+    monkeypatch.setattr(tool, "write_excel", real_write)
+    assert tool.main(args) == 0  # a plain rerun succeeds
 
 
 # --- fetch_snapshot against a fake ADO client (no server, no Kerberos libraries) ---
