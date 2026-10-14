@@ -719,10 +719,9 @@ def run_analyze(args: argparse.Namespace) -> None:
             args.effort_field,
             bridges=args.bridges,
             max_indirect_edges=args.max_indirect_edges,
-            # Budgets without a command-line option yet use their defaults.
-            max_cycles=getattr(args, "max_cycles", DEFAULT_MAX_CYCLES),
-            max_cycle_rows=getattr(args, "max_cycle_rows", DEFAULT_MAX_CYCLE_ROWS),
-            centrality_sources=getattr(args, "centrality_sources", DEFAULT_CENTRALITY_SOURCES),
+            max_cycles=args.max_cycles,
+            max_cycle_rows=args.max_cycle_rows,
+            centrality_sources=args.centrality_sources,
         )
     except ContractionBudgetExceeded as exc:
         # Raised before any output is created.

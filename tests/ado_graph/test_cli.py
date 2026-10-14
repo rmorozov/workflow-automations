@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 
+import pandas as pd
 import pytest
 from ado_graph_data import edges, fake_client, nodes, run_export, wi
 
@@ -252,3 +253,23 @@ def test_all_unknown_steps_no_longer_reach_an_empty_workbook(parquet_inputs, cap
     err = _rejected(capsys, _analyze(parquet_inputs, "--steps", "bogus"))
     assert "--steps: unknown bogus" in err
     assert not (parquet_inputs / "out").exists()
+
+
+def test_analyze_budget_options_reach_the_report(tmp_path):
+    # Two 2-cycles and a 3-cycle among 1..4 (`Blocks` both ways is a 2-cycle).
+    pairs = [(1, 2), (2, 1), (3, 4), (4, 3), (1, 3), (3, 2)]
+    pd.DataFrame(pairs, columns=["Source_ID", "Target_ID"]).assign(Link_Type="Blocks").to_parquet(
+        tmp_path / "edges.parquet"
+    )
+    nodes().to_parquet(tmp_path / "nodes.parquet")
+    budgets = ["--max-cycles", "1", "--max-cycle-rows", "50", "--centrality-sources", "2"]
+    tool.main(_analyze(tmp_path, "--steps", "cycles,metrics", *budgets))
+    sheets = pd.read_excel(tmp_path / "out" / "report.xlsx", sheet_name=None)
+    assert sheets["cycles"]["Cycle_Index"].nunique() == 1
+    assert set(sheets["cycles"]["Cycles_Complete"]) == {False}
+    assert set(sheets["metrics"]["Betweenness_Sources"]) == {2}
+
+
+@pytest.mark.parametrize("option", ["--max-cycles", "--max-cycle-rows", "--centrality-sources"])
+def test_analyze_budgets_must_be_positive(parquet_inputs, capsys, option):
+    assert "must be at least 1" in _rejected(capsys, _analyze(parquet_inputs, option, "0"))

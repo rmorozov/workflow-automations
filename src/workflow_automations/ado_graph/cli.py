@@ -14,6 +14,9 @@ from pathlib import Path
 
 from workflow_automations.ado_graph.analyze import (
     ALL_STEPS,
+    DEFAULT_CENTRALITY_SOURCES,
+    DEFAULT_MAX_CYCLE_ROWS,
+    DEFAULT_MAX_CYCLES,
     DEFAULT_MAX_INDIRECT_EDGES,
     SUBGRAPHS,
     run_analyze,
@@ -216,6 +219,33 @@ def build_parser() -> argparse.ArgumentParser:
             "Budget of candidate indirect edges for bridge contraction (sum over bridges "
             "of in-degree × out-degree).  Exceeding it exits with an error before any "
             f"output is written.  Default: {DEFAULT_MAX_INDIRECT_EDGES:,}."
+        ),
+    )
+    ap.add_argument(
+        "--max-cycles",
+        type=_positive_int,
+        default=DEFAULT_MAX_CYCLES,
+        help=(
+            "cycles step: stop after this many cycles and mark the sheet "
+            f"Cycles_Complete=False.  Default: {DEFAULT_MAX_CYCLES:,}."
+        ),
+    )
+    ap.add_argument(
+        "--max-cycle-rows",
+        type=_positive_int,
+        default=DEFAULT_MAX_CYCLE_ROWS,
+        help=(
+            "cycles step: stop after the cycle that brings its member rows to this many.  "
+            f"Default: {DEFAULT_MAX_CYCLE_ROWS:,}."
+        ),
+    )
+    ap.add_argument(
+        "--centrality-sources",
+        type=_positive_int,
+        default=DEFAULT_CENTRALITY_SOURCES,
+        help=(
+            "metrics step: exact betweenness up to this many nodes, sampled from this "
+            f"many sources (fixed seed) above it.  Default: {DEFAULT_CENTRALITY_SOURCES:,}."
         ),
     )
 

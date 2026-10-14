@@ -323,9 +323,10 @@ Exact betweenness runs one breadth-first search per node, O(nodes × links): a
 that, `metrics` estimates it from 500 source nodes sampled with a fixed seed (so
 repeat runs on the same graph agree) and logs a warning. `Betweenness_Sources` on
 every row (and the attr `betweenness_sources`) is the number of sources used, which
-equals the node count when the value is exact. These budgets have no command-line
-options yet; `GraphAnalyzer` takes them as `max_cycles`, `max_cycle_rows` and
-`centrality_sources`. With them, synthetic graphs of 10,000 and 50,000 items run
+equals the node count when the value is exact. The options
+`--max-cycles`, `--max-cycle-rows` and `--centrality-sources` (each at least 1)
+change these budgets; `GraphAnalyzer` takes them as `max_cycles`, `max_cycle_rows`
+and `centrality_sources`. With the defaults, synthetic graphs of 10,000 and 50,000 items run
 every step in about 10 seconds and 60 to 90 seconds respectively on a development
 container, of which sampled betweenness takes about 40 seconds at 50,000 items.
 
