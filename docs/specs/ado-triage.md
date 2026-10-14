@@ -126,25 +126,30 @@ Resolved. Master Data is kept so an exec report can be the next `--previous-file
 `--team-dir DIR` also writes one report per team, so each team lead gets only their
 own actions. A team is a `Matched_Capacity_Level` (the `Team` column of the summary;
 without a capacity file, each AreaPath). Files are named `<output stem>.<team><output
-suffix>` in `DIR`, with characters Windows forbids in file names (including `\`)
-replaced by `_`, so `Proj\Dept\Team A` from `--output triage-2026-10-01.xlsx` becomes
-`triage-2026-10-01.Proj_Dept_Team A.xlsx`. Two teams that map to the same name,
-ignoring case, are a validation error. Each team file has the same sheets, profile and
+suffix>` in `DIR`. Each run of characters Windows forbids in file names (including
+`\`) becomes one `_`, surrounding spaces, dots and underscores are dropped, and a
+blank AreaPath is named `NO_AREA`; so `Proj\Dept\Team A` from `--output
+triage-2026-10-01.xlsx` becomes `triage-2026-10-01.Proj_Dept_Team A.xlsx`. Two teams
+whose names match ignoring case and Unicode normalization, or a name over 255 bytes,
+are a validation error. These checks need the fetched teams, so they run after the
+query. Each team file has the same sheets, profile and
 format as the combined report, holding only that team's items: a relation belongs to
 the team of its source item, and a resolved item to its current team or, if it
 dropped from the query, its team in the previous report. A dependency between two
 teams therefore appears in each team's Cross-Team Deps sheet when both items store
 the link. Flags, scores and deltas are those of the combined run; the agenda and
 rollups are recomputed within the team, and the Config sheet names the team. Resolved
-items of no current team stay only in the combined report, with a warning. The
+items of no current team stay only in the combined report, with a warning on stderr. The
 combined report is the same with or without `--team-dir`, and a team workbook can be
 that team's next `--previous-file`. Team files for teams no longer in the query are
 not deleted.
 
 Outputs are written to a sibling temporary file and atomically renamed. An existing
 output requires `--overwrite`; the output may not be the capacity or previous file.
-With `--team-dir`, every target is checked before any file is written; a team file
-may not be an input or the combined output. Inputs are never modified.
+With `--team-dir`, `DIR` or its nearest existing ancestor must be a writable directory
+(checked before ADO is contacted); a team file may not be an input or the combined
+output. All files are staged and renamed only once every one is written, so a failed
+write leaves no output and a plain rerun works. Inputs are never modified.
 
 ## CLI and exit codes
 

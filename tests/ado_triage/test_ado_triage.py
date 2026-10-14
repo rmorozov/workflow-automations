@@ -391,12 +391,14 @@ def test_resolved_items_go_to_current_or_previous_team(snapshot, tmp_path):
     resolved = teams[TEAM_Y].sheets[tool.SHEET_RESOLVED].set_index(tool.FIELD_ID)
     assert resolved["Resolution"].to_dict() == {4: "Flags cleared", 5: "Dropped from query"}
     assert tool.SHEET_RESOLVED in teams[TEAM_X].omitted and notes == []
+    assert teams[TEAM_X].notes == second.notes  # team files carry only the run's warnings
 
     # A dropped item whose old team has no rows now is reported, not misfiled.
     snapshot.items = [i for i in snapshot.items if i["id"] in (1, 2, 3)]
     third = tool.build_report(snapshot, CAPACITY, settings(), previous)
     teams, notes = tool.build_team_reports(third, CAPACITY, settings(), previous)
     assert list(teams) == [TEAM_X] and notes[0].endswith("[4, 5]")
+    assert not any("no current team" in note for note in teams[TEAM_X].notes)
     assert set(third.sheets[tool.SHEET_RESOLVED][tool.FIELD_ID]) == {4, 5}
 
 
@@ -407,13 +409,24 @@ def test_items_without_area_path_form_their_own_team():
     assert {t: set(r.master[tool.FIELD_ID]) for t, r in teams.items()} == {"": {2}, TEAM_X: {1}}
 
 
+def test_dropped_item_without_area_path_stays_with_the_blank_team(tmp_path):
+    items = [item(1, None, "No area", owner=None), item(2, None, "Also no area")]
+    first = tool.build_report(tool.Snapshot(items=items), {}, settings())
+    path = tmp_path / "week1.xlsx"
+    tool.write_excel(path, first, {})
+    previous = tool.read_previous_master(path)  # blank team reads back as NaN
+    second = tool.build_report(tool.Snapshot(items=items[1:]), {}, settings(), previous)
+    teams, notes = tool.build_team_reports(second, {}, settings(), previous)
+    assert notes == [] and list(teams[""].sheets[tool.SHEET_RESOLVED][tool.FIELD_ID]) == [1]
+
+
 @pytest.mark.parametrize(
     ("team", "name"),
     [
         ("Proj\\Dept\\Team A", "Proj_Dept_Team A"),
         ('a/b:c*d?"e<f>g|h', "a_b_c_d_e_f_g_h"),
         ("", "NO_AREA"),
-        ("CON", "CON_"),
+        (" .Team. ", "Team"),
         ("Proj\\", "Proj"),
     ],
 )
@@ -428,6 +441,12 @@ def test_team_paths_reject_names_that_collide():
         tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\A", "P/A"])
     with pytest.raises(tool.TriageError, match="same file"):
         tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\a", "P\\A"])
+    # Unicode: composed and decomposed forms are one name on macOS; ß and ss are two.
+    with pytest.raises(tool.TriageError, match="same file"):
+        tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\Caf\u00e9", "P\\Cafe\u0301"])
+    assert len(tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\Stra\u00dfe", "P\\Strasse"])) == 2
+    with pytest.raises(tool.TriageError, match="over 255 bytes"):
+        tool.team_paths(Path("w1.xlsx"), Path("t"), ["P\\" + "x" * 250])
 
 
 def workbook_sheets(path):
@@ -444,8 +463,13 @@ def test_cli_team_dir_writes_one_workbook_per_team_and_keeps_combined(
     plain = tmp_path / "plain" / "w1.xlsx"
     split = tmp_path / "split" / "w1.xlsx"
     teams = tmp_path / "split" / "teams"
-    assert tool.main(cli(tmp_path, "--output", str(plain))) == 0
-    assert tool.main(cli(tmp_path, "--output", str(split), "--team-dir", str(teams))) == 0
+    prev = tmp_path / "w0.xlsx"
+    tool.write_excel(prev, tool.build_report(snapshot, CAPACITY, settings()), {})
+    snapshot.items[3] = item(4, TEAM_Y, "Dormant and unowned", rw=10)  # resolved since w0
+    since = ("--previous-file", str(prev))
+    assert tool.main(cli(tmp_path, "--output", str(plain), *since)) == 0
+    assert tool.main(cli(tmp_path, "--output", str(split), *since, "--team-dir", str(teams))) == 0
+    assert tool.SHEET_RESOLVED in load_workbook(plain).sheetnames
 
     expected, actual = workbook_sheets(plain), workbook_sheets(split)
     assert list(expected) == list(actual)
@@ -487,8 +511,9 @@ def test_cli_team_dir_guards_inputs(snapshot, tmp_path, monkeypatch):
     monkeypatch.setattr(tool, "fetch_snapshot", unreachable)
     not_a_dir = tmp_path / "teams"
     not_a_dir.write_text("")
-    args = cli(tmp_path, "--output", str(tmp_path / "r.xlsx"), "--team-dir", str(not_a_dir))
-    assert tool.main(args) == tool.EXIT_VALIDATION
+    for team_dir in (not_a_dir, not_a_dir / "nested"):
+        args = cli(tmp_path, "--output", str(tmp_path / "r.xlsx"), "--team-dir", str(team_dir))
+        assert tool.main(args) == tool.EXIT_VALIDATION
 
     # A team file may not replace the previous report it is computed from.
     monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
@@ -502,6 +527,27 @@ def test_cli_team_dir_guards_inputs(snapshot, tmp_path, monkeypatch):
     )
     assert tool.main(args) == tool.EXIT_VALIDATION
     assert prev.read_bytes() == before and not (tmp_path / "out").exists()
+
+
+def test_cli_team_write_failure_leaves_no_output(snapshot, tmp_path, monkeypatch):
+    monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
+    real_write = tool.write_excel
+
+    def failing_for_team_y(path, report, meta):
+        if report.team == TEAM_Y:
+            raise OSError("disk full")
+        real_write(path, report, meta)
+
+    monkeypatch.setattr(tool, "write_excel", failing_for_team_y)
+    out = tmp_path / "w1.xlsx"
+    teams = tmp_path / "teams"
+    args = cli(tmp_path, "--output", str(out), "--team-dir", str(teams))
+    assert tool.main(args) == tool.EXIT_IO
+    assert not out.exists() and list(teams.iterdir()) == []  # no outputs, no temp files
+    assert [p.name for p in tmp_path.iterdir() if p.is_file()] == []
+
+    monkeypatch.setattr(tool, "write_excel", real_write)
+    assert tool.main(args) == 0  # a plain rerun succeeds
 
 
 # --- fetch_snapshot against a fake ADO client (no server, no Kerberos libraries) ---

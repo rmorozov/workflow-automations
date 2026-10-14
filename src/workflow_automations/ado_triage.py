@@ -12,6 +12,7 @@ import os
 import re
 import sys
 import tempfile
+import unicodedata
 import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -1088,8 +1089,8 @@ def build_team_reports(
     team_names = sorted(level.unique())
     team_of = level.set_axis(master[FIELD_ID])
     if previous is not None and COL_LEVEL in previous.columns:
-        earlier = previous.dropna(subset=[COL_LEVEL]).drop_duplicates(FIELD_ID)
-        team_of = team_of.combine_first(earlier.set_index(FIELD_ID)[COL_LEVEL].astype(str))
+        earlier = previous.drop_duplicates(FIELD_ID).set_index(FIELD_ID)[COL_LEVEL]
+        team_of = team_of.combine_first(earlier.fillna("").astype(str))  # Excel blanks -> NaN
     resolved_team = report.resolved[FIELD_ID].map(team_of)
     unplaced = ~resolved_team.isin(team_names)
     unknown = report.resolved.loc[unplaced, FIELD_ID].tolist()
@@ -1105,23 +1106,18 @@ def build_team_reports(
         relations = report.relations[report.relations[REL_COL_SOURCE_ID].isin(rows[FIELD_ID])]
         resolved = report.resolved[resolved_team == team]
         sheets, omitted = _assemble(rows, relations, resolved, capacity, cfg)
-        notes_t = [*report.notes, *notes]
-        teams[team] = Report(rows, relations, sheets, omitted, notes_t, resolved, team)
+        teams[team] = Report(rows, relations, sheets, omitted, list(report.notes), resolved, team)
     return teams, notes
 
 
 # Characters Windows forbids or that would split a path; everything else is kept.
 _UNSAFE_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
-_WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10))}
-_WINDOWS_RESERVED |= {f"LPT{i}" for i in range(1, 10)}
+FILENAME_MAX_BYTES = 255  # NTFS, APFS and ext4 limit per path component
 
 
 def team_filename(team: str) -> str:
     """File-name-safe form of a team AreaPath: ``Proj\\Dept\\Team A`` -> ``Proj_Dept_Team A``."""
-    name = _UNSAFE_FILENAME.sub("_", str(team)).strip(" ._") or "NO_AREA"
-    if name.split(".")[0].upper() in _WINDOWS_RESERVED:
-        name += "_"
-    return name
+    return _UNSAFE_FILENAME.sub("_", str(team)).strip(" ._") or "NO_AREA"
 
 
 def team_paths(output: Path, team_dir: Path, teams: Sequence[str]) -> dict[str, Path]:
@@ -1129,12 +1125,13 @@ def team_paths(output: Path, team_dir: Path, teams: Sequence[str]) -> dict[str, 
     paths: dict[str, Path] = {}
     seen: dict[str, str] = {}
     for team in teams:
-        name = f"{output.stem}.{team_filename(team)}{output.suffix}"
-        if name.casefold() in seen:  # Windows and macOS file systems ignore case
-            raise TriageError(
-                f"teams {seen[name.casefold()]!r} and {team!r} map to the same file {name}"
-            )
-        seen[name.casefold()] = team
+        name = unicodedata.normalize("NFC", f"{output.stem}.{team_filename(team)}{output.suffix}")
+        if len(name.encode()) > FILENAME_MAX_BYTES:
+            raise TriageError(f"team {team!r} gives a file name over {FILENAME_MAX_BYTES} bytes")
+        key = name.lower()  # Windows and macOS file systems ignore case
+        if key in seen:
+            raise TriageError(f"teams {seen[key]!r} and {team!r} map to the same file {name}")
+        seen[key] = team
         paths[team] = team_dir / name
     return paths
 
@@ -1240,18 +1237,32 @@ def write_excel(path: Path, report: Report, meta: dict[str, str]) -> None:
 
 def publish(path: Path, write: Callable[[Path], None], overwrite: bool) -> None:
     """Write to a sibling temp file, then atomically replace ``path``."""
-    if path.exists() and not overwrite:
-        raise TriageError(f"{path} exists; pass --overwrite to replace it")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=path.suffix, dir=path.parent)
-    os.close(fd)
-    tmp = Path(tmp_name)
+    publish_all([(path, write)], overwrite)
+
+
+def publish_all(targets: Sequence[tuple[Path, Callable[[Path], None]]], overwrite: bool) -> None:
+    """Write every target to a sibling temp file, then rename them all into place.
+
+    A failure while writing (permissions, full disk, invalid name) leaves no target
+    changed, so the run can simply be repeated.
+    """
+    for path, _ in targets:
+        if path.exists() and not overwrite:
+            raise TriageError(f"{path} exists; pass --overwrite to replace it")
+    staged: list[tuple[Path, Path]] = []
     try:
-        write(tmp)
-        os.replace(tmp, path)
+        for path, write in targets:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=path.suffix, dir=path.parent)
+            os.close(fd)
+            staged.append((Path(tmp), path))
+            write(Path(tmp))
+        for tmp, path in staged:
+            os.replace(tmp, path)
     finally:
-        if tmp.exists():
-            tmp.unlink()
+        for tmp, _ in staged:
+            if tmp.exists():
+                tmp.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -1330,8 +1341,10 @@ def run_export(args: argparse.Namespace) -> Report:
     previous = read_previous_master(args.previous_file) if args.previous_file else None
     if args.output.exists() and not args.overwrite:
         raise TriageError(f"{args.output} exists; pass --overwrite to replace it")
-    if args.team_dir is not None and args.team_dir.exists() and not args.team_dir.is_dir():
-        raise TriageError(f"--team-dir {args.team_dir} is not a directory")
+    if args.team_dir is not None:
+        existing = next(p for p in (args.team_dir, *args.team_dir.parents) if p.exists())
+        if not existing.is_dir() or not os.access(existing, os.W_OK):
+            raise TriageError(f"--team-dir {args.team_dir}: {existing} is not a writable directory")
 
     snapshot = fetch_snapshot(args.url, args.query_id)
     report = build_report(snapshot, capacity, cfg, previous)
@@ -1342,13 +1355,10 @@ def run_export(args: argparse.Namespace) -> Report:
         for note in team_notes:
             logger.warning(note)
         targets = team_paths(args.output, args.team_dir, list(teams))
-        # Check every target before writing any, so a clash leaves no partial set.
         inputs = {p.resolve() for p in (args.capacity_file, args.previous_file) if p is not None}
         for path in targets.values():
             if path.resolve() in inputs | {output}:
                 raise TriageError(f"team report {path} would replace an input or --output")
-            if path.exists() and not args.overwrite:
-                raise TriageError(f"{path} exists; pass --overwrite to replace it")
     meta = {
         "Generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "As of": cfg.as_of.strftime("%Y-%m-%d"),
@@ -1363,11 +1373,14 @@ def run_export(args: argparse.Namespace) -> Report:
         "Timebox (days)": str(cfg.timebox_days),
         "RAG (Load_Pct)": f"RED > {RAG_RED_PCT:g}, AMBER >= {RAG_AMBER_PCT:g}, else GREEN",
     }
-    for path, part in [(args.output, report), *((targets[t], r) for t, r in teams.items())]:
+
+    def writer(part: Report) -> Callable[[Path], None]:
         if args.format == "csv":
-            publish(path, lambda p, r=part: r.master.to_csv(p, index=False), args.overwrite)
-        else:
-            publish(path, lambda p, r=part: write_excel(p, r, meta), args.overwrite)
+            return lambda p: part.master.to_csv(p, index=False)
+        return lambda p: write_excel(p, part, meta)
+
+    parts = [(args.output, report), *((targets[t], r) for t, r in teams.items())]
+    publish_all([(path, writer(part)) for path, part in parts], args.overwrite)
     if teams:
         logger.info("Wrote %d team reports to %s", len(teams), args.team_dir)
     return report
