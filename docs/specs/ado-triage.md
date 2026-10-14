@@ -103,10 +103,14 @@ scores, agenda and team rollups all derive from it.
 `Blocks_Count` stays the one-hop count behind `BLOCKS_OTHERS`. Each item also gets
 `Blocker_Chain_Length` and `Blocker_Chain`: the longest chain of items transitively
 waiting on it (its critical path), as a hop count and as IDs such as `1 > 2 > 3`
-(length 2). The chain follows Successor and Blocks links forward and Predecessor
-and Blocked By links mirrored, so a link ADO stores on both ends counts once, and
-it passes through linked items outside the query when their links are recorded on
-queried items. Members of a dependency cycle count once, in ascending ID order.
+(length 2). Chains are read from the shared dependency subgraph in
+`ado_common.dependency`, to which ado-graph's labels normalize too: every
+Dependency and Blocks link normalized by its ADO reference name to one
+`upstream -> downstream` edge, forward ends as stored and reverse ends
+(Predecessor, Blocked By) mirrored, so a link ADO stores on both ends counts once. Hierarchy and self-links are not part of
+it. The chain passes through linked items outside the query when their links are
+recorded on queried items. Members of a dependency cycle count once, in ascending
+ID order.
 Top Blockers sorts by chain length, then by `Blocks_Count`.
 
 `Attention_Score` is the sum of matched **risk** weights. Opportunities are listed

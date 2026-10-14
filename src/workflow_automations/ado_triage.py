@@ -26,6 +26,7 @@ from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from workflow_automations.ado_common.dependency import DependencySubgraph
 from workflow_automations.ado_common.excel import excel_safe, keep_text_literal
 from workflow_automations.ado_common.excel import publish_all as shared_publish_all
 from workflow_automations.ado_common.query import chunks, query_result_ids
@@ -611,58 +612,16 @@ def build_relations(snapshot: Snapshot, cfg: Settings) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def blocking_edges(rel: pd.DataFrame) -> set[tuple[int, int]]:
-    """(blocker, blocked) pairs from forward links and mirrored reverse links."""
-    edges = set()
-    for src, dst, label in zip(
-        rel[REL_COL_SOURCE_ID], rel[REL_COL_DEST_ID], rel[REL_COL_TYPE], strict=True
-    ):
-        if label in BLAST_RADIUS_LABELS:
-            edges.add((int(src), int(dst)))
-        elif label in INVERSE_LABELS:  # "this item waits on dst": dst blocks this item
-            edges.add((int(dst), int(src)))
-    return {(a, b) for a, b in edges if a != b}
+def dependency_subgraph(rel: pd.DataFrame) -> DependencySubgraph:
+    """The shared dependency subgraph of the relations table (blocker -> blocked).
 
-
-def _strongly_connected(graph: dict[int, list[int]]) -> list[list[int]]:
-    """Tarjan's components, iterative; emitted downstream-first (sinks before sources)."""
-    index: dict[int, int] = {}
-    low: dict[int, int] = {}
-    stack: list[int] = []
-    on_stack: set[int] = set()
-    components: list[list[int]] = []
-    for root in sorted(graph):
-        if root in index:
-            continue
-        work = [(root, iter(graph[root]))]
-        index[root] = low[root] = len(index)
-        stack.append(root)
-        on_stack.add(root)
-        while work:
-            node, successors = work[-1]
-            for nxt in successors:
-                if nxt not in index:
-                    index[nxt] = low[nxt] = len(index)
-                    stack.append(nxt)
-                    on_stack.add(nxt)
-                    work.append((nxt, iter(graph[nxt])))
-                    break
-                if nxt in on_stack:
-                    low[node] = min(low[node], index[nxt])
-            else:
-                work.pop()
-                if work:
-                    low[work[-1][0]] = min(low[work[-1][0]], low[node])
-                if low[node] == index[node]:
-                    component = []
-                    while True:
-                        member = stack.pop()
-                        on_stack.discard(member)
-                        component.append(member)
-                        if member == node:
-                            break
-                    components.append(sorted(component))
-    return components
+    Forward links and mirrored reverse links normalize to the same edge, so a link
+    ADO records on both ends counts once.
+    """
+    return DependencySubgraph.from_labels(
+        zip(rel[REL_COL_SOURCE_ID], rel[REL_COL_TYPE], rel[REL_COL_DEST_ID], strict=True),
+        TRIAGE,
+    )
 
 
 def blocker_chains(rel: pd.DataFrame) -> dict[int, list[int]]:
@@ -670,30 +629,7 @@ def blocker_chains(rel: pd.DataFrame) -> dict[int, list[int]]:
 
     A dependency cycle is collapsed: its members are counted once, in ID order.
     """
-    graph: dict[int, list[int]] = {}
-    for blocker, blocked in sorted(blocking_edges(rel)):
-        graph.setdefault(blocker, []).append(blocked)
-        graph.setdefault(blocked, [])
-    component_of: dict[int, int] = {}
-    members_of: list[list[int]] = []
-    downstream: list[list[int]] = []  # per component: longest chain below it
-    for number, members in enumerate(_strongly_connected(graph)):
-        for member in members:
-            component_of[member] = number
-        best: list[int] = []
-        below = {component_of[n] for m in members for n in graph[m]} - {number}
-        for other in sorted(below):
-            candidate = members_of[other] + downstream[other]
-            if len(candidate) > len(best):
-                best = candidate
-        members_of.append(members)
-        downstream.append(best)
-    chains = {
-        node: [m for m in members_of[component_of[node]] if m != node]
-        + downstream[component_of[node]]
-        for node in graph
-    }
-    return chains
+    return dependency_subgraph(rel).downstream_chains()
 
 
 # ---------------------------------------------------------------------------
