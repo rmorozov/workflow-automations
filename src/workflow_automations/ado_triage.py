@@ -28,6 +28,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from workflow_automations.ado_common.query import chunks, query_result_ids
+from workflow_automations.ado_common.snapshot import RawSnapshot, utc_timestamp
 
 logger = logging.getLogger("ado_triage")
 
@@ -319,6 +320,111 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
         items=items,
         external=external,
         parent_titles={pid: f.get(FIELD_TITLE, "") for pid, f in parents.items()},
+        warnings=warnings,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared raw snapshot (offline replay)
+# ---------------------------------------------------------------------------
+
+SNAPSHOT_PRODUCER = "ado-triage"
+
+
+def snapshot_to_raw(
+    snapshot: Snapshot, base_url: str, query_id: str, captured_at: str | None = None
+) -> RawSnapshot:
+    """The shared raw form of a fetched triage snapshot.
+
+    Every item is a query result, so they are also the roots. Linked items are the
+    ``linked`` entries; parent titles are kept apart in ``options``, because one ID
+    can be fetched as either, both or neither, and the report depends on which.
+    """
+    return RawSnapshot(
+        producer=SNAPSHOT_PRODUCER,
+        captured_at=captured_at if captured_at is not None else utc_timestamp(),
+        source={"base_url": base_url, "project": "", "query_id": query_id},
+        options={"parent_titles": {str(p): t for p, t in snapshot.parent_titles.items()}},
+        roots=[item["id"] for item in snapshot.items],
+        items=[
+            {
+                "id": item["id"],
+                "fields": dict(item["fields"]),
+                "relations": [{"rel": r["rel"] or "", "url": r["url"]} for r in item["relations"]],
+            }
+            for item in snapshot.items
+        ],
+        linked={wi_id: dict(fields) for wi_id, fields in snapshot.external.items()},
+        warnings=list(snapshot.warnings),
+    )
+
+
+def _stored_parent_titles(raw: RawSnapshot) -> dict[int, str]:
+    stored = raw.options.get("parent_titles", {})
+    if not isinstance(stored, dict) or not all(
+        isinstance(k, str) and k.isascii() and k.isdigit() and isinstance(v, str)
+        for k, v in stored.items()
+    ):
+        raise TriageError("snapshot option parent_titles must map work-item IDs to titles")
+    return {int(k): v for k, v in stored.items()}
+
+
+def snapshot_from_raw(raw: RawSnapshot) -> Snapshot:
+    """Triage scope from a raw snapshot of any ADO tool.
+
+    The scope is the saved query's items (``roots``), all of which must have been
+    fetched. A filtered snapshot is refused: its items were chosen by type or
+    project, so the query's scope may be missing from it. Other fetched items only
+    label relations and parents.
+    """
+    if raw.is_filtered:
+        active = ", ".join(name for name, values in raw.filters.items() if values)
+        raise TriageError(
+            f"the {raw.producer} snapshot was filtered ({active}), so it is not a complete "
+            "triage scope; capture it without type or project filters"
+        )
+    root_ids = set(raw.roots)
+    missing = root_ids - set(raw.item_ids)
+    if missing:
+        raise TriageError(
+            f"{len(missing)} queried work items are missing from the snapshot: {sorted(missing)}"
+        )
+    items = [
+        {"id": item["id"], "fields": dict(item["fields"]), "relations": list(item["relations"])}
+        for item in raw.items
+        if item["id"] in root_ids
+    ]
+    targets = {
+        target
+        for item in items
+        for rel in item["relations"]
+        if rel["rel"] in RELATION_LABELS
+        and (target := relation_target_id(rel["url"])) is not None
+        and target not in root_ids
+    }
+    parents = {
+        pid for item in items if (pid := safe_int(item["fields"].get(FIELD_PARENT))) is not None
+    }
+    if raw.producer == SNAPSHOT_PRODUCER:
+        # Exactly what the triage fetch returned, including its warnings.
+        return Snapshot(
+            items=items,
+            external={t: dict(f) for t, f in raw.linked.items() if t in targets},
+            parent_titles={p: t for p, t in _stored_parent_titles(raw).items() if p in parents},
+            warnings=list(raw.warnings),
+        )
+    known = {item["id"]: item["fields"] for item in raw.items}
+    known.update(raw.linked)
+    warnings = list(raw.warnings)
+    # Triage records these when it fetches; another tool's snapshot does not.
+    for ids, what in ((targets, "linked items"), (parents, "parent titles")):
+        unresolved = len(ids - known.keys())
+        if unresolved:
+            warnings.append(f"{unresolved} {what} unavailable (not in the snapshot)")
+    return Snapshot(
+        items=items,
+        external={t: dict(known[t]) for t in sorted(targets) if t in known},
+        parent_titles={p: known[p].get(FIELD_TITLE, "") for p in sorted(parents) if p in known},
         warnings=warnings,
     )
 
