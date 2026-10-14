@@ -18,7 +18,12 @@ from workflow_automations.ado_graph.analyze import (
     DEFAULT_MAX_CYCLE_ROWS,
     DEFAULT_MAX_CYCLES,
     DEFAULT_MAX_INDIRECT_EDGES,
+    META_PRESETS,
+    MISSING_META_POLICIES,
     SUBGRAPHS,
+    MetaFieldError,
+    meta_field_errors,
+    parse_meta_fields,
     run_analyze,
 )
 from workflow_automations.ado_graph.client import (
@@ -187,6 +192,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Full ADO reference name of the field used for sizing/estimates.",
     )
     ap.add_argument(
+        "--meta-field",
+        action="append",
+        default=[],
+        metavar="LABEL=FIELD",
+        help=(
+            "Add node column FIELD (for example Custom.Team) to every result sheet as "
+            "LABEL; FIELD alone keeps its name.  Repeatable.  Default: none."
+        ),
+    )
+    ap.add_argument(
+        "--meta-preset",
+        action="append",
+        default=[],
+        choices=tuple(META_PRESETS),
+        help=(
+            "Add a named set of metadata fields.  legacy: Roadmap_State=KL.Roadmap_State, "
+            "the column every sheet carried before."
+        ),
+    )
+    ap.add_argument(
+        "--missing-meta",
+        choices=MISSING_META_POLICIES,
+        default="omit",
+        help=(
+            "A metadata field absent from the nodes file is logged and then omitted "
+            "(default), written as a blank column (blank), or rejected with exit 2 (error)."
+        ),
+    )
+    ap.add_argument(
         "--output-file",
         default="analysis_report.xlsx",
         help="Output Excel report path (default: analysis_report.xlsx).",
@@ -278,8 +312,8 @@ def _step_errors(raw: str) -> tuple[list[str], int]:
 
 def _check_parquet(
     parser: argparse.ArgumentParser, option: str, name: str, required: tuple[str, ...]
-) -> None:
-    """Read only the Parquet footer and require the columns analysis indexes."""
+) -> set[str]:
+    """Read only the Parquet footer, require the columns analysis indexes, return all."""
     import pyarrow
     import pyarrow.parquet
 
@@ -290,6 +324,7 @@ def _check_parquet(
     missing = [col for col in required if col not in columns]
     if missing:
         parser.error(f"{option} {name} lacks required column(s) {', '.join(missing)}")
+    return columns
 
 
 def check_inputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -309,8 +344,15 @@ def check_inputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> N
                 f"--steps: {given}; choose 'all' or steps from {', '.join(ALL_STEPS)}, "
                 f"optionally as step@subgraph with a subgraph from {', '.join(SUBGRAPHS)}"
             )
-        _check_parquet(parser, "--nodes-file", args.nodes_file, (NODE_KEY,))
+        try:
+            meta_fields = parse_meta_fields(args.meta_field, args.meta_preset)
+        except MetaFieldError as exc:
+            parser.error(str(exc))
+        columns = _check_parquet(parser, "--nodes-file", args.nodes_file, (NODE_KEY,))
         _check_parquet(parser, "--edges-file", args.edges_file, EDGE_COLUMNS)
+        errors = meta_field_errors(meta_fields, columns, args.missing_meta)
+        if errors:
+            parser.error("--meta-field: " + "; ".join(errors))
 
 
 def check_outputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
