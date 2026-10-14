@@ -35,6 +35,7 @@ from workflow_automations.ado_common.snapshot import (
     save_snapshot,
     utc_timestamp,
 )
+from workflow_automations.ado_common.workitem import relation_target_id, safe_int, work_item_url
 
 logger = logging.getLogger("ado_triage")
 
@@ -198,23 +199,6 @@ class Settings:
     @property
     def timebox_end(self) -> datetime:
         return self.as_of + timedelta(days=self.timebox_days)
-
-
-def safe_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def relation_target_id(url: str | None) -> int | None:
-    if not url:
-        return None
-    return safe_int(url.rstrip("/").split("/")[-1])
-
-
-def work_item_url(base_url: str, wi_id: int) -> str:
-    return f"{base_url.rstrip('/')}/_workitems/edit/{wi_id}"
 
 
 # ---------------------------------------------------------------------------
