@@ -4,21 +4,29 @@
 the filters and relation policy that shaped the walk. ``frames_from_snapshot``
 rebuilds the node and edge tables the export would have written from them, and
 ``replay_export`` writes those files for ``analyze``, without contacting ADO.
+``run_replay`` is the ``replay`` command around it.
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 from collections.abc import Iterable
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pandas as pd
 
-from workflow_automations.ado_common.snapshot import RawSnapshot, SnapshotError, utc_timestamp
+from workflow_automations.ado_common.snapshot import (
+    RawSnapshot,
+    SnapshotError,
+    load_snapshot,
+    utc_timestamp,
+)
 from workflow_automations.ado_graph.client import FIELD_RENAME
-from workflow_automations.ado_graph.export import _parse_wi, _project_from_wi
+from workflow_automations.ado_graph.export import EXIT_INCOMPLETE, _parse_wi, _project_from_wi
 from workflow_automations.ado_graph.report import _export_dataframes
 
 log = logging.getLogger("ado_tool")
@@ -53,11 +61,17 @@ def snapshot_from_work_items(
 
     Filters are the case-normalised values the export applied; out-of-scope items
     that were fetched are kept, so the replay applies the same filters to them.
+    ``options`` also records provenance: the producing ``tool_version`` and the
+    run's ``completeness`` (``complete``, or ``incomplete`` when linked IDs were
+    omitted). Replay reads neither; it derives completeness from ``omitted``.
     """
     if filtered_relations not in ("stop", "follow"):
         raise ValueError(
             f"filtered_relations must be 'stop' or 'follow', got {filtered_relations!r}"
         )
+    roots = list(roots)
+    omitted = sorted(set(omitted))
+    complete = set(omitted) <= set(roots)  # an omitted root fails the export instead
     return RawSnapshot(
         producer=PRODUCER,
         captured_at=captured_at if captured_at is not None else utc_timestamp(),
@@ -66,9 +80,13 @@ def snapshot_from_work_items(
             "skip_types": sorted(t.lower() for t in skip_types),
             "include_projects": sorted(p.lower() for p in include_projects),
         },
-        options={"filtered_relations": filtered_relations},
-        roots=list(roots),
-        omitted=sorted(set(omitted)),
+        options={
+            "filtered_relations": filtered_relations,
+            "tool_version": tool_version(),
+            "completeness": "complete" if complete else "incomplete",
+        },
+        roots=roots,
+        omitted=omitted,
         items=[raw_item(wi) for wi in work_items if wi is not None],
     )
 
@@ -134,6 +152,38 @@ def replay_export(
             omitted_linked,
         )
     return omitted_linked
+
+
+def run_replay(args: argparse.Namespace) -> None:
+    """Entry point for `replay` mode: export files from a saved snapshot, offline.
+
+    Exits 4 when the snapshot's linked IDs were omitted, as the export did.
+    ``SnapshotError`` propagates for the caller to report.
+    """
+    snapshot = load_snapshot(Path(args.snapshot))
+    log.info(
+        "Replaying a snapshot captured %s by %s %s: %d work item(s), query %s.",
+        snapshot.captured_at or "at an unknown time",
+        snapshot.producer,
+        snapshot.options.get("tool_version", "(version not recorded)"),
+        len(snapshot.items),
+        snapshot.source.get("query_id", "?"),
+    )
+    output_dir = Path(args.output_dir)
+    formats = [f.strip().lower() for f in args.formats.split(",")]
+    omitted_linked = replay_export(snapshot, output_dir, formats, overwrite=args.overwrite)
+    if omitted_linked:
+        log.warning("Replay incomplete → %s (exit %d).", output_dir, EXIT_INCOMPLETE)
+        raise SystemExit(EXIT_INCOMPLETE)
+    log.info("Replay complete → %s", output_dir)
+
+
+def tool_version() -> str:
+    """Installed workflow-automations version, or ``unknown`` from a bare checkout."""
+    try:
+        return version("workflow-automations")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 def _sdk_view(item: dict[str, Any]) -> SimpleNamespace:

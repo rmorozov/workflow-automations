@@ -1,7 +1,7 @@
-"""Command-line parser and `main` for the export and analyze modes.
+"""Command-line parser and `main` for the export, replay and analyze modes.
 
-Export's network modules load only when `export` runs, so `analyze` and `--help`
-need just the offline `ado-graph-analyze` extra.
+Export's network modules load only when `export` runs, so `replay`, `analyze` and
+`--help` need just the offline `ado-graph-analyze` extra.
 """
 
 from __future__ import annotations
@@ -103,7 +103,19 @@ def build_parser() -> argparse.ArgumentParser:
     ep.add_argument(
         "--overwrite",
         action="store_true",
-        help="Replace existing export files in --output-dir (default: refuse before fetching).",
+        help=(
+            "Replace existing export files in --output-dir and the --save-snapshot file "
+            "(default: refuse before fetching)."
+        ),
+    )
+    ep.add_argument(
+        "--save-snapshot",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Also save every fetched work item as a versioned JSON snapshot, which "
+            "`replay` turns back into these export files without ADO."
+        ),
     )
     ep.add_argument(
         "--skip-types",
@@ -137,6 +149,27 @@ def build_parser() -> argparse.ArgumentParser:
             "items reachable only through them are found; excluded-project items are "
             "followed too, which can reach many unrelated projects."
         ),
+    )
+
+    # ── replay ────────────────────────────────────────────────────────────
+    rp = subparsers.add_parser(
+        "replay", help="Write export data files from a saved snapshot, without ADO."
+    )
+    rp.add_argument("--snapshot", required=True, help="Snapshot saved by export --save-snapshot.")
+    rp.add_argument(
+        "--output-dir",
+        default="./output",
+        help="Directory for exported files (default: ./output).",
+    )
+    rp.add_argument(
+        "--formats",
+        default="parquet,excel,csv",
+        help="Comma-separated export formats: parquet, excel, csv.",
+    )
+    rp.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace existing export files in --output-dir (default: refuse).",
     )
 
     # ── analyze ───────────────────────────────────────────────────────────
@@ -194,9 +227,16 @@ def _same_file(a: Path, b: Path) -> bool:
 
 def check_outputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Refuse existing outputs without --overwrite and inputs as outputs, before any work."""
-    if args.mode == "export":
+    if args.mode in ("export", "replay"):
         formats = [f.strip().lower() for f in args.formats.split(",")]
         outputs = export_paths(Path(args.output_dir), formats)
+        if args.mode == "export" and args.save_snapshot:
+            snapshot = Path(args.save_snapshot)
+            if snapshot.resolve() in {path.resolve() for path in outputs}:
+                parser.error(f"--save-snapshot {snapshot} is one of the export files")
+            outputs.append(snapshot)
+        if args.mode == "replay" and any(_same_file(Path(args.snapshot), o) for o in outputs):
+            parser.error(f"--snapshot {args.snapshot} is one of the export files")
     else:
         output = Path(args.output_file)
         for option, name in (("--nodes-file", args.nodes_file), ("--edges-file", args.edges_file)):
@@ -225,6 +265,14 @@ def main(argv: list[str] | None = None) -> None:
             )
         with ca_bundle_scope():
             run_export(args)
+    elif args.mode == "replay":
+        from workflow_automations.ado_common.snapshot import SnapshotError
+        from workflow_automations.ado_graph.snapshot import run_replay
+
+        try:
+            run_replay(args)
+        except (OSError, SnapshotError) as exc:
+            parser.error(f"cannot replay {args.snapshot}: {exc}")
     elif args.mode == "analyze":
         run_analyze(args)
     else:
