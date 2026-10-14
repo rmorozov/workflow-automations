@@ -232,23 +232,27 @@ the selected columns of the sheet, with these limits:
   belonging to that section.
 
 `--retype` writes number and date text as typed cells, in both modes, wherever a
-value would otherwise be written as literal text (heading names stay text). Text is
+value would otherwise be written as literal text (column names in row 1 stay text). Text is
 retyped only when it is exactly how `xlsx-outline` renders that value and Excel
 stores it exactly:
 
 - Whole numbers below 10^15 in absolute value, without leading zeros or a sign other
   than `-` (`42`, `-7`); longer digit strings such as IDs stay text.
-- Decimals in Python's shortest form (`0.1`, `2.5`, `1e-05`); `1.50`, `1e3` and `-0`
-  stay text.
+- Decimals in Python's shortest form with at most 15 significant digits, within
+  Excel's normal range (`0.1`, `2.5`, `1e-05`); `1.50`, `1e3`, `-0` and
+  `0.30000000000000004` stay text.
 - Dates `YYYY-MM-DD`, date-times `YYYY-MM-DD HH:MM:SS[.ffffff]` and times
-  `HH:MM:SS[.ffffff]`, from year 1900, with whole milliseconds and no time zone.
+  `HH:MM:SS[.ffffff]`, from year 1900 and after the workbook's epoch day (1904-01-01
+  in 1904-date workbooks), with whole milliseconds and no time zone.
   Other spellings (`2024-1-2`, a `T` separator, `12:30`) stay text.
 
 Everything else, including `TRUE`/`FALSE` and formula-like text, stays literal text.
-A retyped date or time keeps a date format the cell already has, else gets
-openpyxl's default; a retyped number replaces a date format with General, so it does
-not display as a date. When merging, only changed values are written, so unchanged
-cells keep their type with or without the option.
+When merging, a cell formatted as Text (`@`) keeps text, so IDs in text columns stay
+text. A retyped date, date-time or time keeps the cell's format only when that format
+shows the same date and time parts, else gets openpyxl's default
+(`yyyy-mm-dd`, `yyyy-mm-dd h:mm:ss`, `h:mm:ss`); a retyped number replaces a date
+format with General, so an edit never displays as a different value. Only changed
+values are written, so unchanged cells keep their type with or without the option.
 
 ### Merge into the original
 

@@ -19,7 +19,8 @@ from zipfile import BadZipFile
 
 import yaml
 from openpyxl import Workbook, load_workbook
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE, TIME_FORMATS
+from openpyxl.styles.numbers import is_date_format
 
 from workflow_automations.xlsx_outline import (
     FRONT_MATTER_KEY,
@@ -39,6 +40,8 @@ ROW_TAG = re.compile(r"[ \t]*<!--[ \t]*rows?:[ \t]*([0-9][0-9 ,]*?)[ \t]*-->[ \t
 NUMBER = re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:e[+-][0-9]+)?")
 # Excel keeps 15 significant digits; longer whole numbers (IDs) stay text.
 MAX_WHOLE = 10**15
+# Quoted text, [colour]/[locale] tags and escaped characters in a number format.
+FORMAT_LITERALS = re.compile(r'"[^"]*"|\[[^\]]*\]|\\.')
 
 
 @dataclass
@@ -282,6 +285,11 @@ def retyped(value: str):
         parsed = float(value) if any(c in value for c in ".e") else int(value)
         if isinstance(parsed, int) and abs(parsed) >= MAX_WHOLE:
             return None
+        # Floats beyond 15 significant digits or Excel's normal range would change.
+        if isinstance(parsed, float) and (
+            float(f"{parsed:.15g}") != parsed or not 2.3e-308 < abs(parsed) < 1e308
+        ):
+            return None
     else:
         for kind in (datetime, time):
             try:
@@ -302,16 +310,40 @@ def retyped(value: str):
     return parsed if rendered == value else None
 
 
+def date_parts(number_format: str) -> tuple[bool, bool]:
+    """Whether a date number format shows a date part and a time part."""
+    plain = FORMAT_LITERALS.sub("", number_format.lower())
+    return any(c in plain for c in "yd"), any(c in plain for c in "hs")
+
+
+def retype_cell(cell, value: str) -> bool:
+    """Write `value` typed when it reads as a number or date the cell can hold."""
+    typed = retyped(value)
+    # A Text-formatted cell (a merge target) keeps text, such as IDs.
+    if typed is None or cell.number_format == "@":
+        return False
+    if isinstance(typed, date) and cell.parent.parent.epoch.date() >= (
+        typed.date() if isinstance(typed, datetime) else typed
+    ):
+        # Serial 0 or below: invalid in Excel, or read back as a time (1904 epoch).
+        return False
+    cell.value = typed
+    if isinstance(typed, (date, time)):
+        # Keep a date format only when it shows the same parts as the value.
+        wanted = (not isinstance(typed, time), isinstance(typed, (datetime, time)))
+        if date_parts(cell.number_format) != wanted:
+            cell.number_format = TIME_FORMATS[type(typed)]
+    elif is_date_format(cell.number_format):
+        # A number written over a date-formatted cell would otherwise display as a date.
+        cell.number_format = "General"
+    return True
+
+
 def literal(ws, row: int, column: int, value: str | None, retype: bool = False) -> None:
     if value is None:
         ws.cell(row, column).value = None
         return
-    if retype and (typed := retyped(value)) is not None:
-        cell = ws.cell(row, column)
-        cell.value = typed
-        # A number written over a date-formatted cell would otherwise display as a date.
-        if cell.data_type == "n" and cell.is_date:
-            cell.number_format = "General"
+    if retype and retype_cell(ws.cell(row, column), value):
         return
     if len(value.encode("utf-16-le")) // 2 > 32767 or ILLEGAL_CHARACTERS_RE.search(value):
         raise ValidationError(

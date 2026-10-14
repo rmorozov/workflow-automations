@@ -5,6 +5,7 @@ from datetime import date, datetime, time
 import pytest
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
+from openpyxl.utils.datetime import MAC_EPOCH
 
 from workflow_automations import xlsx_outline, xlsx_unfold
 
@@ -494,6 +495,7 @@ def test_retype_keeps_other_spellings_as_text(tmp_path, capsys):
         "1.50", "1e3", "-0", "+5", "1_000", "inf", "=1+1", "12:30", "2024-1-2",
         "2024-02-30", "2024-01-02T03:04:05", "2024-01-02 00:00:00", "1899-12-31",
         "2024-01-02 03:04:05+00:00", "2024-01-02 03:04:05.123456", "TRUE",
+        "0.30000000000000004", "1234567890123456.5", "5e-324",
     ]  # fmt: skip
     md = tmp_path / "hand.md"
     md.write_text("".join(f"- {value}\n" for value in ["2024", *spellings]))
@@ -537,3 +539,82 @@ def test_merge_retypes_only_edited_values(tmp_path, capsys):
     # A number written over a date no longer displays as a date; other formats stay.
     assert (sheet["C2"].number_format, sheet["B3"].number_format) == ("General", "0.00")
     assert sheet["C3"].number_format == "yyyy-mm-dd"
+
+
+def merge_one_row(tmp_path, capsys, cells, edits, epoch=None):
+    """Outline a one-row sheet with row tags, apply text edits and merge with --retype."""
+    path = tmp_path / "formats.xlsx"
+    wb = Workbook()
+    if epoch is not None:
+        wb.epoch = epoch
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Item", *cells])
+    ws.append(["A", *(value for value, _ in cells.values())])
+    for column, (_, number_format) in enumerate(cells.values(), 2):
+        ws.cell(2, column).number_format = number_format
+    wb.save(path)
+    md = tmp_path / "plan.md"
+    argv = ["--input", path, "--output", md, "--levels", "1", "--row-ids", "--front-matter"]
+    assert xlsx_outline.main([str(a) for a in argv]) == 0
+    capsys.readouterr()
+    content = md.read_text()
+    for old, new in edits:
+        assert old in content
+        content = content.replace(old, new)
+    md.write_text(content)
+    return merged(path, md, tmp_path, capsys, "--retype")[0]["Data"]
+
+
+def test_merge_retype_fits_the_cell_format(tmp_path, capsys):
+    cells = {
+        "Day": (date(2024, 1, 2), "yyyy-mm-dd"),
+        "Clock": (time(1, 2, 3), "h:mm:ss"),
+        "Stamp": (datetime(2024, 1, 2, 3, 4), "yyyy-mm-dd h:mm"),
+        "Moment": (date(2024, 1, 2), "d mmm yyyy"),
+        "Code": ("1042", "@"),
+    }
+    sheet = merge_one_row(
+        tmp_path,
+        capsys,
+        cells,
+        [
+            ("Day: 2024-01-02", "Day: 03:04:05"),
+            ("Clock: 01:02:03", "Clock: 2024-05-06"),
+            ("Stamp: 2024-01-02 03:04:00", "Stamp: 2024-01-02 15:45:00"),
+            ("Moment: 2024-01-02", "Moment: 2024-01-03"),
+            ("Code: 1042", "Code: 1043"),
+        ],
+    )
+    assert [cell.value for cell in sheet[2]][1:] == [
+        time(3, 4, 5),
+        datetime(2024, 5, 6),
+        datetime(2024, 1, 2, 15, 45),
+        datetime(2024, 1, 3),
+        "1043",
+    ]
+    # A format showing other parts than the value is replaced; a matching one stays.
+    assert [cell.number_format for cell in sheet[2]][1:] == [
+        "h:mm:ss",
+        "yyyy-mm-dd",
+        "yyyy-mm-dd h:mm",
+        "d mmm yyyy",
+        "@",
+    ]
+
+
+def test_merge_retype_respects_the_1904_epoch(tmp_path, capsys):
+    cells = {"Early": ("x", "General"), "Epoch": ("y", "General"), "Late": ("z", "General")}
+    sheet = merge_one_row(
+        tmp_path,
+        capsys,
+        cells,
+        [("Early: x", "Early: 1901-06-01"), ("Epoch: y", "Epoch: 1904-01-01"),
+         ("Late: z", "Late: 1904-01-02")],
+        epoch=MAC_EPOCH,
+    )  # fmt: skip
+    assert [cell.value for cell in sheet[2]][1:] == [
+        "1901-06-01",
+        "1904-01-01",
+        datetime(1904, 1, 2),
+    ]
