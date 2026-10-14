@@ -144,7 +144,7 @@ def test_export_rejects_bad_formats_before_any_service_call(
 ):
     fake, log = fake_client({1: wi(1)}, [1])
     monkeypatch.setattr(export, "ADOClient", fake)
-    monkeypatch.setattr(client, "import_network_modules", lambda: pytest.fail("imported"))
+    monkeypatch.setattr(cli, "import_network_modules", lambda: pytest.fail("imported"))
     out = tmp_path / "out"
     argv = ["export", "--ado-url", "https://ado.example", "--query-id", "q"]
     err = _rejected(capsys, [*argv, "--output-dir", str(out), "--formats", formats])
