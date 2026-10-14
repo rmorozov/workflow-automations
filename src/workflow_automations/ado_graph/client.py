@@ -247,20 +247,19 @@ class ADOClient:
 
         # Process in chunks of 1000 to avoid exceeding WIQL string length limits
         for chunk in chunks(ids, WIQL_FILTER_CHUNK):
-            wiql = _wiql_ids(chunk)
+            where = _wiql_ids(chunk)
 
             # System.TeamProject is the native, fully indexed way to filter projects
-            # Note: WIQL escapes single quotes by doubling them ('')
             if include_projects:
-                projs = ", ".join("'{}'".format(p.replace("'", "''")) for p in include_projects)
-                wiql += f" AND [System.TeamProject] IN ({projs})"
+                projs = ", ".join(map(wiql_string, sorted(include_projects)))
+                where += f" AND [System.TeamProject] IN ({projs})"
 
             if skip_types:
-                types = ", ".join("'{}'".format(t.replace("'", "''")) for t in skip_types)
-                wiql += f" AND [System.WorkItemType] NOT IN ({types})"
+                types = ", ".join(map(wiql_string, sorted(skip_types)))
+                where += f" AND [System.WorkItemType] NOT IN ({types})"
 
             try:
-                accepted = self._query_ids(wiql)
+                accepted = self._query_ids(where)
             except Exception as e:
                 log.warning("WIQL filter chunk failed (skipping filter for chunk): %s", e)
                 # Fallback: assume all are valid if query fails, BFS will handle them natively
@@ -282,11 +281,32 @@ class ADOClient:
 
         return valid_ids
 
-    def _query_ids(self, wiql: str) -> set[int]:
+    def _query_ids(self, where: str) -> set[int]:
+        """IDs of the work items matching the WIQL condition *where*.
+
+        query_by_wiql returns at most ADO_WIQL_PAGE rows, so the query is paged
+        by ascending ID: each page asks for IDs above the last page's highest.
+        The query text is built here, so the keyset clause never has to be
+        spliced into caller WIQL.  A page that does not advance past the
+        previous one raises instead of looping or returning a truncated set.
+        """
         from azure.devops.v7_0.work_item_tracking.models import Wiql
 
-        res = self.wit.query_by_wiql(wiql=Wiql(query=wiql), top=ADO_WIQL_PAGE)
-        return {ref.id for ref in res.work_items or []}
+        ids: set[int] = set()
+        last = 0
+        while True:
+            wiql = (
+                f"SELECT [System.Id] FROM WorkItems WHERE ({where})"
+                f" AND [System.Id] > {last} ORDER BY [System.Id] ASC"
+            )
+            res = self.wit.query_by_wiql(wiql=Wiql(query=wiql), top=ADO_WIQL_PAGE)
+            page = [ref.id for ref in res.work_items or []]
+            if any(wi_id <= last for wi_id in page):
+                raise RuntimeError(f"WIQL page after ID {last} did not advance")
+            ids.update(page)
+            if len(page) < ADO_WIQL_PAGE:
+                return ids
+            last = max(page)
 
     # ------------------------------------------------------------------
     # Batch work-item fetch (fields + relations)
@@ -310,6 +330,11 @@ class ADOClient:
         return [f.reference_name for f in (fields or [])]
 
 
+def wiql_string(value: str) -> str:
+    """Quote *value* as a WIQL string literal; WIQL escapes ' by doubling it."""
+    return "'{}'".format(value.replace("'", "''"))
+
+
 def _wiql_ids(ids: list[int]) -> str:
     id_list = ",".join(map(str, ids))
-    return f"SELECT [System.Id] FROM WorkItems WHERE [System.Id] IN ({id_list})"
+    return f"[System.Id] IN ({id_list})"

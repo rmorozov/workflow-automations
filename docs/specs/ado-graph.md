@@ -83,6 +83,14 @@ filters; only those it returns are pruned. The rest are fetched, so the batch fe
 reports them as omitted. If that existence query fails, all rejected IDs of the chunk
 are fetched and filtered after fetch.
 
+Project and type names enter WIQL only as string literals with each `'` doubled, so
+apostrophes, `ORDER BY` or brackets in a name cannot change the query. Every WIQL ID
+query is paged by ascending ID (`[System.Id] > <last> ORDER BY [System.Id] ASC`, up to
+20,000 rows per page) until a page comes back short, so no result is cut at the
+server limit. A page that returns an ID at or below the previous page's highest
+raises instead of looping; for a filter query this is a failed chunk, handled as
+above.
+
 IDs requested but not returned by ADO (deleted or inaccessible) are counted as
 omitted and are not retried. They are split the way `ado-triage` separates core items
 from label lookups:
