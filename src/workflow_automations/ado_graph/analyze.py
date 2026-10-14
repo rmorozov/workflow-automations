@@ -581,17 +581,20 @@ def parse_steps(raw: str) -> list[tuple[str, str, str | None]]:
     """
     Parse --steps into (sheet name, step, subgraph) triples.
 
-    `all` runs every step on its default subgraph.  A step may name a subgraph as
-    `step@subgraph`; its sheet is then named after the whole token.  Unknown steps
-    and subgraphs warn and are skipped.
+    `all` adds every step on its default subgraph.  A step may name a subgraph as
+    `step@subgraph`; its sheet is then named `step@subgraph` (lowercased, spaces
+    removed).  Empty tokens are ignored; unknown steps and subgraphs warn and are
+    skipped.
     """
-    if raw.strip().lower() == "all":
-        return [(step, step, None) for step in ALL_STEPS]
     parsed = []
     for token in raw.split(","):
         step, _, subgraph = token.strip().lower().partition("@")
         step, subgraph = step.strip(), subgraph.strip()
-        if step not in ALL_STEPS:
+        if not step:
+            continue
+        if step == "all" and not subgraph:
+            parsed.extend((name, name, None) for name in ALL_STEPS)
+        elif step not in ALL_STEPS:
             log.warning("Unknown analysis step '%s' – skipping.", token.strip())
         elif subgraph and subgraph not in SUBGRAPHS:
             log.warning(

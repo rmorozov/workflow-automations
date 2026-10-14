@@ -251,7 +251,30 @@ def test_steps_name_their_subgraph_and_sheet(tmp_path, caplog):
 def test_every_step_has_a_default_subgraph_and_short_sheet_names():
     assert set(analyze.STEP_SUBGRAPH) == set(analyze.ALL_STEPS)
     assert set(analyze.STEP_SUBGRAPH.values()) <= set(analyze.SUBGRAPHS)
-    longest = max(f"{step}@{sub}" for step in analyze.ALL_STEPS for sub in analyze.SUBGRAPHS)
+    longest = max(
+        (f"{step}@{sub}" for step in analyze.ALL_STEPS for sub in analyze.SUBGRAPHS), key=len
+    )
     assert all(
         len(f"{step}@{sub}") <= 31 for step in analyze.ALL_STEPS for sub in analyze.SUBGRAPHS
     ), longest
+
+
+def test_all_combines_with_subgraph_tokens():
+    parsed = analyze.parse_steps("all, cycles @ Dependency,")
+    assert [sheet for sheet, _, _ in parsed] == [*analyze.ALL_STEPS, "cycles@dependency"]
+    assert parsed[-1][1:] == ("cycles", "dependency")
+
+
+def test_items_implementing_or_affecting_a_cr_are_upstream():
+    graph_nodes = pd.DataFrame(
+        [
+            {"WI_ID": 1, "WorkItemType": "Change Request"},
+            {"WI_ID": 2, "WorkItemType": "Task"},
+            {"WI_ID": 3, "WorkItemType": "Requirement"},
+        ]
+    )
+    links = pd.DataFrame([(2, 1, "Implements"), (3, 1, "Affects")], columns=edges().columns)
+    analyzer = analyze.GraphAnalyzer(graph_nodes, links)
+    assert set(analyzer.find_no_cr_dep()["WI_ID"]) == {2, 3}
+    assert analyzer.analyze_cr_prerequisites().iloc[0]["Prerequisite_WI_Count"] == 0
+    assert ids(analyzer.analyze_cr_prerequisites("impact").iloc[0]["Prerequisite_WI_IDs"]) == {2, 3}

@@ -112,9 +112,10 @@ loaded by this mode). Optional: `--ado-url` (default empty, for report URLs),
 `--effort-field` (default `Microsoft.VSTS.Scheduling.OriginalEstimate`),
 `--output-file` (default `analysis_report.xlsx`), `--steps` (default `all`, or a
 comma-separated list). A step may name its subgraph as `step@subgraph`, for example
-`cycles@dependency`; its sheet is then named after the whole token
-(`cycles@dependency`), so one run can compare subgraphs. `all` runs every step on
-its default subgraph. Unknown steps and unknown subgraphs warn and are skipped. `--bridges` (`contract`
+`cycles@dependency`; its sheet is then named `step@subgraph`, lowercased with
+spaces removed, so one run can compare subgraphs. `all` in the list adds every
+step on its default subgraph (`all,cycles@dependency`). Empty entries are ignored;
+unknown steps and unknown subgraphs warn and are skipped. `--bridges` (`contract`
 by default, or `drop`) and `--max-indirect-edges` (default 1,000,000) control bridge
 nodes, below.
 
@@ -152,32 +153,37 @@ them in report order in `link_type`, for example `Parent->Child & Blocks`.
 
 So for a CR, its children, the items it blocks or precedes and the items it affects
 are its impact; only the items that block or precede it are its prerequisites. Its
-parent is neither, and appears upstream only with `cr_prereqs@all`. On `all`, a
-cycle may mix families (a child that blocks its parent) and need not be a planning
-error; `cycles@dependency` reports dependency cycles only.
+parent is neither, and appears upstream only with `cr_prereqs@all`. Items that
+implement or affect a CR point at it, so they are upstream too: no default CR sheet
+lists them, `no_cr_dep` does, and `cr_prereqs@impact` or `cr_prereqs@all` shows
+them. On `all`, a cycle may mix families (a child that blocks its parent) and need
+not be a planning error; `cycles@dependency` reports dependency cycles only.
 
 When the node file has an `In_Scope` column, each out-of-scope bridge node B is
-contracted in every projection, following only that subgraph's relations: for every P → B → S it adds
-P → S with `link_type` `Indirect`, the bridge IDs in `via` and the normalized link
-types along the path in `path`, unless a direct P → S edge already exists (a direct
-link wins). Chains of bridges collapse into one edge; a path that returns to its
-own start through bridges only is dropped rather than kept as a self-loop. Bridge
-nodes are then removed, so no report lists them and CR effort sums ignore them. The
-neighbor debug column always describes the `all` projection and shows indirect edges
-as `Indirect via 2>3 (Parent->Child, Blocks)`.
-Node files without `In_Scope` (older exports) are treated as fully in scope.
-Contraction of the `all` projection runs while the analyzer is built, before any
-step and before output is created, so it is paid even for `--steps orphans`. Each bridge costs in-degree ×
-out-degree candidate edges (a bridge with 5,000 links on each side would cost 25
-million). The running total is checked before each bridge is contracted; above
-`--max-indirect-edges` the command exits with an error naming the bridge, and no
-report file or directory is created. `--bridges drop` removes bridges and their
-edges without adding indirect edges, which matches `stop` export semantics. The
-full (`all`) projection is contracted while the analyzer is built; the others are
-built on first use and cannot exceed its budget, because a subset of relations
-never gives a bridge more neighbors. An indirect edge's `path` names each hop's
-link types, for example `(Parent->Child & Blocks, Blocks)`. This is a structural
-graph, not a validated scheduling graph.
+contracted in every projection, following only that subgraph's relations: for every
+P → B → S it adds P → S with `link_type` `Indirect`, the bridge IDs in `via` and the
+normalized link types along the path in `path`, unless a direct P → S edge already
+exists (a direct link wins). Chains of bridges collapse into one edge, and when
+several bridge routes join the same pair only the first one contracted is kept, so
+another route's link types show only in a subgraph that lacks the first route; a
+path that returns to its own start through bridges only is dropped rather than kept
+as a self-loop. Bridge nodes are then removed, so no report lists them and CR effort
+sums ignore them. The neighbor debug column always describes the `all` projection
+and shows indirect edges as `Indirect via 2>3 (Parent->Child, Blocks)`. Node files
+without `In_Scope` (older exports) are treated as fully in scope. This runs while
+the analyzer is built, before any step and before output is created, so it is paid
+even for `--steps orphans`. Each bridge costs in-degree × out-degree candidate edges
+(a bridge with 5,000 links on each side would cost 25 million). The running total is
+checked before each bridge is contracted; above `--max-indirect-edges` the command
+exits with an error naming the bridge, and no report file or directory is created.
+`--bridges drop` removes bridges and their edges without adding indirect edges,
+which matches `stop` export semantics. The other projections are built on first use;
+none can exceed the budget the `all` projection passed, because a subset of
+relations never gives a bridge more neighbors. The budget applies to each
+projection, so a run that uses all four may do up to four times that contraction
+work. An indirect edge's `path` names each hop's link types, for example
+`(Parent->Child & Blocks, Blocks)`. This is a structural graph, not a validated
+scheduling graph.
 
 | Step / sheet | Current meaning |
 | --- | --- |
