@@ -1,8 +1,10 @@
 """Shared Kerberos session and run-scoped CA bundle, without a server or Kerberos."""
 
+import json
 import os
 import sys
 import tempfile
+from collections import defaultdict
 from types import ModuleType
 
 import pytest
@@ -114,6 +116,70 @@ def test_failed_ca_bundle_build_leaves_no_file(tmp_path, monkeypatch):
     assert list(bundles.iterdir()) == []
 
 
+# Minimal ADO answers: one resource area and the WIQL location, then an empty result.
+_AREAS = {
+    "count": 1,
+    "value": [
+        {
+            "id": "5264459e-e5e0-4bd8-b118-0985e68a4ec5",
+            "name": "wit",
+            "locationUrl": "https://ado.example/",
+        }
+    ],
+}
+_LOCATIONS = {"count": 2, "value": [
+    {"id": "e81700f7-3be2-46de-8624-2eb35882fcaa", "area": "Location",
+     "resourceName": "ResourceAreas", "routeTemplate": "_apis/{resource}/{areaId}",
+     "resourceVersion": 1, "minVersion": "1.0", "maxVersion": "7.1", "releasedVersion": "7.1"},
+    {"id": "a02355f5-5f8a-4671-8e32-369d23aac83d", "area": "wit", "resourceName": "wiql",
+     "routeTemplate": "{project}/{team}/_apis/wit/wiql/{id}", "resourceVersion": 2,
+     "minVersion": "1.0", "maxVersion": "7.1", "releasedVersion": "7.0"},
+]}  # fmt: skip
+
+
+def _send_to_fake_server(monkeypatch, calls):
+    """Answer requests like a tiny ADO server, recording verify and retries per request."""
+
+    def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
+        calls.append((request.method, verify, self.max_retries.total))
+        if request.method == "OPTIONS":
+            body = _LOCATIONS
+        elif "_apis/ResourceAreas" in request.url:
+            body = _AREAS
+        else:
+            body = {"queryType": "flat", "workItems": []}
+        response = requests.Response()
+        response.status_code, response.request, response.url = 200, request, request.url
+        response.headers["Content-Type"] = "application/json"
+        response._content = json.dumps(body).encode()
+        response.connection = self
+        return response
+
+    monkeypatch.setattr(HTTPAdapter, "send", send)
+
+
+def test_every_sdk_request_uses_the_bundle_and_keeps_msrest_retries(kerberos, monkeypatch):
+    pytest.importorskip("azure.devops.connection")
+    from azure.devops import client as sdk_client
+    from azure.devops import connection as sdk_connection
+
+    # Keep the SDK's location caches in memory, so every lookup goes to the fake server.
+    monkeypatch.setattr(sdk_client, "OPTIONS_FILE_CACHE", defaultdict(lambda: None))
+    monkeypatch.setattr(sdk_connection, "RESOURCE_FILE_CACHE", defaultdict(lambda: None))
+    monkeypatch.setattr(sdk_client.Client, "_locations_cache", {})
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/synthetic/ambient.pem")
+    calls = []
+    _send_to_fake_server(monkeypatch, calls)
+
+    connection = session.connect("https://ado.example", ca_bundle="/synthetic/run.pem")
+    connection.clients.get_work_item_tracking_client().query_by_id(id="synthetic")
+
+    # Location lookups, resource areas and the query itself all reach the transport.
+    assert [method for method, _verify, _retries in calls].count("OPTIONS") >= 1
+    assert len(calls) >= 3
+    assert {(verify, retries) for _m, verify, retries in calls} == {("/synthetic/run.pem", 3)}
+
+
 def test_both_tools_connect_through_the_shared_helper(kerberos, monkeypatch):
     connection = pytest.importorskip("azure.devops.connection")
     from workflow_automations import ado_triage
@@ -122,15 +188,21 @@ def test_both_tools_connect_through_the_shared_helper(kerberos, monkeypatch):
     made = []
 
     def fake_connection(base_url, creds):
-        made.append((base_url, creds.bundle, creds.mutual_authentication))
+        verified = []
+        _send_to_fake_server(monkeypatch, verified)
+        signed = creds.signed_session()
+        signed.get(f"{base_url}/_apis")
+        made.append((base_url, signed.auth.kw["mutual_authentication"], verified[0][1]))
         raise LookupError("stop after connecting")
 
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
     monkeypatch.setattr(connection, "Connection", fake_connection)
     with pytest.raises(LookupError):
         client.ADOClient("https://ado.example/", ca_bundle="/synthetic/run.pem")
     with pytest.raises(LookupError):
         ado_triage.fetch_snapshot("https://ado.example", "q")
     assert made == [
-        ("https://ado.example", "/synthetic/run.pem", "optional"),
-        ("https://ado.example", None, "optional"),
+        ("https://ado.example", "optional", "/synthetic/run.pem"),
+        ("https://ado.example", "optional", True),
     ]

@@ -97,15 +97,15 @@ def kerberos_credentials(mutual_authentication: Any = None, ca_bundle: str | Non
             )
 
     class KerberosCredentials(Authentication):
-        mutual_authentication = mutual
-        bundle = ca_bundle
-
         def signed_session(self, session=None):
             session = super().signed_session(session)
             session.auth = HTTPKerberosAuth(mutual_authentication=mutual)
-            # msrest signs the same session before every request; mount once.
-            if ca_bundle and not isinstance(session.adapters.get("https://"), BundleAdapter):
-                session.mount("https://", BundleAdapter())
+            # msrest signs the same session before every request; mount once, keeping
+            # the retry policy msrest set on the adapter it created.
+            current = session.get_adapter("https://")
+            if ca_bundle and not isinstance(current, BundleAdapter):
+                session.mount("https://", BundleAdapter(max_retries=current.max_retries))
+                current.close()
             return session
 
     return KerberosCredentials()
