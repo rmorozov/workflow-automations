@@ -111,6 +111,36 @@ depends on the batch size; the seed count does not. The summary prints the omitt
 completion status; the omitted IDs are logged sorted, up to 20 per list. Pruned items
 are out of scope, not missing, and do not affect the status.
 
+Every queued ID is counted exactly once, and the summary prints the counters as
+three identities and says whether they reconcile (a mismatch is also logged as an
+error; it is a bug, not a property of the data):
+
+- seeds + linked = pruned + fetched + queued. Seeds are the distinct IDs the saved
+  query returned; linked are relation targets queued for the first time; queued is
+  what remains when a failed run stops early (0 otherwise).
+- fetched = visited + omitted. Fetched IDs are those sent in batch requests; visited
+  are the ones ADO returned, each classified as added, skipped by type or excluded by
+  project.
+- exported nodes = added with `stop`, or visited with `follow` (bridges included).
+  A failed run exports nothing and prints `-`.
+
+The summary also counts the ADO requests the export makes:
+
+- one saved-query call (not paged);
+- one work-item batch request per fetch batch of up to `--batch-size` IDs (at most
+  200), so at least ⌈fetched ÷ batch size⌉, and more when a BFS level leaves a short
+  batch;
+- with `stop` and an active filter only (the default `--skip-types` list is one),
+  at most one WIQL filter call per fetch batch, each over up to 1,000 unchecked IDs. One call is one WIQL query (one page),
+  plus one existence query when it rejects any ID. `follow`, or no filter, makes no
+  WIQL calls.
+
+Measured in the tests: 2,000 seeds at `--batch-size 100` with one Task skipped take
+1 saved query, 2 WIQL filter calls and 20 batches with `stop` (1 pruned, 1,999
+fetched), and 1 saved query, 0 WIQL calls and 20 batches with `follow` (2,000
+fetched). In a small graph where one filter call of three rejects IDs, the three
+calls make four WIQL queries.
+
 Recognized relations: hierarchy forward, affects forward/reverse, blocks
 forward/reverse, dependency forward/reverse, implements forward/reverse. Hierarchy
 reverse is present in the label map but commented out of the traversal allowlist.
