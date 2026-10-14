@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -167,6 +168,44 @@ def prepare_export_frames(
     return nodes, edges
 
 
+# Excel's worksheet limits: rows include the heading row, text is per cell.
+EXCEL_MAX_ROWS = 1_048_576
+EXCEL_MAX_COLUMNS = 16_384
+EXCEL_MAX_CELL_CHARS = 32_767
+
+
+class ExcelLimitError(ValueError):
+    """A sheet does not fit in an Excel worksheet; raised before anything is written."""
+
+
+def excel_overflow(frame: pd.DataFrame) -> str | None:
+    """Why ``frame`` (written with a heading row, no index) cannot be a worksheet, else None.
+
+    Checking text length is one pass over the text and object columns, O(cells).
+    """
+    rows, columns = len(frame) + 1, len(frame.columns)
+    if rows > EXCEL_MAX_ROWS:
+        return f"{rows:,} rows with the heading exceed Excel's {EXCEL_MAX_ROWS:,}"
+    if columns > EXCEL_MAX_COLUMNS:
+        return f"{columns:,} columns exceed Excel's {EXCEL_MAX_COLUMNS:,}"
+    for col in frame.columns:
+        values = frame[col]
+        if isinstance(values.dtype, pd.StringDtype):
+            lengths = values.str.len()
+        elif pd.api.types.is_object_dtype(values):
+            # Object columns can mix text with numbers, lists or dates; only text counts.
+            lengths = values.map(lambda v: len(v) if isinstance(v, str) else 0, na_action="ignore")
+        else:
+            continue
+        longest = lengths.max() if not values.empty else 0
+        if pd.notna(longest) and longest > EXCEL_MAX_CELL_CHARS:
+            return (
+                f"column {col!r} holds {int(longest):,} characters in one cell, "
+                f"over Excel's {EXCEL_MAX_CELL_CHARS:,}"
+            )
+    return None
+
+
 def _export_dataframes(
     df_nodes: pd.DataFrame,
     df_edges: pd.DataFrame,
@@ -177,8 +216,19 @@ def _export_dataframes(
     """Validate, normalize and publish every requested format as one staged bundle.
 
     ``overwrite`` defaults to True because the CLI asks for consent before the run.
+    Raises ExcelLimitError before anything is written when Excel is requested and a
+    sheet does not fit; Parquet and CSV have no such limit.
     """
     df_nodes, df_edges = prepare_export_frames(df_nodes, df_edges)
+    known = known_formats(formats)
+    if "excel" in known:
+        for sheet, frame in (("Nodes", df_nodes), ("Edges", df_edges)):
+            reason = excel_overflow(frame)
+            if reason:
+                raise ExcelLimitError(
+                    f"work_items.xlsx: sheet {sheet}: {reason}; "
+                    "export with --formats parquet or csv instead"
+                )
     writers = {
         "nodes.parquet": lambda p: df_nodes.to_parquet(p, index=False),
         "edges.parquet": lambda p: df_edges.to_parquet(p, index=False),
@@ -186,7 +236,6 @@ def _export_dataframes(
         "edges.csv": lambda p: df_edges.to_csv(p, index=False),
         "work_items.xlsx": lambda p: _write_excel(df_nodes, df_edges, p),
     }
-    known = known_formats(formats)
     paths = export_paths(output_dir, known)
     publish_all([(path, writers[path.name]) for path in paths], overwrite)
     for fmt in known:
@@ -209,33 +258,133 @@ def _keep_text_literal(worksheet: Any) -> None:
                 cell.quotePrefix = True
 
 
+# Column widths come from the heading and at most this many evenly spaced rows.
+SIZING_SAMPLE_ROWS = 1_000
+MAX_COLUMN_WIDTH = 50
+
+
+def _sample_rows(frame: pd.DataFrame) -> pd.DataFrame:
+    """At most SIZING_SAMPLE_ROWS evenly spaced rows, always including the first and last."""
+    limit = SIZING_SAMPLE_ROWS
+    if len(frame) <= limit:
+        return frame
+    last = len(frame) - 1
+    return frame.iloc[[i * last // (limit - 1) for i in range(limit)]]
+
+
+def _column_widths(sheet: str, frame: pd.DataFrame) -> list[int | None]:
+    """Width per column from the heading and a bounded row sample, capped at 50.
+
+    A column whose values cannot be rendered as text keeps Excel's default width
+    (None) and is reported as a warning instead of failing the report.
+    """
+    sample = _sample_rows(frame)
+    widths: list[int | None] = []
+    for position, col in enumerate(frame.columns):
+        try:
+            values = sample.iloc[:, position].map(str, na_action="ignore").str.len()
+            longest = max(len(str(col)), int(values.max()) if values.notna().any() else 0)
+        except Exception as exc:  # any __str__ can fail; report it and go on
+            log.warning(
+                "Sheet '%s': cannot size column %r (%s); keeping its width.", sheet, col, exc
+            )
+            widths.append(None)
+            continue
+        widths.append(min(longest + 2, MAX_COLUMN_WIDTH))
+    return widths
+
+
+def _spill_path(output_path: Path, sheet: str) -> Path:
+    safe = re.sub(r"[^\w@.-]", "_", sheet)
+    return output_path.with_name(f"{output_path.stem}.{safe}.csv")
+
+
+def plan_analysis_report(
+    results: dict[str, pd.DataFrame], output_path: Path
+) -> dict[str, tuple[Path, str]]:
+    """Sheets that do not fit in Excel, each with its spill CSV path and the reason."""
+    spills: dict[str, tuple[Path, str]] = {}
+    for sheet, frame in results.items():
+        reason = excel_overflow(frame)
+        if reason:
+            spills[sheet] = (_spill_path(output_path, sheet), reason)
+    return spills
+
+
 def write_analysis_report(
-    results: dict[str, pd.DataFrame], output_path: Path, overwrite: bool = True
+    results: dict[str, pd.DataFrame],
+    output_path: Path,
+    overwrite: bool = True,
+    timings: dict[str, float] | None = None,
 ) -> None:
     """Publish one sheet per analysis step, with column widths sized to content.
 
-    ``overwrite`` defaults to True because the CLI asks for consent before the run.
+    A sheet that exceeds Excel's limits is written to a sibling CSV
+    (``<report stem>.<sheet>.csv``) published with the workbook, and its sheet
+    holds a pointer row instead. ``overwrite`` defaults to True because the CLI
+    asks for consent before the run; it covers the spill files too. ``timings``,
+    when given, receives the seconds spent writing and sizing.
     """
-    publish_all([(output_path, lambda p: _write_workbook(results, p))], overwrite)
-    log.info("Analysis report written to %s", output_path)
+    spills = plan_analysis_report(results, output_path)
+    for sheet, (path, reason) in spills.items():
+        log.warning("Sheet '%s': %s; writing it to %s instead.", sheet, reason, path.name)
+    timings = timings if timings is not None else {}
+    timings.setdefault("write", 0.0)
+    timings.setdefault("sizing", 0.0)
+
+    def spill_writer(frame: pd.DataFrame) -> Callable[[Path], None]:
+        def write(path: Path) -> None:
+            start = time.perf_counter()
+            frame.to_csv(path, index=False)
+            timings["write"] += time.perf_counter() - start
+
+        return write
+
+    targets: list[tuple[Path, Callable[[Path], None]]] = [
+        (output_path, lambda p: _write_workbook(results, p, spills, timings))
+    ]
+    targets += [(path, spill_writer(results[sheet])) for sheet, (path, _) in spills.items()]
+    publish_all(targets, overwrite)
+    log.info(
+        "Analysis report written to %s (write %.2fs, sizing %.2fs)",
+        output_path,
+        timings["write"],
+        timings["sizing"],
+    )
 
 
-def _write_workbook(results: dict[str, pd.DataFrame], path: Path) -> None:
+def _write_workbook(
+    results: dict[str, pd.DataFrame],
+    path: Path,
+    spills: dict[str, tuple[Path, str]] | None = None,
+    timings: dict[str, float] | None = None,
+) -> None:
+    spills = spills or {}
+    timings = timings if timings is not None else {"write": 0.0, "sizing": 0.0}
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for sheet_name, df in results.items():
             safe_name = sheet_name[:31]
-            df.to_excel(writer, sheet_name=safe_name, index=False)
-            # Auto-adjust column widths for better UX
-            worksheet = writer.sheets[sheet_name]
-            for column in worksheet.columns:
-                max_length = 0
-                column_letter = get_column_letter(column[0].column)
-                for cell in column:
-                    try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except Exception:
-                        pass
-                adjusted_width = (max_length + 2) if max_length < 50 else 50
-                worksheet.column_dimensions[column_letter].width = adjusted_width
+            if sheet_name in spills:
+                spill, reason = spills[sheet_name]
+                frame = pd.DataFrame(
+                    [
+                        {
+                            "Spilled_To": spill.name,
+                            "Rows": len(df),
+                            "Columns": len(df.columns),
+                            "Reason": reason,
+                        }
+                    ]
+                )
+            else:
+                frame = df
+            start = time.perf_counter()
+            frame.to_excel(writer, sheet_name=safe_name, index=False)
+            timings["write"] += time.perf_counter() - start
+            start = time.perf_counter()
+            worksheet = writer.sheets[safe_name]
+            for position, width in enumerate(_column_widths(safe_name, frame), start=1):
+                if width is not None:
+                    worksheet.column_dimensions[get_column_letter(position)].width = width
+            timings["sizing"] += time.perf_counter() - start
             log.info("  → sheet '%s' (%d rows)", safe_name, len(df))

@@ -273,6 +273,25 @@ and input collisions). Text beginning with `=` can be
 written as an Excel formula by pandas/openpyxl; arbitrary identity/datetime field
 objects may fail serialization.
 
+Excel limits are checked before anything is written: at most 1,048,576 rows
+including the heading, 16,384 columns and 32,767 characters of text in a cell.
+An export that requests `excel` with a Nodes or Edges sheet over a limit raises
+`ExcelLimitError` (a `ValueError`) naming the sheet and limit, and writes none of
+the requested formats; Parquet and CSV have no such limit. Analyze instead writes
+each oversized sheet (typically `cr_impact_unpacked`, `cr_prereqs_unpacked` or
+`cycles` on large graphs) to `<report stem>.<sheet>.csv` next to the workbook, in
+the same atomic bundle, and that sheet holds one pointer row (`Spilled_To`,
+`Rows`, `Columns`, `Reason`). The report's `--overwrite` consent covers its spill
+files; a spill file from an earlier run that this run does not spill is left as
+is. Step names longer than 31 characters are truncated to Excel's sheet-name
+limit. Column widths come from the heading and at most 1,000 evenly spaced rows
+(first and last included), capped at 50 characters, so sizing cost does not grow
+with sheet length; a column whose values cannot be rendered as text keeps the
+default width and is logged as a warning. The final log line reports the seconds
+spent writing and sizing; `ADO_GRAPH_BENCH=1 pytest -s -k benchmark
+tests/ado_graph/test_report.py` prints graph compute, write and sizing time for a
+synthetic chain (`ADO_GRAPH_BENCH_NODES`, default 5,000).
+
 ## Verification and next steps
 
 Tests use synthetic SDK-like objects and Parquet/XLSX files: CLI help and argument

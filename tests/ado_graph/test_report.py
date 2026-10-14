@@ -1,6 +1,8 @@
 """Offline behavior tests for the ado-graph analysis workbook."""
 
 import datetime as dt
+import os
+import time
 
 import pandas as pd
 import pytest
@@ -104,7 +106,7 @@ def test_failed_analysis_write_keeps_existing_report(tmp_path, monkeypatch):
     output = tmp_path / "report.xlsx"
     output.write_bytes(b"previous report")
 
-    def fail(_results, path):
+    def fail(_results, path, *_rest):
         path.write_bytes(b"partial")
         raise OSError("disk full")
 
@@ -256,3 +258,156 @@ def test_export_schema_errors_write_nothing(tmp_path, bad_nodes, bad_edges, mess
         report._export_dataframes(bad_nodes, bad_edges, tmp_path, ["csv", "excel"])
     assert [p.name for p in tmp_path.iterdir()] == ["nodes.csv"]
     assert (tmp_path / "nodes.csv").read_bytes() == b"previous"
+
+
+@pytest.mark.parametrize(
+    ("frame", "fits"),
+    [
+        (pd.DataFrame({"a": range(report.EXCEL_MAX_ROWS - 1)}), True),
+        (pd.DataFrame({"a": range(report.EXCEL_MAX_ROWS)}), False),
+        (pd.DataFrame(columns=range(report.EXCEL_MAX_COLUMNS)), True),
+        (pd.DataFrame(columns=range(report.EXCEL_MAX_COLUMNS + 1)), False),
+        (pd.DataFrame({"a": ["x" * report.EXCEL_MAX_CELL_CHARS, None]}), True),
+        (pd.DataFrame({"a": ["x" * (report.EXCEL_MAX_CELL_CHARS + 1), 1]}), False),
+        (
+            pd.DataFrame(
+                {"a": pd.Series(["x" * (report.EXCEL_MAX_CELL_CHARS + 1)], dtype="string")}
+            ),
+            False,
+        ),
+        (
+            pd.DataFrame(
+                {"a": pd.Series([1, dt.datetime(2024, 1, 1), [0] * 40_000], dtype=object)}
+            ),
+            True,
+        ),
+    ],
+    ids=[
+        "max-rows",
+        "rows+1",
+        "max-columns",
+        "columns+1",
+        "max-cell",
+        "cell+1",
+        "string-dtype",
+        "no-text",
+    ],
+)
+def test_excel_limits_at_their_boundaries(frame, fits):
+    assert (report.excel_overflow(frame) is None) is fits
+
+
+def test_oversized_analysis_sheet_spills_to_csv_with_a_pointer(tmp_path, monkeypatch):
+    monkeypatch.setattr(report, "EXCEL_MAX_ROWS", 4)
+    big = pd.DataFrame({"CR_ID": range(4), "Reachable_ID": range(10, 14)})
+    small = pd.DataFrame({"CR_ID": [1, 2, 3]})
+    output = tmp_path / "report.xlsx"
+    report.write_analysis_report({"cr_impact_unpacked": big, "orphans": small}, output)
+
+    spill = tmp_path / "report.cr_impact_unpacked.csv"
+    assert pd.read_csv(spill).equals(big)
+    workbook = pd.read_excel(output, sheet_name=None)
+    assert list(workbook) == ["cr_impact_unpacked", "orphans"]
+    pointer = workbook["cr_impact_unpacked"].iloc[0]
+    assert pointer["Spilled_To"] == spill.name
+    assert (pointer["Rows"], pointer["Columns"]) == (4, 2)
+    assert "exceed Excel's 4" in pointer["Reason"]
+    assert workbook["orphans"].equals(small)
+
+
+def test_failed_spill_keeps_the_previous_report_and_spill(tmp_path, monkeypatch):
+    monkeypatch.setattr(report, "EXCEL_MAX_ROWS", 2)
+    output = tmp_path / "report.xlsx"
+    spill = tmp_path / "report.cycles.csv"
+    output.write_bytes(b"previous report")
+    spill.write_bytes(b"previous spill")
+
+    def fail(*_args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(report, "_write_workbook", fail)
+    with pytest.raises(OSError, match="disk full"):
+        report.write_analysis_report({"cycles": pd.DataFrame({"a": range(5)})}, output)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == {
+        "report.xlsx": b"previous report",
+        "report.cycles.csv": b"previous spill",
+    }
+
+
+def test_export_over_excel_limits_fails_before_replacing_outputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(report, "EXCEL_MAX_ROWS", 3)
+    (tmp_path / "nodes.csv").write_bytes(b"previous")
+    with pytest.raises(report.ExcelLimitError, match="sheet Nodes: 5 rows.*--formats parquet"):
+        report._export_dataframes(nodes(), edges(), tmp_path, ["csv", "excel"])
+    assert [p.name for p in tmp_path.iterdir()] == ["nodes.csv"]
+    assert (tmp_path / "nodes.csv").read_bytes() == b"previous"
+
+    report._export_dataframes(nodes(), edges(), tmp_path, ["csv"])
+    assert pd.read_csv(tmp_path / "nodes.csv")["WI_ID"].tolist() == [1, 2, 3, 4]
+
+
+def test_column_widths_sample_rows_and_cap_at_fifty(monkeypatch):
+    monkeypatch.setattr(report, "SIZING_SAMPLE_ROWS", 3)
+    titles = ["first"] + ["x" * 30] + ["y"] * 7 + ["last-row"]
+    frame = pd.DataFrame({"Title": titles, "Description": ["z" * 80] * 10})
+    # Rows 0, 4 and 9 are sampled: the 30-character row 1 is not.
+    assert report._column_widths("s", frame) == [len("last-row") + 2, 50]
+    assert report._sample_rows(frame).index.tolist() == [0, 4, 9]
+
+
+def test_unsizable_column_is_reported_and_keeps_default_width(caplog):
+    class Unprintable:
+        def __str__(self):
+            raise RuntimeError("no text")
+
+    frame = pd.DataFrame({"Bad": [Unprintable()], "Good": ["ok"]})
+    assert report._column_widths("cycles", frame) == [None, len("Good") + 2]
+    assert "Sheet 'cycles': cannot size column 'Bad' (no text)" in caplog.text
+
+
+def test_long_step_names_are_truncated_sheets_with_widths(tmp_path):
+    name = "cr_prereqs_unpacked@hierarchy_only"
+    output = tmp_path / "report.xlsx"
+    report.write_analysis_report({name: pd.DataFrame({"Title": ["a" * 20]})}, output)
+    workbook = load_workbook(output)
+    try:
+        sheet = workbook[name[:31]]
+        assert sheet.column_dimensions["A"].width == 22
+    finally:
+        workbook.close()
+
+
+@pytest.mark.skipif(
+    not os.environ.get("ADO_GRAPH_BENCH"), reason="set ADO_GRAPH_BENCH=1 to run the benchmark"
+)
+def test_large_report_benchmark(tmp_path):
+    """Print graph compute, writing and sizing time for a large synthetic report."""
+    count = int(os.environ.get("ADO_GRAPH_BENCH_NODES", "5000"))
+    bench_nodes = pd.DataFrame(
+        {
+            "WI_ID": range(1, count + 1),
+            "Title": [f"Item {i}" for i in range(1, count + 1)],
+            "WorkItemType": ["Change Request" if i % 50 == 1 else "Feature" for i in range(count)],
+            "Effort": 1,
+        }
+    )
+    bench_edges = pd.DataFrame(
+        [(i, i + 1, "Successor->Predecessor") for i in range(1, count)],
+        columns=["Source_ID", "Target_ID", "Link_Type"],
+    )
+    start = time.perf_counter()
+    analyzer = analyze.GraphAnalyzer(bench_nodes, bench_edges, effort_field="Effort")
+    results = {
+        "orphans": analyzer.find_orphans(subgraph=None),
+        "metrics": analyzer.compute_metrics(subgraph=None),
+        "cr_impact_unpacked": analyzer.analyze_cr_impact_unpacked(subgraph=None),
+    }
+    compute = time.perf_counter() - start
+    timings: dict[str, float] = {}
+    report.write_analysis_report(results, tmp_path / "report.xlsx", timings=timings)
+    rows = sum(len(frame) for frame in results.values())
+    print(
+        f"\n{count} nodes, {rows} report rows: compute {compute:.2f}s, "
+        f"write {timings['write']:.2f}s, sizing {timings['sizing']:.2f}s"
+    )
+    assert timings["sizing"] < timings["write"]
