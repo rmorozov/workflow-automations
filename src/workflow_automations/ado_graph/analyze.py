@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 from pathlib import Path
 
 import networkx as nx
@@ -20,6 +21,16 @@ log = logging.getLogger("ado_tool")
 
 
 DEFAULT_MAX_INDIRECT_EDGES = 1_000_000
+
+# Step budgets.  Cycle enumeration can be exponential in a dense strongly connected
+# component, so it stops at whichever budget is reached first and marks the result
+# partial.  Exact betweenness costs one BFS per node (O(n·m)); above this many nodes
+# it is estimated from a fixed-seed sample of source nodes instead.
+DEFAULT_MAX_CYCLES = 1_000
+DEFAULT_MAX_CYCLE_ROWS = 100_000
+DEFAULT_CENTRALITY_SOURCES = 500
+CENTRALITY_SEED = 0
+CYCLE_PROGRESS_EVERY = 250
 
 
 class ContractionBudgetExceeded(ValueError):
@@ -118,6 +129,9 @@ class GraphAnalyzer:
         effort_field: str = "",
         bridges: str = "contract",
         max_indirect_edges: int = DEFAULT_MAX_INDIRECT_EDGES,
+        max_cycles: int = DEFAULT_MAX_CYCLES,
+        max_cycle_rows: int = DEFAULT_MAX_CYCLE_ROWS,
+        centrality_sources: int = DEFAULT_CENTRALITY_SOURCES,
     ) -> None:
         self.df_nodes = df_nodes
         self.df_edges = df_edges
@@ -125,6 +139,9 @@ class GraphAnalyzer:
         self.effort_field = effort_field
         self.bridges = bridges
         self.max_indirect_edges = max_indirect_edges
+        self.max_cycles = max_cycles
+        self.max_cycle_rows = max_cycle_rows
+        self.centrality_sources = centrality_sources
         self.relations: nx.MultiDiGraph = nx.MultiDiGraph()
         self._graphs: dict[str, nx.DiGraph] = {}
         self._bridge_ids: list = []
@@ -335,30 +352,59 @@ class GraphAnalyzer:
         return df
 
     def find_cycles(self, subgraph: str | None = None) -> pd.DataFrame:
+        """
+        Simple cycles, one row per member, enumerated within a budget.
+
+        Enumeration stops after max_cycles cycles, or after the cycle that brings
+        the member rows to max_cycle_rows or more.  `Cycles_Complete` on every row
+        says whether every cycle was listed; when it is False, the `scc` step still
+        names every node that lies on some cycle.
+        """
         name, g = self._step_graph("cycles", subgraph)
-        cycles = list(nx.simple_cycles(g))
         rows = []
-        for i, c in enumerate(cycles):
-            for node in c:
-                row = {"Cycle_Index": i, "Node_ID": node}
+        count = 0
+        complete = True
+        for cycle in nx.simple_cycles(g):
+            if count >= self.max_cycles or len(rows) >= self.max_cycle_rows:
+                complete = False
+                break
+            for node in cycle:
+                row = {"Cycle_Index": count, "Node_ID": node}
                 row.update(self._meta(node))
                 rows.append(row)
-        log.info("Cycles found in the %s subgraph: %d", name, len(cycles))
-        if not rows:
-            return pd.DataFrame(
-                columns=[
-                    "Cycle_Index",
-                    "Node_ID",
-                    "Title",
-                    "WI_URL",
-                    "State",
-                    "Roadmap_State",
-                    "WorkItemType",
-                    "AreaPath",
-                    "IterationPath",
-                ]
+            count += 1
+            if count % CYCLE_PROGRESS_EVERY == 0:
+                log.info("  … %d cycles, %d member rows so far", count, len(rows))
+        for row in rows:
+            row["Cycles_Complete"] = complete
+        if complete:
+            log.info("Cycles found in the %s subgraph: %d", name, count)
+        else:
+            log.warning(
+                "Cycle enumeration in the %s subgraph stopped at its budget (%d cycles, "
+                "%d member rows; limits %d cycles, %d rows); the cycles sheet is partial. "
+                "The scc step lists every node on a cycle.",
+                name,
+                count,
+                len(rows),
+                self.max_cycles,
+                self.max_cycle_rows,
             )
-        return pd.DataFrame(rows)
+        columns = [
+            "Cycle_Index",
+            "Node_ID",
+            "Title",
+            "WI_URL",
+            "State",
+            "Roadmap_State",
+            "WorkItemType",
+            "AreaPath",
+            "IterationPath",
+            "Cycles_Complete",
+        ]
+        df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+        df.attrs["cycles_complete"] = complete
+        return df
 
     def find_orphans(self, subgraph: str | None = None) -> pd.DataFrame:
         name, g = self._step_graph("orphans", subgraph)
@@ -450,8 +496,8 @@ class GraphAnalyzer:
         return pd.DataFrame(rows)
 
     def compute_metrics(self, subgraph: str | None = None) -> pd.DataFrame:
-        _name, g = self._step_graph("metrics", subgraph)
-        bc = nx.betweenness_centrality(g, normalized=True)
+        name, g = self._step_graph("metrics", subgraph)
+        bc, sources = self._betweenness(g, name)
         cond = nx.condensation(g)
         mapping: dict = cond.graph.get("mapping", {})
         scc_depth = _longest_depth(cond)
@@ -462,11 +508,40 @@ class GraphAnalyzer:
                 "In_Degree": g.in_degree(node),
                 "Out_Degree": g.out_degree(node),
                 "Betweenness_Centrality": round(bc.get(node, 0.0), 6),
+                "Betweenness_Sources": sources,
                 "Dependency_Depth": scc_depth.get(mapping.get(node, -1), 0),
             }
             row.update(self._meta(node))
             rows.append(row)
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        df.attrs["betweenness_sources"] = sources
+        return df
+
+    def _betweenness(self, g: nx.DiGraph, name: str) -> tuple[dict, int]:
+        """
+        Normalized betweenness and the number of source nodes it was computed from.
+
+        Exact (every node a source) up to centrality_sources nodes; above that, a
+        sample of that many sources chosen with a fixed seed, so repeat runs on the
+        same graph give the same estimate.  The cost is one BFS per source.
+        """
+        n = g.number_of_nodes()
+        if n <= self.centrality_sources:
+            log.info("Betweenness in the %s subgraph: exact, %d sources", name, n)
+            return nx.betweenness_centrality(g, normalized=True), n
+        log.warning(
+            "Betweenness in the %s subgraph: %d nodes is above the %d-source budget; "
+            "estimating from %d sampled sources (seed %d).",
+            name,
+            n,
+            self.centrality_sources,
+            self.centrality_sources,
+            CENTRALITY_SEED,
+        )
+        bc = nx.betweenness_centrality(
+            g, k=self.centrality_sources, normalized=True, seed=CENTRALITY_SEED
+        )
+        return bc, self.centrality_sources
 
     def _cr_downstream_set(self, g: nx.DiGraph) -> set:
         """Change Requests and every node reachable from one (items that depend on a CR)."""
@@ -504,8 +579,15 @@ class GraphAnalyzer:
 
         sort_col = f"Total_{effort_label}" if has_effort else "Impacted_WI_Count"
         if not rows:
+            # The same leading columns as a non-empty result, each named once.
             return pd.DataFrame(
-                columns=["CR_ID", "CR_Title", sort_col, "Impacted_WI_Count", "Impacted_WI_IDs"]
+                columns=[
+                    "CR_ID",
+                    "CR_Title",
+                    f"Total_{effort_label}",
+                    "Impacted_WI_Count",
+                    "Impacted_WI_IDs",
+                ]
             )
         return pd.DataFrame(rows).sort_values(sort_col, ascending=False)
 
@@ -637,6 +719,10 @@ def run_analyze(args: argparse.Namespace) -> None:
             args.effort_field,
             bridges=args.bridges,
             max_indirect_edges=args.max_indirect_edges,
+            # Budgets without a command-line option yet use their defaults.
+            max_cycles=getattr(args, "max_cycles", DEFAULT_MAX_CYCLES),
+            max_cycle_rows=getattr(args, "max_cycle_rows", DEFAULT_MAX_CYCLE_ROWS),
+            centrality_sources=getattr(args, "centrality_sources", DEFAULT_CENTRALITY_SOURCES),
         )
     except ContractionBudgetExceeded as exc:
         # Raised before any output is created.
@@ -656,9 +742,21 @@ def run_analyze(args: argparse.Namespace) -> None:
     }
 
     results: dict[str, pd.DataFrame] = {}
-    for sheet, step, subgraph in steps_requested:
-        log.info("Running step: %s …", sheet)
-        results[sheet] = step_fn_map[step](subgraph=subgraph)
+    total = len(steps_requested)
+    for position, (sheet, step, subgraph) in enumerate(steps_requested, start=1):
+        log.info("Running step %d/%d: %s …", position, total, sheet)
+        started = time.monotonic()
+        try:
+            results[sheet] = step_fn_map[step](subgraph=subgraph)
+        except KeyboardInterrupt:
+            # Nothing has been written yet; the report is published only at the end.
+            log.error(
+                "Interrupted during step %s after %.1fs; no report written.",
+                sheet,
+                time.monotonic() - started,
+            )
+            raise SystemExit(130) from None
+        log.info("Step %s finished in %.1fs.", sheet, time.monotonic() - started)
 
     output_path = Path(args.output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)

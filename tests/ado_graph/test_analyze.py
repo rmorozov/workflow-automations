@@ -310,3 +310,120 @@ def test_items_implementing_or_affecting_a_cr_are_upstream():
     assert set(analyzer.find_no_cr_dep()["WI_ID"]) == {2, 3}
     assert analyzer.analyze_cr_prerequisites().iloc[0]["Prerequisite_WI_Count"] == 0
     assert ids(analyzer.analyze_cr_prerequisites("impact").iloc[0]["Prerequisite_WI_IDs"]) == {2, 3}
+
+
+def complete_digraph(n):
+    """Every ordered pair blocks: the number of simple cycles grows factorially."""
+    graph_nodes = pd.DataFrame({"WI_ID": range(n), "WorkItemType": "Task"})
+    links = pd.DataFrame(
+        [(i, j, "Blocks") for i in range(n) for j in range(n) if i != j],
+        columns=edges().columns,
+    )
+    return graph_nodes, links
+
+
+def test_cycle_enumeration_stops_at_its_budget(caplog):
+    # K12 has over 10^8 simple cycles; unbounded enumeration would not finish.
+    analyzer = analyze.GraphAnalyzer(*complete_digraph(12), max_cycles=50)
+    with caplog.at_level("WARNING", logger="ado_tool"):
+        cycles = analyzer.find_cycles()
+    assert cycles["Cycle_Index"].nunique() == 50
+    assert set(cycles["Cycles_Complete"]) == {False}
+    assert cycles.attrs["cycles_complete"] is False
+    assert "stopped at its budget" in caplog.text
+    # Every node is still reported as part of one strongly connected component.
+    assert set(analyzer.find_scc()["SCC_Size"]) == {12}
+
+    by_rows = analyze.GraphAnalyzer(*complete_digraph(12), max_cycle_rows=30).find_cycles()
+    # Stops after the cycle that reaches the row budget, so it overshoots by < one cycle.
+    assert 30 <= len(by_rows) < 30 + 12
+    assert set(by_rows["Cycles_Complete"]) == {False}
+
+
+def test_cycles_exactly_at_the_budget_are_complete():
+    # A triangle has exactly two simple cycles here: 1->2->3->1 and 1<->2.
+    links = pd.DataFrame(
+        [(1, 2, "Blocks"), (2, 3, "Blocks"), (3, 1, "Blocks"), (2, 1, "Blocks")],
+        columns=edges().columns,
+    )
+    cycles = analyze.GraphAnalyzer(nodes(), links, max_cycles=2).find_cycles()
+    assert cycles["Cycle_Index"].nunique() == 2
+    assert set(cycles["Cycles_Complete"]) == {True}
+    assert (
+        analyze.GraphAnalyzer(nodes(), links, max_cycles=1).find_cycles().attrs["cycles_complete"]
+        is False
+    )
+    empty = analyze.GraphAnalyzer(nodes(), edges()).find_cycles()
+    assert empty.empty and "Cycles_Complete" in empty.columns
+
+
+def test_betweenness_is_exact_within_budget_and_sampled_above_it():
+    # 1->2->3->4: the inner nodes carry every path through them.
+    links = pd.DataFrame(
+        [(1, 2, "Blocks"), (2, 3, "Blocks"), (3, 4, "Blocks")], columns=edges().columns
+    )
+    exact = analyze.GraphAnalyzer(nodes(), links).compute_metrics().set_index("WI_ID")
+    assert set(exact["Betweenness_Sources"]) == {4}
+    assert exact.loc[2, "Betweenness_Centrality"] == pytest.approx(2 / 6)
+
+    chain = pd.DataFrame({"WI_ID": range(400), "WorkItemType": "Task"})
+    chain_links = pd.DataFrame([(i, i + 1, "Blocks") for i in range(399)], columns=edges().columns)
+    sampled = analyze.GraphAnalyzer(chain, chain_links, centrality_sources=100)
+    first = sampled.compute_metrics()
+    assert first.attrs["betweenness_sources"] == 100
+    assert set(first["Betweenness_Sources"]) == {100}
+    # A fixed seed: repeat runs give the same estimate.
+    assert first["Betweenness_Centrality"].equals(
+        sampled.compute_metrics()["Betweenness_Centrality"]
+    )
+    exact_chain = analyze.GraphAnalyzer(chain, chain_links, centrality_sources=400)
+    reference = exact_chain.compute_metrics().set_index("WI_ID")["Betweenness_Centrality"]
+    estimate = first.set_index("WI_ID")["Betweenness_Centrality"]
+    # The middle of a chain is its most central node in the exact and the sampled result.
+    assert abs(estimate.idxmax() - reference.idxmax()) < 40
+    assert estimate.loc[200] == pytest.approx(reference.loc[200], rel=0.25)
+
+
+def write_inputs(tmp_path, graph_nodes, links):
+    node_file, edge_file = tmp_path / "nodes.parquet", tmp_path / "edges.parquet"
+    graph_nodes.to_parquet(node_file, index=False)
+    links.to_parquet(edge_file, index=False)
+    return ["--nodes-file", str(node_file), "--edges-file", str(edge_file)]
+
+
+def test_dense_cycles_give_a_partial_report(tmp_path):
+    output = tmp_path / "report.xlsx"
+    inputs = write_inputs(tmp_path, *complete_digraph(10))
+    tool.main(["analyze", *inputs, "--output-file", str(output), "--steps", "cycles,scc"])
+    sheets = pd.read_excel(output, sheet_name=None)
+    assert sheets["cycles"]["Cycle_Index"].nunique() == analyze.DEFAULT_MAX_CYCLES
+    assert set(sheets["cycles"]["Cycles_Complete"]) == {False}
+    assert len(sheets["scc"]) == 10
+
+
+def test_interrupted_step_writes_no_report(tmp_path, monkeypatch, caplog):
+    output = tmp_path / "report.xlsx"
+    inputs = write_inputs(tmp_path, nodes(), edges())
+
+    def interrupt(self, subgraph=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(analyze.GraphAnalyzer, "compute_metrics", interrupt)
+    with caplog.at_level("INFO", logger="ado_tool"), pytest.raises(SystemExit) as exit_info:
+        tool.main(["analyze", *inputs, "--output-file", str(output), "--steps", "scc,metrics"])
+    assert exit_info.value.code == 130
+    assert not output.exists()
+    assert "Running step 2/2: metrics" in caplog.text
+    assert "Step scc finished" in caplog.text
+    assert "Interrupted during step metrics" in caplog.text
+
+
+def test_cr_scope_without_crs_names_each_column_once():
+    links = pd.DataFrame([(2, 3, "Blocks")], columns=edges().columns)
+    no_crs = nodes()[nodes()["WorkItemType"] != "Change Request"]
+    for effort_field in ("", "Effort"):
+        empty = analyze.GraphAnalyzer(no_crs, links, effort_field=effort_field)
+        columns = list(empty.analyze_cr_scope_and_impact().columns)
+        assert len(columns) == len(set(columns))
+        assert "Impacted_WI_Count" in columns
+    assert list(empty.analyze_cr_scope_and_impact().columns)[2] == "Total_Effort"
