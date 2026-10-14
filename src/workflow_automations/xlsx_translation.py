@@ -1053,7 +1053,10 @@ def verify_source(source: Source, manifest: dict) -> None:
 def apply_language(chosen: str | None, targets: list[str]) -> str:
     """The language one apply run writes; a bundle's IDs and source checks serve any of them."""
     if chosen is not None:
-        return language_tag(chosen)
+        language_tag(chosen)
+        # Extraction rejects case-only differences, so a case variant means the listed tag.
+        listed = {target.casefold(): target for target in targets}
+        return listed.get(chosen.casefold(), chosen)
     if len(targets) > 1:
         raise ValidationError(
             f"Bundle has several target languages ({', '.join(targets)}); "
@@ -1073,6 +1076,7 @@ def apply(args) -> tuple[dict, int]:
     if not args.overwrite and (output.exists() or report_path.exists()):
         raise ValidationError("Output or report already exists; use --overwrite explicitly")
     manifest = load_manifest(args.manifest)
+    target = apply_language(args.target_language, manifest_targets(manifest))
     unchanged = manifest.get("fast_check") == fast_check(args.input, manifest)
     # An untouched workbook and manifest need no cell-by-cell re-verification.
     source = open_source(args.input, manifest["sheet"]) if unchanged else None
@@ -1081,7 +1085,6 @@ def apply(args) -> tuple[dict, int]:
     try:
         if not unchanged:
             verify_source(source, manifest)
-        target = apply_language(args.target_language, manifest_targets(manifest))
         delimiter = args.delimiter or manifest["delimiter"]
         validate_delimiter(delimiter)
         resolved, missing, duplicates = resolve_translations(

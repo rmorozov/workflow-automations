@@ -95,7 +95,8 @@ layout is the one above. With several, each language-specific output carries its
 records `target_languages` in the given order and `target_language` as the first of
 them; a manifest without the list has only `target_language`. `apply
 --target-language` selects the language to write and is required when the manifest
-lists several; it may also name a language the extraction did not list, so an
+lists several. A tag differing from a listed one only in case means the listed tag.
+It may also name a language the extraction did not list, so an
 earlier bundle serves a new language without re-extraction, although the bundle then
 has no template or prompt for it. Each language applies to its own output, or to the
 previous language's output, which still holds the unchanged source sheet.
@@ -141,6 +142,10 @@ IDs; skip a unit whose reply already has the expected row count, so runs resume.
 Finally run `apply` with the original workbook's absolute path, the bundle manifest,
 every reply path listed explicitly, and output `translated.<language>.xlsx` in the
 bundle. `apply` validation is unchanged and remains the authority on completeness.
+A bundle with several target languages has one prompt per language,
+`agent_prompt.<language>.md`, over the same units; its rules come from
+`prompt.<language>.txt`, its replies go to `replies/<language>/<unit file name>`, and
+its apply command adds `--target-language <language>`.
 
 ## Mapping validation and application
 
@@ -282,6 +287,6 @@ synthetic 50,000-row, 10-column sheet with two translated columns: apply took 21
 before this design, 2.8 s with an unchanged source and about 10 s when the source
 must be re-verified; extraction about 7 s.
 
-Deferred: JSON configuration, reusable translation memories, pending-only batch regeneration, row-context keys, token-aware
-batching, source CSV tables, placeholder validators, full Excel fidelity and API
+Deferred: JSON configuration, reusable translation memories, pending-only batch
+regeneration, row-context keys, token-aware batching, source CSV tables, placeholder validators, full Excel fidelity and API
 translation. See [backlog](../backlog/README.md).

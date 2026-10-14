@@ -1097,3 +1097,44 @@ def test_multilingual_agent_prompts_follow_their_own_checklists(source, tmp_path
         )
         assert status == 0
         assert load_workbook(output)[f"Data_{language}"]["A2"].value == f"{language}:Открыто"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_apply_names_a_language_the_extraction_did_not_list(source, tmp_path, legacy):
+    if legacy:
+        bundle, manifest = extraction(source, tmp_path)
+        del manifest["target_languages"]
+        (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False))
+    else:
+        status, bundle = multilingual(source, tmp_path)
+        manifest = json.loads((bundle / "manifest.json").read_text())
+    records = [(e["text_id"], "FR:" + e["source_text"]) for e in manifest["entries"]]
+    french = language_reply(tmp_path / "fr.csv", "fr", records)
+    status, output = application(source, bundle, [french], tmp_path, "--target-language", "fr")
+    assert status == 0
+    assert json.loads(output.with_suffix(".report.json").read_text())["target_language"] == "fr"
+    assert load_workbook(output)["Data_fr"]["A2"].value == "FR:Открыто"
+
+
+def test_case_variant_of_a_listed_language_means_that_language(source, tmp_path):
+    status, bundle = multilingual(source, tmp_path)
+    manifest = json.loads((bundle / "manifest.json").read_text())
+    records = [(e["text_id"], "DE:" + e["source_text"]) for e in manifest["entries"]]
+    german = language_reply(tmp_path / "de.csv", "de", records)
+    status, output = application(source, bundle, [german], tmp_path, "--target-language", "DE")
+    assert status == 0
+    assert json.loads(output.with_suffix(".report.json").read_text())["target_language"] == "de"
+    assert "Data_de" in load_workbook(output).sheetnames
+
+
+def test_missing_language_choice_fails_before_reading_the_source(source, tmp_path, monkeypatch):
+    status, bundle = multilingual(source, tmp_path)
+    english = language_reply(tmp_path / "en.csv", "en", [])
+
+    def unread(*_args):
+        raise AssertionError("source read before the language was chosen")
+
+    monkeypatch.setattr(tool, "read_source", unread)
+    monkeypatch.setattr(tool, "open_source", unread)
+    status, output = application(source, bundle, [english], tmp_path)
+    assert status == 2 and not output.exists()

@@ -103,7 +103,9 @@ reply path to write, the reply rules and column context, and the final `apply`
 command with every reply path filled in. The agent reads one unit at a time, writes
 `replies/<unit>.csv`, checks it, and skips units that already have a complete reply,
 so a small context window and an interrupted run both work. Use `--batch-max-rows`
-to keep each unit small. The prompt is written only when CSV units exist.
+to keep each unit small. The prompt is written only when CSV units exist. With
+several target languages there is one prompt per language, such as
+`agent_prompt.de.md`, writing to `replies/de/`.
 
 Use `--formats csv` or `--formats xlsx` to select extraction formats. Deduplication
 is per column by default; `--dedupe-scope global` shares a dictionary across columns
