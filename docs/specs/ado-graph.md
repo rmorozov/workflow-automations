@@ -128,18 +128,22 @@ The summary also counts the ADO requests the export makes:
 
 - one saved-query call (not paged);
 - one work-item batch request per fetch batch of up to `--batch-size` IDs (at most
-  200), so at least ⌈fetched ÷ batch size⌉, and more when a BFS level leaves a short
-  batch;
-- with `stop` and an active filter only (the default `--skip-types` list is one),
-  at most one WIQL filter call per fetch batch, each over up to 1,000 unchecked IDs. One call is one WIQL query (one page),
-  plus one existence query when it rejects any ID. `follow`, or no filter, makes no
-  WIQL calls.
+  200), so at least ⌈fetched ÷ batch size⌉, and more when the queue holds fewer IDs
+  than the batch size at fetch time;
+- with `stop` and an active filter only (the default `--skip-types` list is one), at
+  most one WIQL filter call before each fetch batch, each over up to 1,000 unchecked
+  IDs, plus one more when a call prunes every ID left in the queue, so at most
+  batches + 1 calls. One call is one WIQL query (one page), plus one existence query
+  when it rejects any ID. `follow`, or no filter, makes no WIQL calls.
 
 Measured in the tests: 2,000 seeds at `--batch-size 100` with one Task skipped take
 1 saved query, 2 WIQL filter calls and 20 batches with `stop` (1 pruned, 1,999
 fetched), and 1 saved query, 0 WIQL calls and 20 batches with `follow` (2,000
 fetched). In a small graph where one filter call of three rejects IDs, the three
-calls make four WIQL queries.
+calls make four WIQL queries. When the last filter call prunes everything still
+queued, the run makes one filter call more than batches (2 calls and 1 batch for one
+seed linking only to a pruned Task; 1 call and 0 batches when the only seed is
+pruned).
 
 Recognized relations: hierarchy forward, affects forward/reverse, blocks
 forward/reverse, dependency forward/reverse, implements forward/reverse. Hierarchy

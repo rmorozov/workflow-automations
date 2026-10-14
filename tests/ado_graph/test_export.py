@@ -260,6 +260,12 @@ RECONCILE_CASES = {
         dict(items={1: wi(1, targets=[2, 3]), 3: wi(3, targets=[1, 4])}, seeds=[1]),
         (),
     ),
+    "duplicate-seeds": (dict(items=chain(12), seeds=[1, 2, 2, 1]), ()),
+    "last-call-prunes-queue": (
+        dict(items={1: wi(1, targets=[2]), 2: wi(2, "Task")}, seeds=[1], rejected={2}),
+        ("--skip-types", "Task"),
+    ),
+    "every-seed-pruned": (dict(items={1: wi(1, "Task")}, seeds=[1], rejected={1}), ()),
     "failed-seed": (dict(items=chain(10), seeds=[1, 99, 2]), ("--batch-size", "1")),
 }
 
@@ -281,6 +287,10 @@ def test_counters_reconcile_with_observed_ids_and_requests(tmp_path, monkeypatch
     assert counts["visited"] == len([i for i in log["fetched"] if i in kwargs["items"]])
     assert counts["omitted"] == len([i for i in log["fetched"] if i not in kwargs["items"]])
     assert counts["pruned"] == len(set(log["filtered"]) & set(kwargs.get("rejected", ())))
+    if not counts["queued"]:
+        # Every distinct ID the fake ADO saw is a seed or a first-time link.
+        seen = set(log["filtered"]) | set(log["fetched"]) | set(kwargs["seeds"])
+        assert counts["seeds"] + counts["linked"] == len(seen)
     assert counts["seeds"] + counts["linked"] == (
         counts["pruned"] + counts["fetched"] + counts["queued"]
     )
@@ -343,3 +353,20 @@ def test_documented_wiql_requests_per_filter_call(tmp_path, monkeypatch, capsys)
     assert [filtered for filtered, _ in log["wiql"]] == [True, True, False, True]
     assert log["batches"] == [[1], [3, 4], [5]] and counts["batch_fetch"] == 3
     assert (counts["pruned"], counts["omitted"], counts["exported"]) == (1, 1, 3)
+
+
+@pytest.mark.parametrize(
+    ("items", "seeds", "requests"),
+    [
+        ({1: wi(1, targets=[2]), 2: wi(2, "Task")}, [1], (2, 1)),
+        ({1: wi(1, "Task")}, [1], (1, 0)),
+    ],
+)
+def test_last_filter_call_can_prune_the_whole_queue(tmp_path, monkeypatch, items, seeds, requests):
+    """AG-011 review: WIQL filter calls are at most batches + 1, as documented."""
+    fake, log = counting_client(items, seeds, rejected={2} if 2 in items else {1})
+    try:
+        run_export(monkeypatch, tmp_path, fake, "--skip-types", "Task")
+    except SystemExit:
+        pass
+    assert (log["calls"]["wiql_filter"], log["calls"]["batch_fetch"]) == requests
