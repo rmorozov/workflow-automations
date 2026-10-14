@@ -3,6 +3,7 @@
 import datetime as dt
 import os
 import time
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -62,7 +63,7 @@ def test_analyze_parquet_to_all_report_sheets(tmp_path):
     )
     workbook = load_workbook(output)
     try:
-        assert workbook.sheetnames == list(analyze.ALL_STEPS)
+        assert workbook.sheetnames == ["About", "Config", "Summary", *analyze.ALL_STEPS]
         assert workbook["orphans"]["A2"].value == 4
         assert workbook["cr_scope_impact"]["C2"].value == 5
     finally:
@@ -82,7 +83,7 @@ def test_analyze_refuses_existing_report_without_overwrite(tmp_path, capsys):
     run_analyze(node_file, edge_file, output, "--overwrite")
     workbook = load_workbook(output)
     try:
-        assert workbook.sheetnames == ["orphans"]
+        assert workbook.sheetnames == ["About", "Config", "Summary", "orphans"]
     finally:
         workbook.close()
 
@@ -466,3 +467,239 @@ def test_write_timing_includes_the_workbook_save(tmp_path, monkeypatch):
         {"s": pd.DataFrame({"a": [1]})}, tmp_path / "r.xlsx", timings=timings
     )
     assert timings["write"] >= 0.2
+
+
+def tangled_graph():
+    """Two cycles in one component, a parallel link, two CRs and a bridge."""
+    graph_nodes = pd.DataFrame(
+        [
+            {"WI_ID": i, "Title": f"Item {i}", "WorkItemType": kind, "Effort": 1, "In_Scope": True}
+            for i, kind in [
+                (1, "Change Request"),
+                (2, "Feature"),
+                (3, "Feature"),
+                (4, "Feature"),
+                (5, "Change Request"),
+                (6, "Feature"),
+                (7, "Feature"),
+                (8, "Feature"),
+            ]
+        ]
+    )
+    graph_nodes.loc[graph_nodes["WI_ID"] == 8, "In_Scope"] = False
+    links = pd.DataFrame(
+        [
+            (1, 2, "Blocks"),
+            (2, 3, "Blocks"),
+            (3, 2, "Blocks"),
+            (3, 4, "Predecessor->Successor"),
+            (4, 3, "Blocked By"),
+            (4, 2, "Blocks"),
+            (5, 6, "Parent->Child"),
+            (6, 8, "Affects"),
+            (8, 7, "Affects"),
+            (1, 5, "Implements"),
+        ],
+        columns=["Source_ID", "Target_ID", "Link_Type"],
+    )
+    return graph_nodes, links
+
+
+def analyze_files(tmp_path, graph_nodes, links, name, *extra):
+    node_file, edge_file = tmp_path / f"{name}.nodes.parquet", tmp_path / f"{name}.edges.parquet"
+    graph_nodes.to_parquet(node_file, index=False)
+    links.to_parquet(edge_file, index=False)
+    output = tmp_path / f"{name}.xlsx"
+    tool.main(
+        [
+            "analyze",
+            "--nodes-file",
+            str(node_file),
+            "--edges-file",
+            str(edge_file),
+            "--output-file",
+            str(output),
+            "--effort-field",
+            "Effort",
+            "--ado-url",
+            "https://ado.example/Coll/",
+            *extra,
+        ]
+    )
+    return output
+
+
+def cell_values(path):
+    workbook = load_workbook(path)
+    try:
+        return {
+            sheet.title: [list(row) for row in sheet.iter_rows(values_only=True)]
+            for sheet in workbook
+        }
+    finally:
+        workbook.close()
+
+
+def test_repeat_runs_on_shuffled_input_rows_give_identical_cells(tmp_path):
+    graph_nodes, links = tangled_graph()
+    first = cell_values(analyze_files(tmp_path, graph_nodes, links, "first"))
+    shuffled = cell_values(
+        analyze_files(
+            tmp_path,
+            graph_nodes.sample(frac=1, random_state=3),
+            links.sample(frac=1, random_state=7),
+            "second",
+        )
+    )
+    # Only the input file names differ between the two runs.
+    for values in (first, shuffled):
+        for sheet in ("About", "Config"):
+            values[sheet] = [row for row in values[sheet] if "file" not in str(row[0])]
+    assert first == shuffled
+
+
+def test_result_sheets_list_members_in_a_fixed_order(tmp_path):
+    graph_nodes, links = tangled_graph()
+    sheets = pd.read_excel(analyze_files(tmp_path, graph_nodes, links, "order"), sheet_name=None)
+    cycles = sheets["cycles"].groupby("Cycle_Index")["Node_ID"].apply(list).tolist()
+    assert cycles == [[2, 3], [2, 3, 4]]
+    scc = sheets["scc"]
+    assert scc["WI_ID"].tolist()[:3] == [2, 3, 4]  # largest component first
+    assert scc.loc[3:, "WI_ID"].tolist() == [1, 5, 6, 7]
+    assert sheets["metrics"]["WI_ID"].tolist() == [1, 2, 3, 4, 5, 6, 7]
+    assert sheets["orphans"].empty
+    unpacked = sheets["cr_impact_unpacked"]
+    assert unpacked[["CR_ID", "Impacted_WI_ID"]].values.tolist() == [
+        [1, 2],
+        [1, 3],
+        [1, 4],
+        [1, 5],
+        [1, 6],
+        [1, 7],
+        [5, 6],
+        [5, 7],
+    ]
+    assert sheets["cr_scope_impact"]["Impacted_WI_IDs"].tolist() == ["2,3,4,5,6,7", "6,7"]
+
+
+def test_cycles_start_at_their_smallest_member_shortest_first():
+    links = pd.DataFrame(
+        [(3, 1, "Blocks"), (1, 2, "Blocks"), (2, 3, "Blocks"), (4, 2, "Blocks"), (2, 4, "Blocks")],
+        columns=edges().columns,
+    )
+    cycles = analyze.GraphAnalyzer(nodes(), links).find_cycles()
+    members = cycles.groupby("Cycle_Index")["Node_ID"].apply(list).tolist()
+    assert members == [[2, 4], [1, 2, 3]]
+
+
+def test_equally_long_chains_pick_the_one_with_the_smallest_items():
+    links = pd.DataFrame([(3, 4, "Blocks"), (1, 2, "Blocks")], columns=edges().columns)
+    for order in (links, links.iloc[::-1]):
+        chain = analyze.GraphAnalyzer(nodes(), order).find_longest_chain()
+        assert chain["WI_ID"].tolist() == [1, 2]
+
+
+def test_report_opens_with_about_config_and_summary_and_ends_with_unpacked(tmp_path):
+    graph_nodes, links = tangled_graph()
+    output = analyze_files(
+        tmp_path,
+        graph_nodes,
+        links,
+        "front",
+        "--steps",
+        "cr_impact_unpacked,cycles,scc@dependency",
+    )
+    workbook = load_workbook(output)
+    try:
+        assert workbook.sheetnames == [
+            "About",
+            "Config",
+            "Summary",
+            "cycles",
+            "scc@dependency",
+            "cr_impact_unpacked",
+        ]
+        about = dict(workbook["About"].iter_rows(min_row=2, values_only=True))
+        assert about["Work items loaded"] == 8
+        assert about["Links loaded"] == 10
+        assert about["Out-of-scope bridge items (contracted)"] == 1
+        assert about["Work items analyzed"] == 7
+        assert about["Complete"] == "yes"
+        assert "hops" in about["Purpose"]
+        config = dict(workbook["Config"].iter_rows(min_row=2, values_only=True))
+        assert config["steps"] == "cr_impact_unpacked,cycles,scc@dependency"
+        assert config["sheets"] == "cycles, scc@dependency, cr_impact_unpacked"
+        assert config["max_cycles"] == analyze.DEFAULT_MAX_CYCLES
+
+        summary = workbook["Summary"]
+        rows = list(summary.iter_rows(min_row=2, values_only=True))
+        assert [row[:7] for row in rows] == [
+            ("cycles", "cycles", "all", 5, 2, "cycles", True),
+            ("scc@dependency", "scc", "dependency", 7, 5, "components", True),
+            ("cr_impact_unpacked", "cr_impact_unpacked", "all", 8, 2, "change requests", True),
+        ]
+        assert rows[1][7] == "1 with more than one member"
+        link = summary["A3"].hyperlink
+        assert link.location == "'scc@dependency'!A1"
+
+        cycles = workbook["cycles"]
+        assert cycles.auto_filter.ref == cycles.dimensions
+        assert cycles.freeze_panes == "A2"
+        url_column = [c.value for c in cycles[1]].index("WI_URL") + 1
+        url_cell = cycles.cell(row=2, column=url_column)
+        assert url_cell.value == "https://ado.example/Coll/_workitems/edit/2"
+        assert url_cell.hyperlink.target == url_cell.value
+    finally:
+        workbook.close()
+
+
+def test_summary_marks_budgeted_steps_incomplete(tmp_path):
+    graph_nodes, links = tangled_graph()
+    analyzer = analyze.GraphAnalyzer(
+        graph_nodes, links, effort_field="Effort", max_cycles=1, centrality_sources=2
+    )
+    results = {"cycles": analyzer.find_cycles(), "metrics": analyzer.compute_metrics()}
+    steps = [("cycles", "cycles", None), ("metrics", "metrics", None)]
+    summary = analyze.summarize_results(results, steps, {})
+    assert summary["Complete"].tolist() == [False, False]
+    assert "cycle budget" in summary.loc[0, "Note"]
+    assert summary.loc[1, "Note"] == "betweenness sampled from 2 sources"
+    args = SimpleNamespace(nodes_file="n.parquet", edges_file="e.parquet")
+    about = analyze.about_frame(args, analyzer, summary).set_index("Item")["Value"]
+    assert about["Complete"] == "no: cycles, metrics"
+
+
+def test_summary_names_the_spill_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(report, "EXCEL_MAX_ROWS", 2)
+    output = tmp_path / "report.xlsx"
+    results = {"orphans": nodes()}
+    spills = report.plan_analysis_report(results, output)
+    summary = analyze.summarize_results(results, [("orphans", "orphans", None)], spills)
+    assert summary.loc[0, "Note"].startswith("rows written to report.orphans.csv")
+
+
+def test_url_links_stop_at_excels_per_sheet_limit(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(report, "EXCEL_MAX_HYPERLINKS", 2)
+    urls = [f"https://ado.example/_workitems/edit/{i}" for i in range(3)]
+    output = tmp_path / "report.xlsx"
+    report.write_analysis_report(
+        {"many": pd.DataFrame({"WI_URL": urls}), "few": pd.DataFrame({"WI_URL": urls[:2]})},
+        output,
+    )
+    workbook = load_workbook(output)
+    try:
+        assert workbook["many"]["A2"].hyperlink is None
+        assert workbook["few"]["A2"].hyperlink.target == urls[0]
+    finally:
+        workbook.close()
+    assert "Sheet 'many': 3 work-item URLs exceed Excel's 2 hyperlinks" in caplog.text
+
+
+def test_preamble_sheets_never_take_a_result_sheets_name(tmp_path):
+    with pytest.raises(ValueError, match="share a name"):
+        report.write_analysis_report(
+            {"summary": pd.DataFrame({"a": [1]})},
+            tmp_path / "report.xlsx",
+            preamble={"Summary": pd.DataFrame({"b": [1]})},
+        )
+    assert not (tmp_path / "report.xlsx").exists()

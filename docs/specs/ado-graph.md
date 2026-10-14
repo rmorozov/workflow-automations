@@ -298,8 +298,27 @@ source instead, which could be lower.
 
 The `longest_chain` sheet repeats the chain's hop count in a `Chain_Length` column
 on every row (the DataFrame attr `longest_path_length` and the log carry the same
-value). Set iteration and ties may change row order and which of several equally
-long chains is listed; deterministic report ordering is not guaranteed.
+value).
+
+Output order is deterministic and independent of the row order of the input files:
+the analyzer sorts nodes by `WI_ID` and edges by source, target and label before
+building the graph, so bridges are contracted in ID order and every traversal is
+repeatable. Within the sheets:
+
+| Sheet | Row order |
+| --- | --- |
+| `cycles` | Each cycle starts at its smallest member and keeps its direction; cycles shortest first, then by member sequence; `Cycle_Index` follows that order |
+| `scc` | Largest component first, ties by smallest member; members ascending; `SCC_Index` follows that order |
+| `longest_chain` | Chain order; among equally long chains, the one met first when components are visited by their smallest member; members of a component ascending |
+| `orphans`, `no_cr_dep`, `has_cr_dep`, `metrics` | `WI_ID` ascending |
+| `cr_scope_impact`, `cr_prereqs` | Effort total or count descending, ties by `CR_ID`; the ID lists ascending |
+| `cr_impact_unpacked`, `cr_prereqs_unpacked` | `CR_ID`, then the related item's ID |
+| neighbor debug column | Predecessors, then successors, each by ID |
+
+`longest_chain` keeps `SCC_Index` from the condensation of its own step, which is
+not the `scc` sheet's index. When `cycles` stops at its budget, the cycles listed are
+the first ones networkx enumerates on that graph, so the same snapshot and settings
+list the same cycles.
 
 Both measures count links (hops), not time. The graph has no duration, effort-based
 scheduling, capacity or calendar model, so the longest chain is the longest
@@ -333,7 +352,29 @@ was interrupted and exits with code 130; the report is published only after ever
 step, so nothing is written.
 
 Analysis writes requested sheets, no index, with widths capped at 50. `all` runs
-every step within the budgets above.
+every step within the budgets above. The workbook describes itself in three sheets
+before the results:
+
+| Sheet | Content |
+| --- | --- |
+| `About` | `Item`/`Value` rows: purpose, how to read the report, tool version, the input files, work items and links loaded, relations after normalization, links skipped for an absent endpoint or an unknown type, bridge items contracted or dropped, work items analyzed, result-sheet count, and `Complete` (`yes`, or `no:` with the partial sheets) |
+| `Config` | `Setting`/`Value` rows: input and output file, `ado_url`, `effort_field`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
+| `Summary` | One row per result sheet: `Sheet` (a link to it), `Step`, `Subgraph`, `Rows`, a headline `Count` and what it `Counted`, `Complete` and `Note` |
+
+The headline count is cycles for `cycles`, components for `scc` (the note adds how
+many have more than one member), hops for `longest_chain`, change requests for the CR
+sheets and work items for the others. `Complete` is False for `cycles` stopped at its
+budget and for `metrics` with sampled betweenness, and the note says why; the note
+also names a sheet's spill file. Result sheets follow in the requested order, except
+that the one-row-per-pair `cr_impact_unpacked` and `cr_prereqs_unpacked` sheets
+(on any subgraph) come last. No sheet records the time of the run, so repeat runs
+on the same snapshot and settings give the same cells.
+
+Every sheet has a filter on its heading row, which is frozen in view. Values in
+columns whose name ends in `URL` (`WI_URL`, `CR_WI_URL`, ...) that start with
+`http://` or `https://` are hyperlinks; they are empty without `--ado-url`. Excel
+opens at most 65,530 hyperlinks per worksheet, so a sheet with more URL values keeps
+them all as text and logs a warning.
 Excel limits and column sizing are described under
 [Files, errors and current limitations](#files-errors-and-current-limitations).
 
