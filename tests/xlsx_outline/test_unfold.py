@@ -1,5 +1,7 @@
 """Reverse contracts: outlines (generated or hand-edited) unfold into XLSX tables."""
 
+from datetime import date, datetime, time
+
 import pytest
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
@@ -454,3 +456,84 @@ def test_detail_names_containing_semicolons_round_trip(tmp_path, capsys):
     assert "- Owner: Ann; Due\; phase: Soon <!-- rows: 2 -->" in text
     assert "- Due\; phase: Later <!-- rows: 3 -->" in text
     assert new == merged == rows
+
+
+TYPED_ROWS = [
+    ["Kind", "Value"],
+    ["whole", 42],
+    ["negative", -7],
+    ["fraction", 0.1],
+    ["date", datetime(2024, 1, 2)],
+    ["date-time", datetime(2024, 1, 2, 3, 4, 5, 123000)],
+    ["time", time(3, 4, 5)],
+    ["code", "007"],
+    ["id", "1234567890123456"],
+    ["flag", True],
+]
+
+
+def test_retype_restores_numbers_and_dates(tmp_path, capsys):
+    md = outline(tmp_path, capsys, "--levels", "1", rows=TYPED_ROWS)
+    plain, typed = tmp_path / "plain.xlsx", tmp_path / "typed.xlsx"
+    assert unfold(capsys, "--input", md, "--output", plain)[0] == 0
+    assert unfold(capsys, "--input", md, "--output", typed, "--retype")[0] == 0
+    # Without the option every value stays text, as before.
+    assert table(plain) == [[k, xlsx_outline.text(v)] for k, v in TYPED_ROWS]
+    # Leading zeros, IDs beyond Excel's precision and booleans stay text.
+    assert table(typed) == [
+        *TYPED_ROWS[:7],
+        *[[k, xlsx_outline.text(v)] for k, v in TYPED_ROWS[7:]],
+    ]
+    sheet = load_workbook(typed).active
+    assert sheet["B5"].number_format == "yyyy-mm-dd"
+    assert [sheet[f"A{row}"].data_type for row in range(1, 11)] == ["s"] * 10
+
+
+def test_retype_keeps_other_spellings_as_text(tmp_path, capsys):
+    spellings = [
+        "1.50", "1e3", "-0", "+5", "1_000", "inf", "=1+1", "12:30", "2024-1-2",
+        "2024-02-30", "2024-01-02T03:04:05", "2024-01-02 00:00:00", "1899-12-31",
+        "2024-01-02 03:04:05+00:00", "2024-01-02 03:04:05.123456", "TRUE",
+    ]  # fmt: skip
+    md = tmp_path / "hand.md"
+    md.write_text("".join(f"- {value}\n" for value in ["2024", *spellings]))
+    result = tmp_path / "back.xlsx"
+    assert unfold(capsys, "--input", md, "--output", result, "--retype")[0] == 0
+    sheet = load_workbook(result).active
+    assert (sheet["A1"].value, sheet["A1"].data_type) == ("Level 1", "s")
+    assert sheet["A2"].value == 2024
+    assert [(cell.value, cell.data_type) for (cell,) in sheet.iter_rows(min_row=3)] == [
+        (value, "s") for value in spellings
+    ]
+
+
+def test_merge_retypes_only_edited_values(tmp_path, capsys):
+    path = tmp_path / "original.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    for row in [["Item", "Size", "Due"], ["A", 3, date(2024, 1, 2)], ["B", 5, "soon"]]:
+        ws.append(row)
+    ws["B3"].number_format = "0.00"
+    wb.save(path)
+    md = tmp_path / "plan.md"
+    argv = ["--input", path, "--output", md, "--levels", "1", "--row-ids", "--front-matter"]
+    assert xlsx_outline.main([str(a) for a in argv]) == 0
+    capsys.readouterr()
+    edited = (
+        md.read_text().replace("Due: 2024-01-02", "Due: 12").replace("Due: soon", "Due: 2025-03-04")
+    )
+    md.write_text(edited.replace("Size: 5", "Size: 2.5"))
+    plain, _ = merged(path, md, tmp_path, capsys)
+    assert values(plain) == [["Item", "Size", "Due"], ["A", 3, "12"], ["B", "2.5", "2025-03-04"]]
+    typed, out = merged(path, md, tmp_path, capsys, "--overwrite", "--retype")
+    assert values(typed) == [
+        ["Item", "Size", "Due"],
+        ["A", 3, 12],
+        ["B", 2.5, datetime(2025, 3, 4)],
+    ]
+    assert "2 updated" in out
+    sheet = typed["Data"]
+    # A number written over a date no longer displays as a date; other formats stay.
+    assert (sheet["C2"].number_format, sheet["B3"].number_format) == ("General", "0.00")
+    assert sheet["C3"].number_format == "yyyy-mm-dd"

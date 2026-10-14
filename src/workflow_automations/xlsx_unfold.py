@@ -13,6 +13,7 @@ import re
 import sys
 import tempfile
 from dataclasses import dataclass, field
+from datetime import date, datetime, time
 from pathlib import Path
 from zipfile import BadZipFile
 
@@ -27,6 +28,7 @@ from workflow_automations.xlsx_outline import (
     fill_down,
     fingerprint,
     read_table,
+    text,
 )
 
 HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
@@ -34,6 +36,9 @@ BULLET = re.compile(r"^( *)(?:[-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?$")
 # CommonMark: a backslash before ASCII punctuation is an escape.
 ESCAPED = re.compile(r"\\([!-/:-@\[-`{-~])")
 ROW_TAG = re.compile(r"[ \t]*<!--[ \t]*rows?:[ \t]*([0-9][0-9 ,]*?)[ \t]*-->[ \t]*$")
+NUMBER = re.compile(r"-?[0-9]+(?:\.[0-9]+)?(?:e[+-][0-9]+)?")
+# Excel keeps 15 significant digits; longer whole numbers (IDs) stay text.
+MAX_WHOLE = 10**15
 
 
 @dataclass
@@ -265,9 +270,48 @@ def validate_sheet_name(name: str) -> None:
         raise ValidationError("Invalid sheet name (maximum 31 characters, no \\ / * ? : [ ])")
 
 
-def literal(ws, row: int, column: int, value: str | None) -> None:
+def retyped(value: str):
+    """Return the number, date or time that xlsx-outline renders as `value`, else None.
+
+    Only text the outline itself would print for that value, and that Excel can store
+    exactly, is retyped: leading zeros, `1.50`, `1e3`, other date spellings, time
+    zones and sub-millisecond times stay text.
+    """
+    parsed = None
+    if NUMBER.fullmatch(value):
+        parsed = float(value) if any(c in value for c in ".e") else int(value)
+        if isinstance(parsed, int) and abs(parsed) >= MAX_WHOLE:
+            return None
+    else:
+        for kind in (datetime, time):
+            try:
+                parsed = kind.fromisoformat(value)
+                break
+            except ValueError:
+                continue
+        # Excel stores whole milliseconds and no time zone.
+        if parsed is None or parsed.tzinfo is not None or parsed.microsecond % 1000:
+            return None
+        if isinstance(parsed, datetime):
+            if parsed.year < 1900:
+                return None
+            # A date at midnight is stored as a date, so it keeps a date-only format.
+            if parsed.time() == time(0):
+                parsed = parsed.date()
+    rendered = text(datetime.combine(parsed, time(0)) if type(parsed) is date else parsed)
+    return parsed if rendered == value else None
+
+
+def literal(ws, row: int, column: int, value: str | None, retype: bool = False) -> None:
     if value is None:
         ws.cell(row, column).value = None
+        return
+    if retype and (typed := retyped(value)) is not None:
+        cell = ws.cell(row, column)
+        cell.value = typed
+        # A number written over a date-formatted cell would otherwise display as a date.
+        if cell.data_type == "n" and cell.is_date:
+            cell.number_format = "General"
         return
     if len(value.encode("utf-16-le")) // 2 > 32767 or ILLEGAL_CHARACTERS_RE.search(value):
         raise ValidationError(
@@ -279,14 +323,16 @@ def literal(ws, row: int, column: int, value: str | None) -> None:
     cell.data_type = "s"
 
 
-def new_workbook(sheet: str, headings: list[str], rows):
+def new_workbook(sheet: str, headings: list[str], rows, retype: bool = False):
     workbook = Workbook()
     ws = workbook.active
     ws.title = sheet
-    for row_number, values in enumerate([headings, *(values for _, values in rows)], 1):
+    for column, value in enumerate(headings, 1):
+        literal(ws, 1, column, value)
+    for row_number, (_, values) in enumerate(rows, 2):
         for column, value in enumerate(values, 1):
             if value is not None:
-                literal(ws, row_number, column, value)
+                literal(ws, row_number, column, value, retype)
     return workbook
 
 
@@ -301,7 +347,14 @@ def copy_cell(source, target) -> None:
         target.comment = copy.copy(source.comment)
 
 
-def merge(settings: Settings, headings: list[str], rows, into: Path, sheet: str | None):
+def merge(
+    settings: Settings,
+    headings: list[str],
+    rows,
+    into: Path,
+    sheet: str | None,
+    retype: bool = False,
+):
     """Rewrite the original sheet's data rows in outline order; return workbook and counts."""
     if settings.levels is None:
         raise ValidationError("Merging needs level column names (front matter or --columns)")
@@ -371,7 +424,7 @@ def merge(settings: Settings, headings: list[str], rows, into: Path, sheet: str 
         for column, value, original in zip(columns, values, before, strict=True):
             if tag is not None and value == original:
                 continue
-            literal(ws, target, column + 1, value)
+            literal(ws, target, column + 1, value, retype)
             changed = True
         updated += changed and tag is not None
     for row in range(len(plan) + 2, last + 1):
@@ -415,9 +468,9 @@ def run(args) -> str:
     root = parse_outline(lines, offset, settings.title)
     headings, rows = unfold(root, settings)
     if args.into is None:
-        save(new_workbook(args.sheet or "Outline", headings, rows), args.output)
+        save(new_workbook(args.sheet or "Outline", headings, rows, args.retype), args.output)
         return f"Unfolded {len(rows)} rows into {len(headings)} columns: {args.output}"
-    workbook, title, counts = merge(settings, headings, rows, args.into, args.sheet)
+    workbook, title, counts = merge(settings, headings, rows, args.into, args.sheet, args.retype)
     try:
         save(workbook, args.output)
     finally:
@@ -456,6 +509,11 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--blank-label", help="Item text that stands for a blank cell")
     root.add_argument("--raw", action="store_true", help="Do not unescape Markdown characters")
+    root.add_argument(
+        "--retype",
+        action="store_true",
+        help="Write number and date text in xlsx-outline's own format as typed cells",
+    )
     root.add_argument(
         "--fill-down",
         action="store_true",
