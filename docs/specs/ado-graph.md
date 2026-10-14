@@ -41,6 +41,7 @@ also when export fails.
 | `--skip-types` | Case-insensitive comma list of types marked out of scope; empty string disables |
 | `--include-projects` | Case-insensitive comma list of projects kept in scope; empty means all |
 | `--filtered-relations` | `stop` (default) or `follow`; whether relations of filtered items are traversed |
+| `--save-snapshot` | Also save the fetched work items as a JSON snapshot for offline `replay`; see [Snapshots and offline replay](#snapshots-and-offline-replay) |
 
 Default excluded types: Task, Bug, Test Case, Test Suite, Test Plan, Test Run,
 Shared Steps, Shared Parameter.
@@ -161,9 +162,13 @@ case-normalised `skip_types` and `include_projects` filters, and in `options` th
 `filtered_relations` policy, the producing `tool_version` and the run's
 `completeness` (`complete`, or `incomplete` when linked IDs were omitted). Pruned
 IDs are not fetched and are not in it. An existing snapshot file is refused before
-fetching unless `--overwrite` is passed, as is a path that is one of the export
-files. The snapshot is written, atomically, before the export files, so it is kept
-when writing the tables fails; an export that exits 5 writes neither.
+fetching unless `--overwrite` is passed, as are a directory and a path that is one
+of the export files (also through a link); as for the export files, a snapshot
+created at the path during the export is replaced. The snapshot is written,
+atomically, before the export files, so it is kept when writing the tables fails;
+an export that exits 5 writes neither. When the snapshot cannot be written (an
+unwritable path, a full disk, field values that are not JSON data) the error is
+logged, the export files are still written, and export exits 6, before exit 4.
 
 `ado-graph replay --snapshot PATH [--output-dir DIR] [--formats …] [--overwrite]`
 writes the export files of an `ado-graph` snapshot without contacting ADO, needing
@@ -333,6 +338,8 @@ orientation, report publication, traversal through filtered bridges in both
 relation modes, once-per-ID WIQL classification, omitted-ID reporting with
 export's exit codes 4 and 5, bridge contraction, export normalization (literal
 Excel text, identities, zoned dates, empty exports and schema errors) across all
-formats, offline analysis without the network extras, and CA-bundle cleanup. No
+formats, offline analysis without the network extras, CA-bundle cleanup, and
+snapshots saved by export replaying into identical export files offline (also
+without the network extras), with their provenance, consent and failure exits. No
 actual ADO server was used. Remaining fixes and shared-code opportunities with ADO
 scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).

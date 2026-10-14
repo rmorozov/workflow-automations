@@ -6,9 +6,10 @@ tool that saved it, and a complete scope can be reused by the other tool. The
 format lives in `workflow_automations.ado_common.snapshot`; each tool converts to
 and from it with its own adapter. Nothing here contacts ADO.
 
-The command-line options that save and replay snapshots are added separately:
-ado-graph's export (AG-012) and ado-triage (TR-009). This specification describes
-the format and the adapters they use.
+The command-line options that save and replay snapshots belong to each tool:
+ado-graph's `export --save-snapshot` and `replay` (see its
+[specification](ado-graph.md#snapshots-and-offline-replay)) and ado-triage's
+(TR-009). This specification describes the format and the adapters they use.
 
 ## File format, version 1
 
@@ -22,7 +23,7 @@ One UTF-8 JSON object:
 | `captured_at` | ISO 8601 UTC time the producer recorded |
 | `source` | `base_url`, `project`, `query_id` of the run |
 | `filters` | Producer's scope filters, each a list of strings |
-| `options` | Other producer settings needed for replay |
+| `options` | Other producer settings needed for replay, and provenance: `tool_version` (the producer's package version) and `completeness` (`complete` or `incomplete`, as the producer reported the run); readers derive completeness from `omitted` and accept snapshots without these keys |
 | `roots` | IDs the saved query returned, in query order |
 | `items` | Fully fetched work items in fetch order: `id`, `fields` (every field as ADO returned it), `relations` (`rel`, `url` or null) |
 | `linked` | Partial fields of items fetched only for labels, keyed by ID as a string |

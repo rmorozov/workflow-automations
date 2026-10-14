@@ -3,6 +3,8 @@
 import json
 import subprocess
 import sys
+from datetime import datetime
+from importlib.metadata import version
 from types import SimpleNamespace
 
 import pandas as pd
@@ -13,7 +15,6 @@ from workflow_automations import ado_graph as tool
 from workflow_automations import ado_triage as triage
 from workflow_automations.ado_common.snapshot import load_snapshot
 from workflow_automations.ado_graph import client, export
-from workflow_automations.ado_graph import snapshot as graph_snapshot
 
 BASE = "https://ado.example/tfs/Collection"
 HIERARCHY = "System.LinkTypes.Hierarchy-Forward"
@@ -145,7 +146,7 @@ def test_snapshot_records_provenance(monkeypatch, tmp_path):
     assert snap.filters == {"skip_types": ["task"], "include_projects": ["example"]}
     assert snap.options == {
         "filtered_relations": "stop",
-        "tool_version": graph_snapshot.tool_version(),
+        "tool_version": version("workflow-automations"),
         "completeness": "incomplete",
     }
     assert snap.captured_at.endswith("+00:00")
@@ -189,6 +190,50 @@ def test_one_snapshot_feeds_graph_and_triage_offline(monkeypatch, tmp_path):
     assert set(read_export(tmp_path / "replayed")[0]["WI_ID"]) == {1, 2, 3, 4, 6}
     scope = triage.snapshot_from_raw(load_snapshot(path))
     assert [item["id"] for item in scope.items] == SEEDS
+    cfg = triage.Settings(as_of=datetime(2026, 10, 1), base_url=BASE)
+    master = triage.build_master(scope, {}, cfg)
+    assert len(master) == len(SEEDS)
+    assert not triage.build_relations(scope, cfg).empty
+
+
+def test_snapshot_created_during_the_export_is_replaced(monkeypatch, tmp_path):
+    """Consent is checked when the run starts, as for the export files."""
+    path = tmp_path / "snap.json"
+    fake, _ = fake_client(GRAPH, SEEDS)
+
+    class Racing(fake):
+        def run_query_by_id(self, project, query):
+            path.write_text("created meanwhile", encoding="utf-8")
+            return super().run_query_by_id(project, query)
+
+    monkeypatch.setattr(export, "ADOClient", Racing)
+    monkeypatch.setattr(export, "configure_ca_bundle", lambda _path: None)
+    run(export_argv(tmp_path / "out", "--save-snapshot", str(path)), export.EXIT_INCOMPLETE)
+    assert load_snapshot(path).roots == SEEDS
+
+
+def test_failed_snapshot_still_writes_the_export(monkeypatch, tmp_path):
+    use_client(monkeypatch)
+
+    def fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(export, "save_snapshot", fail)
+    out = tmp_path / "out"
+    run(
+        export_argv(out, "--save-snapshot", str(tmp_path / "snap.json")),
+        export.EXIT_SNAPSHOT_FAILED,
+    )
+    assert set(read_export(out)[0]["WI_ID"]) == {1, 4, 6}
+    assert not (tmp_path / "snap.json").exists()
+
+
+def test_snapshot_directory_is_refused_before_fetching(monkeypatch, tmp_path):
+    log = use_client(monkeypatch)
+    with pytest.raises(SystemExit) as exit_info:
+        tool.main(export_argv(tmp_path / "out", "--save-snapshot", str(tmp_path), "--overwrite"))
+    assert exit_info.value.code == 2
+    assert log["fetched"] == []
 
 
 def test_existing_snapshot_is_refused_before_fetching(monkeypatch, tmp_path):

@@ -12,7 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-from workflow_automations.ado_common.snapshot import save_snapshot, utc_timestamp
+from workflow_automations.ado_common.snapshot import SnapshotError, save_snapshot, utc_timestamp
 from workflow_automations.ado_graph.client import (
     ADO_BATCH_LIMIT,
     FIELD_RENAME,
@@ -27,9 +27,11 @@ from workflow_automations.ado_graph.report import _export_dataframes
 log = logging.getLogger("ado_tool")
 
 # Exit codes: 4 = outputs written but some linked IDs were omitted by ADO;
-# 5 = seed IDs from the saved query were omitted, nothing written.
+# 5 = seed IDs from the saved query were omitted, nothing written;
+# 6 = outputs written but the --save-snapshot file could not be written.
 EXIT_INCOMPLETE = 4
 EXIT_SEEDS_MISSING = 5
+EXIT_SNAPSHOT_FAILED = 6
 
 
 # ---------------------------------------------------------------------------
@@ -471,15 +473,28 @@ def run_export(args: argparse.Namespace) -> None:
     )
 
     # 7. Snapshot first: it is the raw record even if writing the tables fails.
+    # A failed snapshot must not lose the fetch, so the tables are still written.
+    snapshot_saved = True
     if getattr(args, "save_snapshot", None):
-        _save_snapshot(
-            args, fetched_items, initial_ids, stats, skip_types, include_projects, captured_at
-        )
+        try:
+            _save_snapshot(
+                args, fetched_items, initial_ids, stats, skip_types, include_projects, captured_at
+            )
+        except (OSError, SnapshotError) as exc:
+            snapshot_saved = False
+            log.error("Snapshot not saved to %s: %s", args.save_snapshot, exc)
 
     # 8. Export
     formats = [f.strip().lower() for f in args.formats.split(",")]
     _export_dataframes(df_nodes, df_edges, output_dir, formats)
     stats.log_omitted()
+    if not snapshot_saved:
+        log.error(
+            "Export written → %s, but not the snapshot (exit %d).",
+            output_dir,
+            EXIT_SNAPSHOT_FAILED,
+        )
+        raise SystemExit(EXIT_SNAPSHOT_FAILED)
     if stats.status == "incomplete":
         log.warning("Export incomplete → %s (exit %d).", output_dir, EXIT_INCOMPLETE)
         raise SystemExit(EXIT_INCOMPLETE)
@@ -510,5 +525,6 @@ def _save_snapshot(
         captured_at=captured_at,
     )
     path = Path(args.save_snapshot)
-    save_snapshot(snapshot, path, overwrite=args.overwrite)
+    # Consent was checked when the run started, as for the export files.
+    save_snapshot(snapshot, path, overwrite=True)
     log.info("Snapshot of %d fetched work item(s) → %s", len(snapshot.items), path)

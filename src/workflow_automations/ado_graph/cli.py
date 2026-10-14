@@ -232,8 +232,13 @@ def check_outputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         outputs = export_paths(Path(args.output_dir), formats)
         if args.mode == "export" and args.save_snapshot:
             snapshot = Path(args.save_snapshot)
-            if snapshot.resolve() in {path.resolve() for path in outputs}:
+            if any(
+                snapshot.resolve() == path.resolve() or _same_file(snapshot, path)
+                for path in outputs
+            ):
                 parser.error(f"--save-snapshot {snapshot} is one of the export files")
+            if snapshot.is_dir():
+                parser.error(f"--save-snapshot {snapshot} is a directory")
             outputs.append(snapshot)
         if args.mode == "replay" and any(_same_file(Path(args.snapshot), o) for o in outputs):
             parser.error(f"--snapshot {args.snapshot} is one of the export files")
