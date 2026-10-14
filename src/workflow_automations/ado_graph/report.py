@@ -190,6 +190,8 @@ def excel_overflow(frame: pd.DataFrame) -> str | None:
         return f"{columns:,} columns exceed Excel's {EXCEL_MAX_COLUMNS:,}"
     for position, col in enumerate(frame.columns):
         values = frame.iloc[:, position]  # by position: step results can repeat a name
+        if isinstance(values.dtype, pd.CategoricalDtype):
+            values = values.cat.categories.to_series()
         if isinstance(values.dtype, pd.StringDtype):
             lengths = values.str.len()
         elif pd.api.types.is_object_dtype(values):
@@ -265,7 +267,7 @@ MAX_COLUMN_WIDTH = 50
 
 def _sample_rows(frame: pd.DataFrame) -> pd.DataFrame:
     """At most SIZING_SAMPLE_ROWS evenly spaced rows, always including the first and last."""
-    limit = SIZING_SAMPLE_ROWS
+    limit = max(SIZING_SAMPLE_ROWS, 2)
     if len(frame) <= limit:
         return frame
     last = len(frame) - 1
@@ -322,10 +324,19 @@ def write_analysis_report(
     A sheet that exceeds Excel's limits is written to a sibling CSV
     (``<report stem>.<sheet>.csv``) published with the workbook, and its sheet
     holds a pointer row instead. ``overwrite`` defaults to True because the CLI
-    asks for consent before the run; it covers the spill files too. ``timings``,
-    when given, receives the seconds spent writing and sizing.
+    asks for consent before the run. That consent names only the report, so an
+    existing spill file is replaced only along with an existing report; otherwise
+    FileExistsError is raised before anything is written. ``timings``, when given,
+    receives the seconds spent writing and sizing.
     """
     spills = plan_analysis_report(results, output_path)
+    if not output_path.exists():
+        stray = [str(path) for path, _ in spills.values() if path.exists()]
+        if stray:
+            raise FileExistsError(
+                f"{', '.join(stray)} exists and is not part of an existing {output_path.name}; "
+                "remove it or choose another --output-file"
+            )
     for sheet, (path, reason) in spills.items():
         log.warning("Sheet '%s': %s; writing it to %s instead.", sheet, reason, path.name)
     timings = timings if timings is not None else {}
@@ -361,6 +372,8 @@ def _write_workbook(
 ) -> None:
     spills = spills or {}
     timings = timings if timings is not None else {"write": 0.0, "sizing": 0.0}
+    # Writing includes the save on leaving the ExcelWriter, where openpyxl serializes.
+    started, sized = time.perf_counter(), timings["sizing"]
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for sheet_name, df in results.items():
             safe_name = sheet_name[:31]
@@ -378,13 +391,15 @@ def _write_workbook(
                 )
             else:
                 frame = df
-            start = time.perf_counter()
             frame.to_excel(writer, sheet_name=safe_name, index=False)
-            timings["write"] += time.perf_counter() - start
             start = time.perf_counter()
             worksheet = writer.sheets[safe_name]
             for position, width in enumerate(_column_widths(safe_name, frame), start=1):
                 if width is not None:
                     worksheet.column_dimensions[get_column_letter(position)].width = width
             timings["sizing"] += time.perf_counter() - start
-            log.info("  → sheet '%s' (%d rows)", safe_name, len(df))
+            if sheet_name in spills:
+                log.info("  → sheet '%s' (pointer to %s)", safe_name, spills[sheet_name][0].name)
+            else:
+                log.info("  → sheet '%s' (%d rows)", safe_name, len(df))
+    timings["write"] += time.perf_counter() - started - (timings["sizing"] - sized)

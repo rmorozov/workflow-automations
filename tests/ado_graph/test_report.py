@@ -322,10 +322,11 @@ def test_failed_spill_keeps_the_previous_report_and_spill(tmp_path, monkeypatch)
     output.write_bytes(b"previous report")
     spill.write_bytes(b"previous spill")
 
-    def fail(*_args):
+    def fail(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(report, "_write_workbook", fail)
+    # The workbook is staged first; failing the spill proves both publish together.
+    monkeypatch.setattr(pd.DataFrame, "to_csv", fail)
     with pytest.raises(OSError, match="disk full"):
         report.write_analysis_report({"cycles": pd.DataFrame({"a": range(5)})}, output)
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == {
@@ -421,3 +422,47 @@ def test_repeated_column_names_are_checked_and_sized_by_position(tmp_path):
     output = tmp_path / "report.xlsx"
     report.write_analysis_report({"cr_scope_impact": frame}, output)
     assert pd.read_excel(output).shape == (1, 3)
+
+
+def test_spill_never_replaces_a_file_without_its_report(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(report, "EXCEL_MAX_ROWS", 1)
+    node_file, edge_file = write_inputs(tmp_path)
+    stray = tmp_path / "report.orphans.csv"
+    stray.write_bytes(b"user's own file")
+    with pytest.raises(FileExistsError, match="report.orphans.csv exists"):
+        run_analyze(node_file, edge_file, tmp_path / "report.xlsx")
+    assert stray.read_bytes() == b"user's own file"
+    assert not (tmp_path / "report.xlsx").exists()
+
+    # Replacing an existing report (which needs --overwrite) also replaces its spill.
+    (tmp_path / "report.xlsx").write_bytes(b"previous report")
+    run_analyze(node_file, edge_file, tmp_path / "report.xlsx", "--overwrite")
+    assert pd.read_csv(stray)["WI_ID"].tolist() == [4]
+
+
+def test_categorical_text_counts_toward_the_cell_limit():
+    long_text = "x" * (report.EXCEL_MAX_CELL_CHARS + 1)
+    frame = pd.DataFrame({"a": pd.Categorical([long_text, "short"])})
+    assert "column 'a'" in report.excel_overflow(frame)
+
+
+def test_write_timing_includes_the_workbook_save(tmp_path, monkeypatch):
+    real_writer = pd.ExcelWriter
+
+    def slow_writer(*args, **kwargs):
+        writer = real_writer(*args, **kwargs)
+        close = writer.close
+
+        def slow_close():
+            time.sleep(0.2)
+            close()
+
+        writer.close = slow_close
+        return writer
+
+    monkeypatch.setattr(pd, "ExcelWriter", slow_writer)
+    timings: dict[str, float] = {}
+    report.write_analysis_report(
+        {"s": pd.DataFrame({"a": [1]})}, tmp_path / "r.xlsx", timings=timings
+    )
+    assert timings["write"] >= 0.2

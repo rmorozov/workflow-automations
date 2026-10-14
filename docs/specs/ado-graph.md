@@ -305,14 +305,15 @@ the requested formats; Parquet and CSV have no such limit. Analyze instead write
 each oversized sheet (typically `cr_impact_unpacked`, `cr_prereqs_unpacked` or
 `cycles` on large graphs) to `<report stem>.<sheet>.csv` next to the workbook, in
 the same atomic bundle, and that sheet holds one pointer row (`Spilled_To`,
-`Rows`, `Columns`, `Reason`). The report's `--overwrite` consent covers its spill
-files; a spill file from an earlier run that this run does not spill is left as
-is. Step names longer than 31 characters are truncated to Excel's sheet-name
+`Rows`, `Columns`, `Reason`). `--overwrite` names only the report, so a spill
+file is replaced only together with an existing report; a spill path that exists
+without its report fails with `FileExistsError` before anything is written. A spill
+file from an earlier run that this run does not spill is left as is. Step names longer than 31 characters are truncated to Excel's sheet-name
 limit. Column widths come from the heading and at most 1,000 evenly spaced rows
 (first and last included), capped at 50 characters, so sizing cost does not grow
 with sheet length; a column whose values cannot be rendered as text keeps the
 default width and is logged as a warning. The final log line reports the seconds
-spent writing and sizing; `ADO_GRAPH_BENCH=1 pytest -s -k benchmark
+spent writing (including the workbook save) and sizing; `ADO_GRAPH_BENCH=1 pytest -s -k benchmark
 tests/ado_graph/test_report.py` prints graph compute, write and sizing time for a
 synthetic chain (`ADO_GRAPH_BENCH_NODES`, default 5,000).
 
