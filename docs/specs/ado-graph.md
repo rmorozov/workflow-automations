@@ -172,13 +172,24 @@ large result may fail after all graph computation and leave a partial workbook.
 
 ## Files, errors and current limitations
 
-Outputs are written directly and overwrite existing files without an overwrite
-flag, input-path protection, staging or rollback. Failed runs may leave partial
-files. This inherited behavior differs from the other tools' publication contract
-and has not been reworked yet. Work in a fresh output directory. Empty exports do not preserve a stable node schema; all-unknown steps can fail
-when saving a workbook with no sheets. Exceptions normally propagate; successful
-`main()` returns None (CLI exit 0), argparse errors/help use its usual exits.
-There is no standardized partial-result status. Text beginning with `=` can be
+Both modes publish atomically. Export writes every file of the requested formats
+(`nodes.parquet`/`edges.parquet`, `nodes.csv`/`edges.csv`, `work_items.xlsx`) to
+hidden sibling temp files and renames the whole bundle into place only after every
+write succeeded; analyze does the same for its single workbook. A failed write
+(permissions, full disk, serialization error) leaves every existing output
+unchanged and removes the temp files. Unknown and repeated formats are skipped.
+
+An existing output needs `--overwrite`. Without it the run exits with code 2 and
+names the files before export calls ADO or analyze reads its inputs. Analyze
+refuses an `--output-file` that is the `--nodes-file` or `--edges-file` (also
+through a link) with exit 2, even with `--overwrite`. Consent is checked when the
+run starts: a file created at an output path during a long export is replaced.
+Export still creates `--output-dir` before fetching. Empty exports do not preserve a stable node schema; all-unknown steps can fail
+when saving a workbook with no sheets. Exceptions normally propagate. A complete
+run exits 0; export can also exit with the partial-result statuses described under
+[Traversal, filtering and completeness](#traversal-filtering-and-completeness).
+Argparse errors/help use its usual exits (2 for invalid options, existing outputs
+and input collisions). Text beginning with `=` can be
 written as an Excel formula by pandas/openpyxl; arbitrary identity/datetime field
 objects may fail serialization.
 

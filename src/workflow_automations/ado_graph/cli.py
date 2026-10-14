@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
+from pathlib import Path
 
 from workflow_automations.ado_graph.analyze import (
     ALL_STEPS,
@@ -13,6 +15,7 @@ from workflow_automations.ado_graph.analyze import (
 )
 from workflow_automations.ado_graph.client import ADO_BATCH_LIMIT, DEFAULT_SKIP_TYPES
 from workflow_automations.ado_graph.export import run_export
+from workflow_automations.ado_graph.report import export_paths
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -89,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated export formats: parquet, excel, csv.",
     )
     ep.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace existing export files in --output-dir (default: refuse before fetching).",
+    )
+    ep.add_argument(
         "--skip-types",
         default=",".join(DEFAULT_SKIP_TYPES),
         metavar="TYPES",
@@ -138,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output Excel report path (default: analysis_report.xlsx).",
     )
     ap.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing --output-file (never one of the input files).",
+    )
+    ap.add_argument(
         "--steps",
         default="all",
         help=f"Comma-separated steps or 'all'.  Available: {', '.join(ALL_STEPS)}.",
@@ -166,9 +179,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _same_file(a: Path, b: Path) -> bool:
+    return a.exists() and b.exists() and os.path.samefile(a, b)
+
+
+def check_outputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Refuse existing outputs without --overwrite and inputs as outputs, before any work."""
+    if args.mode == "export":
+        formats = [f.strip().lower() for f in args.formats.split(",")]
+        outputs = export_paths(Path(args.output_dir), formats)
+    else:
+        output = Path(args.output_file)
+        for option, name in (("--nodes-file", args.nodes_file), ("--edges-file", args.edges_file)):
+            if _same_file(output, Path(name)):
+                parser.error(f"--output-file {output} is the {option} input")
+        outputs = [output]
+    existing = [str(path) for path in outputs if path.exists()]
+    if existing and not args.overwrite:
+        parser.error(f"{', '.join(existing)} exists; pass --overwrite to replace it")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    check_outputs(parser, args)
 
     if args.mode == "export":
         run_export(args)
