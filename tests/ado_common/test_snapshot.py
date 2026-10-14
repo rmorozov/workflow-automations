@@ -87,6 +87,8 @@ def test_existing_file_needs_overwrite_and_failed_write_keeps_it(tmp_path):
         (doc(items=[{"id": 1}, {"id": 1}]), "appears twice"),
         (doc(items=[{"id": 1, "relations": [{"rel": None}]}]), "rel must be a string"),
         (doc(linked={"²": {}}), "not a work-item ID"),
+        (doc(linked={"09": {}}), "not a work-item ID"),
+        (doc(roots=[1, 1]), "appears twice in roots"),
         (doc(filters={"skip_types": "task"}), "filters.skip_types must be a list"),
         (doc(producer=None), "producer must be a string"),
         ([], "snapshot must be an object"),
@@ -102,3 +104,21 @@ def test_non_json_file_is_refused(tmp_path):
     path.write_bytes(b"\xff not json")
     with pytest.raises(SnapshotError, match="not a JSON snapshot"):
         load_snapshot(path)
+    path.write_text(json.dumps(doc()).replace('"Linked"', "NaN"), encoding="utf-8")
+    with pytest.raises(SnapshotError, match="NaN is not JSON data"):
+        load_snapshot(path)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        raw(roots=[True]),
+        raw(items=[{"id": 1, "fields": {}, "relations": [{"rel": None, "url": None}]}]),
+        raw(items=[{"id": 1, "fields": {}, "relations": []}] * 2),
+    ],
+)
+def test_save_refuses_what_load_would_refuse(tmp_path, bad):
+    path = tmp_path / "snap.json"
+    with pytest.raises(SnapshotError):
+        save_snapshot(bad, path)
+    assert not path.exists()

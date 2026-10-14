@@ -111,7 +111,8 @@ def test_graph_snapshot_replays_into_the_same_export_and_report(monkeypatch, tmp
 
     # Offline from here: any client use would fail.
     monkeypatch.setattr(export, "ADOClient", None)
-    graph_snapshot.replay_export(load_snapshot(path), replayed, ["parquet"])
+    # Item 5 is gone: the live export exits 4, the replay returns it.
+    assert graph_snapshot.replay_export(load_snapshot(path), replayed, ["parquet"]) == [5]
     for live_frame, replayed_frame in zip(read_export(live), read_export(replayed), strict=True):
         pd.testing.assert_frame_equal(live_frame, replayed_frame)
 
@@ -205,6 +206,29 @@ def test_triage_snapshot_replays_into_the_same_report(tmp_path):
 
     restored = triage.snapshot_from_raw(load_snapshot(path))
     assert restored == original
+    assert_same_report(
+        triage.build_report(original, {}, settings()),
+        triage.build_report(restored, {}, settings()),
+    )
+
+
+@pytest.mark.parametrize(
+    ("external", "parent_titles"),
+    [
+        ({}, {9: "Fetched only as a parent"}),
+        ({9: {triage.FIELD_TITLE: "Fetched only as linked"}}, {}),
+        ({9: {triage.FIELD_TITLE: "Linked"}}, {9: "Parent"}),
+    ],
+)
+def test_triage_keeps_linked_items_and_parents_apart(tmp_path, external, parent_titles):
+    # 9 is both the parent and the predecessor of 1; either fetch may have failed.
+    item = triage_item(1, "Child", parent=9, relations=[(triage.REL_PREDECESSOR, 9)])
+    item["relations"].append({"rel": None, "url": None})  # as the SDK can return it
+    original = triage.Snapshot(items=[item], external=external, parent_titles=parent_titles)
+    path = tmp_path / "triage.json"
+    save_snapshot(triage.snapshot_to_raw(original, BASE, "q"), path)
+    restored = triage.snapshot_from_raw(load_snapshot(path))
+    assert (restored.external, restored.parent_titles) == (external, parent_titles)
     assert_same_report(
         triage.build_report(original, {}, settings()),
         triage.build_report(restored, {}, settings()),

@@ -8,6 +8,7 @@ rebuilds the node and edge tables the export would have written from them, and
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,8 @@ from workflow_automations.ado_common.snapshot import RawSnapshot, SnapshotError,
 from workflow_automations.ado_graph.client import FIELD_RENAME
 from workflow_automations.ado_graph.export import _parse_wi, _project_from_wi
 from workflow_automations.ado_graph.report import _export_dataframes
+
+log = logging.getLogger("ado_tool")
 
 PRODUCER = "ado-graph"
 EDGE_COLUMNS = ["Source_ID", "Target_ID", "Link_Type"]
@@ -114,10 +117,23 @@ def frames_from_snapshot(snapshot: RawSnapshot) -> tuple[pd.DataFrame, pd.DataFr
 
 def replay_export(
     snapshot: RawSnapshot, output_dir: Path, formats: list[str], overwrite: bool = False
-) -> None:
-    """Write the export files of ``snapshot`` into ``output_dir`` for ``analyze``."""
+) -> list[int]:
+    """Write the export files of ``snapshot`` into ``output_dir`` for ``analyze``.
+
+    Returns the linked IDs ADO omitted, sorted: when there are any, the graph is
+    incomplete, as the export's exit 4 reports.
+    """
     df_nodes, df_edges = frames_from_snapshot(snapshot)
     _export_dataframes(df_nodes, df_edges, output_dir, formats, overwrite=overwrite)
+    roots = set(snapshot.roots)
+    omitted_linked = sorted(i for i in snapshot.omitted if i not in roots)
+    if omitted_linked:
+        log.warning(
+            "%d linked work item(s) were not returned; the graph is incomplete: %s",
+            len(omitted_linked),
+            omitted_linked,
+        )
+    return omitted_linked
 
 
 def _sdk_view(item: dict[str, Any]) -> SimpleNamespace:

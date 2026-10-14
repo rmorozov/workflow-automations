@@ -105,15 +105,16 @@ class RawSnapshot:
             warnings=[_string(w, "warnings[]") for w in _list(doc.get("warnings", []), "warnings")],
             items=[_item(raw, i) for i, raw in enumerate(_list(doc.get("items"), "items"))],
             linked={
-                _key_id(key): dict(_mapping(fields, f"linked[{key}]"))
+                _key_id(key, "linked"): dict(_mapping(fields, f"linked[{key}]"))
                 for key, fields in _mapping(doc.get("linked", {}), "linked").items()
             },
         )
-        seen: set[int] = set()
-        for wi_id in snapshot.item_ids:
-            if wi_id in seen:
-                raise SnapshotError(f"work item {wi_id} appears twice in items")
-            seen.add(wi_id)
+        for name, ids in (("items", snapshot.item_ids), ("roots", snapshot.roots)):
+            seen: set[int] = set()
+            for wi_id in ids:
+                if wi_id in seen:
+                    raise SnapshotError(f"work item {wi_id} appears twice in {name}")
+                seen.add(wi_id)
         return snapshot
 
 
@@ -134,6 +135,8 @@ def save_snapshot(snapshot: RawSnapshot, path: Path, overwrite: bool = False) ->
         text = json.dumps(snapshot.to_json(), ensure_ascii=False, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise SnapshotError(f"snapshot is not JSON data: {exc}") from exc
+    # Never write a file that load_snapshot would refuse.
+    RawSnapshot.from_json(_decode(text))
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=path.suffix, dir=path.parent)
     try:
@@ -148,10 +151,17 @@ def save_snapshot(snapshot: RawSnapshot, path: Path, overwrite: bool = False) ->
 def load_snapshot(path: Path) -> RawSnapshot:
     """Read and validate a snapshot file; ``SnapshotError`` if it is not one."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = _decode(path.read_text(encoding="utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SnapshotError(f"{path} is not a JSON snapshot: {exc}") from exc
     return RawSnapshot.from_json(data)
+
+
+def _decode(text: str) -> Any:
+    def refuse(constant: str) -> Any:
+        raise SnapshotError(f"{constant} is not JSON data")
+
+    return json.loads(text, parse_constant=refuse)
 
 
 def _plain_item(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -210,7 +220,8 @@ def _ids(value: Any, where: str) -> list[int]:
     return [_id(v, f"{where}[]") for v in _list(value, where)]
 
 
-def _key_id(key: str) -> int:
-    if not (key.isascii() and key.isdigit()):
-        raise SnapshotError(f"linked key {key!r} is not a work-item ID")
+def _key_id(key: str, where: str) -> int:
+    # Canonical decimal only, so "09" and "9" cannot both name item 9.
+    if not (key.isascii() and key.isdigit()) or key != str(int(key)):
+        raise SnapshotError(f"{where} key {key!r} is not a work-item ID")
     return int(key)

@@ -336,24 +336,37 @@ def snapshot_to_raw(
 ) -> RawSnapshot:
     """The shared raw form of a fetched triage snapshot.
 
-    Every item is a query result, so they are also the roots. Linked items and
-    parents become ``linked`` entries; an ID fetched as both keeps both field sets.
+    Every item is a query result, so they are also the roots. Linked items are the
+    ``linked`` entries; parent titles are kept apart in ``options``, because one ID
+    can be fetched as either, both or neither, and the report depends on which.
     """
-    linked: dict[int, dict[str, Any]] = {wi_id: dict(f) for wi_id, f in snapshot.external.items()}
-    for pid, title in snapshot.parent_titles.items():
-        linked.setdefault(pid, {})[FIELD_TITLE] = title
     return RawSnapshot(
         producer=SNAPSHOT_PRODUCER,
         captured_at=captured_at if captured_at is not None else utc_timestamp(),
         source={"base_url": base_url, "project": "", "query_id": query_id},
+        options={"parent_titles": {str(p): t for p, t in snapshot.parent_titles.items()}},
         roots=[item["id"] for item in snapshot.items],
         items=[
-            {"id": item["id"], "fields": dict(item["fields"]), "relations": list(item["relations"])}
+            {
+                "id": item["id"],
+                "fields": dict(item["fields"]),
+                "relations": [{"rel": r["rel"] or "", "url": r["url"]} for r in item["relations"]],
+            }
             for item in snapshot.items
         ],
-        linked=linked,
+        linked={wi_id: dict(fields) for wi_id, fields in snapshot.external.items()},
         warnings=list(snapshot.warnings),
     )
+
+
+def _stored_parent_titles(raw: RawSnapshot) -> dict[int, str]:
+    stored = raw.options.get("parent_titles", {})
+    if not isinstance(stored, dict) or not all(
+        isinstance(k, str) and k.isascii() and k.isdigit() and isinstance(v, str)
+        for k, v in stored.items()
+    ):
+        raise TriageError("snapshot option parent_titles must map work-item IDs to titles")
+    return {int(k): v for k, v in stored.items()}
 
 
 def snapshot_from_raw(raw: RawSnapshot) -> Snapshot:
@@ -381,8 +394,6 @@ def snapshot_from_raw(raw: RawSnapshot) -> Snapshot:
         for item in raw.items
         if item["id"] in root_ids
     ]
-    known = {item["id"]: item["fields"] for item in raw.items}
-    known.update(raw.linked)
     targets = {
         target
         for item in items
@@ -394,13 +405,22 @@ def snapshot_from_raw(raw: RawSnapshot) -> Snapshot:
     parents = {
         pid for item in items if (pid := safe_int(item["fields"].get(FIELD_PARENT))) is not None
     }
+    if raw.producer == SNAPSHOT_PRODUCER:
+        # Exactly what the triage fetch returned, including its warnings.
+        return Snapshot(
+            items=items,
+            external={t: dict(f) for t, f in raw.linked.items() if t in targets},
+            parent_titles={p: t for p, t in _stored_parent_titles(raw).items() if p in parents},
+            warnings=list(raw.warnings),
+        )
+    known = {item["id"]: item["fields"] for item in raw.items}
+    known.update(raw.linked)
     warnings = list(raw.warnings)
-    if raw.producer != SNAPSHOT_PRODUCER:
-        # Triage records these when it fetches; another tool's snapshot does not.
-        for ids, what in ((targets, "linked items"), (parents, "parent titles")):
-            unresolved = len(ids - known.keys())
-            if unresolved:
-                warnings.append(f"{unresolved} {what} unavailable (not in the snapshot)")
+    # Triage records these when it fetches; another tool's snapshot does not.
+    for ids, what in ((targets, "linked items"), (parents, "parent titles")):
+        unresolved = len(ids - known.keys())
+        if unresolved:
+            warnings.append(f"{unresolved} {what} unavailable (not in the snapshot)")
     return Snapshot(
         items=items,
         external={t: dict(known[t]) for t in sorted(targets) if t in known},

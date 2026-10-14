@@ -33,11 +33,12 @@ A snapshot is *filtered* when any `filters` list is non-empty: its items were
 chosen by type or project, so it is not the complete set of reachable items.
 
 Loading refuses (`SnapshotError`) another `schema`, any `version` other than 1,
-non-integer or boolean IDs, an item ID listed twice, `linked` keys that are not
-decimal IDs, filters that are not string lists, and files that are not JSON.
+non-integer or boolean IDs, an ID listed twice in `items` or `roots`, `linked`
+keys that are not canonical decimal IDs, filters that are not string lists, `NaN`
+or `Infinity`, and files that are not JSON.
 Saving refuses an existing file unless `overwrite` is set, writes through a
 sibling temporary file so a failure leaves the old file unchanged, and refuses
-field values that are not JSON data.
+field values that are not JSON data or anything loading would refuse.
 
 ## ado-graph adapter
 
@@ -51,12 +52,15 @@ the node and edge tables the export writes for them (`In_Scope`, renamed columns
 deduplicated edges); `replay_export` writes them in the requested formats for
 `analyze`. Both refuse an `ado-triage` snapshot, which did not walk relations, and
 a snapshot with an omitted root, for which the export writes nothing (exit 5).
+`replay_export` logs and returns the omitted linked IDs: when there are any, the
+graph is incomplete, as the export's exit 4 reports.
 
 ## ado-triage adapter
 
 `ado_triage.snapshot_to_raw` stores a triage `Snapshot`: its items are the roots,
-and linked items and parents become `linked` entries (an ID fetched as both keeps
-the fields of both). `snapshot_from_raw` rebuilds a `Snapshot` that gives the same
+linked items are the `linked` entries and parent titles are the `parent_titles`
+option, kept apart because one ID can be fetched as a linked item, a parent, both
+or neither. `snapshot_from_raw` rebuilds the same `Snapshot`, so it gives the same
 report:
 
 - A filtered snapshot is refused with a validation error, whichever tool saved it:
