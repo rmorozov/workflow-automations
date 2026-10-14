@@ -29,7 +29,7 @@ Fable 5.1 $10/$50.
 | `checker` | Haiku 5.5 | low | Runs fixed commands and copies failures; no judgment. 20× cheaper than Sonnet and the most frequently run role. |
 | `backlog-curator` | Sonnet 5.5 | low | Structured writing from existing findings; low effort keeps it terse. |
 | `implementer` | Sonnet 5.5 | medium | Most tasks are local, well-specified changes with tests as the safety net. Medium is the recommended start for agentic coding on Sonnet 5.5. |
-| `implementer` on tasks marked `tier: complex` | Opus 5.5 | as the task says | Graph semantics, completeness, schema contracts and algorithmic bounds (AG-003/004/006/007/012, SH-001/003/004/007): wrong results here pass tests that encode the same misunderstanding. |
+| `implementer` on tasks marked `tier: complex` | Opus 5.5 | high | Graph semantics, completeness, schema contracts and algorithmic bounds (AG-003/004/006/007/012, SH-001/003/004/007): wrong results here pass tests that encode the same misunderstanding. |
 | `task-planner` | Opus 5.5 | high | One short, read-heavy call whose mistakes multiply: a wrong `touches:` list breaks parallel scheduling, a wrong plan wastes an implementer round. |
 | `reviewer` | Opus 5.5 | high (medium for P3) | Catching a defect before merge is cheaper than any later fix. Independence comes from a fresh context that reads only the task, spec and diff and reproduces findings itself; a different model from the implementer is a bonus, not the source of independence. |
 | Thread lead | Opus 5.5 | medium | Orchestrates, reads PR events, decides when to escalate. Set as the project's default model; it is not configured in this repository. |
@@ -39,13 +39,13 @@ Fable 5.1 $10/$50.
 The thread lead may run a subagent at another model or effort than its definition
 when the task's tier and actual risk require it; record the resolved model/effort
 in the handoff. Claude maps mechanical→Haiku/low, routine→Sonnet/medium,
-complex→Opus/high, deep→Fable/xhigh for implementation. Role defaults apply to
-planning and review; task tiers do not change the coordinator's model.
+complex→Opus/high for implementation. Arbitration is a fixed on-demand role,
+not a task tier. Role defaults apply to planning and review; task tiers do not change the coordinator's model.
 
 ### Pipeline per task
 
 1. Thread lead reads the task file and claims it with the coordinator.
-2. `task-planner` only when risk calls for it: P1, `tier: complex`/`deep`, or uncertain
+2. `task-planner` only when risk calls for it: P1, `tier: complex`, or uncertain
    `touches:`. Small tasks go straight to one implementer and a fresh review.
    Correct the task file's `touches:` first if the plan differs, then re-plan the
    wave.
@@ -123,14 +123,30 @@ Read-only roles have explicit no-edit instructions; that is not a security sandb
 
 ### Task tiers and resolved roles
 
-Task files now contain `tier`, not a provider model or per-task effort. Existing
-Haiku/Sonnet/Opus/Fable hints migrated to mechanical/routine/complex/deep respectively.
+Task files now contain `tier`, not a provider model or per-task effort.
+Initial Haiku/Sonnet/Opus hints mapped to mechanical/routine/complex; task content
+takes precedence over that initial mapping. AG-018 is mechanical because it moves
+existing code without behavior changes; its P1 priority still warrants planning
+and independent review.
 Effort is set per role profile so a task hint cannot silently disagree with the
 profile's fixed setting. Use complex for graph semantics, schema/completeness or
-publication risks; deep means a specific design dispute needing arbitration.
+publication risks. Arbitration remains on demand for a reproduced disagreement,
+independent of the task tier.
 Small tasks need one implementation and fresh review, not every role.
 
-| Role | Routine/mechanical default | Complex/deep default |
+This changes effort policy: it does not preserve the old per-task effort hints.
+Before this setup, 13 Sonnet tasks used low and 8 Opus tasks used medium. Role
+defaults replace those choices. AG-018 now uses mechanical routing; the other
+12 Sonnet/low and 8 Opus/medium tasks still start at higher Claude effort by this
+policy. Even mechanical maps to different effort settings
+in Claude and Codex. Higher effort is not a demonstrated cost or quality gain.
+Content review keeps validation, counters, report layout, CSV/config adapters and
+small helper extraction routine; completeness, graph metrics, auth lifetime,
+cross-bundle identity, workbook range integrity and parser equivalence remain
+complex. Revisit these defaults using pilot usage and retries rather than assuming
+the old model label or token price establishes the best tier.
+
+| Role | Routine/mechanical default | Complex default |
 | --- | --- | --- |
 | Coordinator/integration owner | GPT-6.1 Sol / medium | Same; escalate a specific decision to arbiter |
 | Planner | GPT-6.1 Sol / high | GPT-6 Astra / high |
@@ -150,12 +166,14 @@ why. Do not silently fall back if a requested model is unavailable.
 python scripts/backlog.py check
 python scripts/backlog.py plan --busy AG-018
 python scripts/agent_profiles.py check
+python scripts/agent_profiles.py route --role coordinator
 python scripts/agent_profiles.py route --task AG-004 --role reviewer
 ```
 
 `route` resolves the task tier to the exact profile, model and effort. It does not
-spawn agents and always reports `runtime_verified: false`. Dispatch that named
-custom profile in a compatible client. Changing the root session or invoking a
+spawn agents and always reports `runtime_verified: false`. Fixed roles can be
+resolved without `--task`; task-dependent roles require an open task ID.
+Dispatch that named custom profile in a compatible client. Changing the root session or invoking a
 built-in worker is not equivalent to loading the profile. The checker commands
 are consolidated in `scripts/check.sh`; run it in a disposable validation worktree,
 as pytest/build can generate caches or metadata. No per-task scheduler daemon,
@@ -180,13 +198,17 @@ assigned task files; checker uses the validation worktree and returns exact logs
 
 ### Activation and pilot checklist
 
+Static checks cover the documented key structure, types and routing completeness,
+not a duplicate snapshot of model names, effort choices or the thread cap. Those
+values live in TOML. Changes to routing/caps also need matching workflow guidance.
 Static policy/TOML tests pass before a PR, but they cannot prove client support,
 account access or profile discovery. No Codex CLI is installed in the setup
 execution environment; real profile loading and pilots remain tracked by RW-003.
 
 1. In your actual Codex client, open a fresh trusted repository session. Check the
-   installed client version and current custom-agent docs. User/managed settings
-   may override or ignore project configuration. Never overwrite personal settings.
+   installed client version and current custom-agent docs. Confirm every config and
+   profile key is recognised; record unsupported/ignored settings. User/managed
+   settings may override or ignore project configuration. Never overwrite personal settings.
 2. Ask: “Spawn the custom task_planner agent to read this repository and return
    a path-only plan without editing files.” Observe the named profile and runtime
    model/effort in client telemetry/event logs. Repeat for each profile without

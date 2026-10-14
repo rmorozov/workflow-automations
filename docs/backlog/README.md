@@ -45,7 +45,9 @@ What a test or measurement must show for the task to be done.
   A section includes its subsections: sibling sections are disjoint, a parent and a
   section nested in it are not. An anchor must exist in the file; a file that does
   not exist yet is reserved whole.
-- `tier` is provider-neutral: `mechanical`, `routine`, `complex`, or `deep`.
+- `tier` is provider-neutral: `mechanical`, `routine`, or `complex`.
+  Choose by task content: pure moves, bounded behavior changes, or semantic/contract
+  risks respectively. Arbitration is on demand, not a tier.
   Roles map it to model/effort profiles; it does not choose the coordinator model. See
   [agentic workflow](../agentic-workflow.md#task-tiers-and-resolved-roles).
 - Titles avoid `: ` so the front matter stays one `key: value` per line.
