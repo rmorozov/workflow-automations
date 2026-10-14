@@ -132,7 +132,11 @@ Required: `--nodes-file`, `--edges-file` (Parquet only; CSV/Excel exports cannot
 loaded by this mode). Optional: `--ado-url` (default empty, for report URLs),
 `--effort-field` (default `Microsoft.VSTS.Scheduling.OriginalEstimate`),
 `--output-file` (default `analysis_report.xlsx`), `--steps` (default `all`, or a
-comma-separated list). Unknown steps warn and are skipped. `--bridges` (`contract`
+comma-separated list). A step may name its subgraph as `step@subgraph`, for example
+`cycles@dependency`; its sheet is then named `step@subgraph`, lowercased with
+spaces removed, so one run can compare subgraphs. `all` in the list adds every
+step on its default subgraph (`all,cycles@dependency`). Empty entries are ignored;
+unknown steps and unknown subgraphs warn and are skipped. `--bridges` (`contract`
 by default, or `drop`) and `--max-indirect-edges` (default 1,000,000) control bridge
 nodes, below.
 
@@ -141,39 +145,78 @@ Optional node metadata: Title, WorkItemType, State, `KL.Roadmap_State`,
 `System.AreaPath`, `System.IterationPath`, configured effort field. Schema/ID
 validation is not performed; missing required columns raise exceptions.
 
-The analyzer uses a `DiGraph`, adds every exported node, and drops edges whose
-either endpoint is absent. When the node file has an `In_Scope` column, each
-out-of-scope bridge node B is then contracted: for every P → B → S it adds
-P → S with `link_type` `Indirect`, the bridge IDs in `via` and the normalized link
-types along the path in `path`, unless a direct P → S edge already exists (a direct
-link wins). Chains of bridges collapse into one edge; a path that returns to its
-own start through bridges only is dropped rather than kept as a self-loop. Bridge
-nodes are then removed, so no report lists them and CR effort sums ignore them. The
-neighbor debug column shows indirect edges as `Indirect via 2>3 (Parent->Child, Blocks)`.
-Node files without `In_Scope` (older exports) are treated as fully in scope.
-Contraction runs while the analyzer is built, before any step and before output is
-created, so it is paid even for `--steps orphans`. Each bridge costs in-degree ×
-out-degree candidate edges (a bridge with 5,000 links on each side would cost 25
-million). The running total is checked before each bridge is contracted; above
-`--max-indirect-edges` the command exits with an error naming the bridge, and no
-report file or directory is created. `--bridges drop` removes bridges and their
-edges without adding indirect edges, which matches `stop` export semantics. Reverse labels flip direction and normalize to their
-forward label. Forward directions are parent→child, affects→affected, blocks→blocked,
-predecessor→successor, implements→implemented. Parallel relation types on the same
-pair collapse to one edge; the last label wins. All relation families participate
-in every analysis. This is a structural graph, not a validated scheduling graph.
+Edges are normalized first. Reverse labels flip direction and normalize to their
+forward label; forward directions are parent→child, affects→affected,
+blocks→blocked, predecessor→successor, implements→implemented. Edges whose either
+endpoint is absent from the node file are dropped; unknown labels are dropped with
+a warning per label. Each forward label belongs to one relation family:
+
+| Family | Forward labels | Direction means |
+| --- | --- | --- |
+| `hierarchy` | `Parent->Child` | the source contains the target |
+| `dependency` | `Blocks`, `Predecessor->Successor` | the target waits for the source |
+| `impact` | `Affects`, `Implements` | a change to, or work on, the source reaches the target |
+
+Every normalized relation is kept in a `MultiDiGraph` keyed by its label, so the
+same relation reported from both ends is one edge and different relation types on
+the same pair stay separate edges; no label is overwritten. Each step runs on a
+`DiGraph` projection of one named subgraph: `all` (every family), `hierarchy`,
+`dependency` or `impact`. A projection has one edge per ordered pair; when several
+relation types join that pair, the edge keeps all of them in `link_types` and joins
+them in report order in `link_type`, for example `Parent->Child & Blocks`.
+
+| Step | Default subgraph | Direction |
+| --- | --- | --- |
+| `cycles`, `scc`, `longest_chain`, `metrics`, `orphans` | `all` | as stored |
+| `has_cr_dep`, `no_cr_dep` | `all` | downstream of Change Requests |
+| `cr_scope_impact`, `cr_impact_unpacked` | `all` | downstream of each CR |
+| `cr_prereqs`, `cr_prereqs_unpacked` | `dependency` | upstream of each CR |
+
+So for a CR, its children, the items it blocks or precedes and the items it affects
+are its impact; only the items that block or precede it are its prerequisites. Its
+parent is neither, and appears upstream only with `cr_prereqs@all`. Items that
+implement or affect a CR point at it, so they are upstream too: no default CR sheet
+lists them, `no_cr_dep` does, and `cr_prereqs@impact` or `cr_prereqs@all` shows
+them. On `all`, a cycle may mix families (a child that blocks its parent) and need
+not be a planning error; `cycles@dependency` reports dependency cycles only.
+
+When the node file has an `In_Scope` column, each out-of-scope bridge node B is
+contracted in every projection, following only that subgraph's relations: for every
+P → B → S it adds P → S with `link_type` `Indirect`, the bridge IDs in `via` and the
+normalized link types along the path in `path`, unless a direct P → S edge already
+exists (a direct link wins). Chains of bridges collapse into one edge, and when
+several bridge routes join the same pair only the first one contracted is kept, so
+another route's link types show only in a subgraph that lacks the first route; a
+path that returns to its own start through bridges only is dropped rather than kept
+as a self-loop. Bridge nodes are then removed, so no report lists them and CR effort
+sums ignore them. The neighbor debug column always describes the `all` projection
+and shows indirect edges as `Indirect via 2>3 (Parent->Child, Blocks)`. Node files
+without `In_Scope` (older exports) are treated as fully in scope. This runs while
+the analyzer is built, before any step and before output is created, so it is paid
+even for `--steps orphans`. Each bridge costs in-degree × out-degree candidate edges
+(a bridge with 5,000 links on each side would cost 25 million). The running total is
+checked before each bridge is contracted; above `--max-indirect-edges` the command
+exits with an error naming the bridge, and no report file or directory is created.
+`--bridges drop` removes bridges and their edges without adding indirect edges,
+which matches `stop` export semantics. The other projections are built on first use;
+none can exceed the budget the `all` projection passed, because a subset of
+relations never gives a bridge more neighbors. The budget applies to each
+projection, so a run that uses all four may do up to four times that contraction
+work. An indirect edge's `path` names each hop's link types, for example
+`(Parent->Child & Blocks, Blocks)`. This is a structural graph, not a validated
+scheduling graph.
 
 | Step / sheet | Current meaning |
 | --- | --- |
 | `cycles` | Enumerates all simple cycles; one row per cycle member with metadata |
 | `orphans` | Nodes with zero incoming and outgoing degree; full node fields plus URL/debug neighbors |
-| `no_cr_dep` | Nodes outside the reverse-reachable set of Change Requests |
-| `has_cr_dep` | Change Requests and their ancestors (reverse reachability), not their descendants |
+| `no_cr_dep` | Nodes that are neither a Change Request nor downstream of one |
+| `has_cr_dep` | Change Requests and every node downstream of one (items that depend on a CR) |
 | `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count; every SCC member emitted |
 | `scc` | Every strongly connected component including singletons; index, size, members, metadata |
-| `metrics` | Degrees, exact normalized betweenness, Dependency_Depth and metadata |
+| `metrics` | Degrees (distinct neighbors), exact normalized betweenness, Dependency_Depth and metadata |
 | `cr_scope_impact` | CR descendants, count/IDs; numeric effort of CR plus descendants, invalid effort becomes zero |
-| `cr_prereqs` | CR ancestors, count/IDs and metadata |
+| `cr_prereqs` | CR ancestors (dependency subgraph by default), count/IDs and metadata |
 | `cr_impact_unpacked` | One row per CR/downstream node pair with both metadata sets |
 | `cr_prereqs_unpacked` | One row per CR/upstream node pair with both metadata sets |
 
