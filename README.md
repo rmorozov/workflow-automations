@@ -49,6 +49,12 @@ The bundle contains:
 - `manifest.json`: the authoritative dictionary, cell references, and source fingerprint.
 - `summary.json`: deduplication and per-column counts.
 
+For several languages from one extraction, pass `--target-language en de`. Sources,
+batches and IDs are shared; templates and prompts are written per language
+(`translations/de/*.csv`, `translations.de.xlsx`, `prompt.de.txt`,
+`agent_prompt.de.md`), and each `apply` names its language with
+`--target-language de`.
+
 Translate source dictionaries or batches externally. Return **only two columns**:
 
 ```csv
@@ -97,7 +103,9 @@ reply path to write, the reply rules and column context, and the final `apply`
 command with every reply path filled in. The agent reads one unit at a time, writes
 `replies/<unit>.csv`, checks it, and skips units that already have a complete reply,
 so a small context window and an interrupted run both work. Use `--batch-max-rows`
-to keep each unit small. The prompt is written only when CSV units exist.
+to keep each unit small. The prompt is written only when CSV units exist. With
+several target languages there is one prompt per language, such as
+`agent_prompt.de.md`, writing to `replies/de/`.
 
 Use `--formats csv` or `--formats xlsx` to select extraction formats. Deduplication
 is per column by default; `--dedupe-scope global` shares a dictionary across columns
