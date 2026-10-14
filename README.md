@@ -252,6 +252,9 @@ choose steps deliberately on large graphs. Read the [specification](docs/specs/a
 Add `--save-snapshot run.json` to an export to keep what ADO returned, and
 `ado-graph replay --snapshot run.json --output-dir DIR` rebuilds the same export files
 offline, with only the analyze extra.
+Report sheets carry no organization-specific fields unless asked: add one with
+`analyze --meta-field Team=Custom.Team`, or `--meta-preset legacy` for the former
+`Roadmap_State` column.
 The equivalent script invocation is `python scripts/ado_graph.py ...` after installation.
 
 ## Agentic development
