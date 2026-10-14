@@ -46,31 +46,55 @@ def repo(tmp_path):
     return tmp_path
 
 
-def run_plan(repo: Path, specs: list[str], after: dict | None = None):
+def run_plan(repo: Path, specs: list[str], after: dict | None = None, method: str = "squash"):
     pulls = merge_plan.load_pulls("main", specs, str(repo))
-    return pulls, *merge_plan.plan("main", pulls, after or {}, str(repo))
+    return pulls, *merge_plan.plan("main", pulls, after or {}, str(repo), method)
 
 
-def test_disjoint_pulls_form_one_batch_whose_tree_is_main_after_merging(repo):
+def squash(repo: Path, branch: str) -> None:
+    """Land branch on main the way GitHub's squash merge does: one single-parent commit."""
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "-q", "--squash", branch)
+    git(repo, "commit", "-q", "-m", f"squash {branch}")
+
+
+@pytest.mark.parametrize("method", ["squash", "merge"])
+def test_disjoint_pulls_form_one_batch_whose_tree_is_main_after_merging(repo, method):
     commit(repo, "p1", {"a.txt": edit(1, "p1")})
     commit(repo, "p2", {"a.txt": edit(9, "p2")})  # same file, other lines: clean overlap
     commit(repo, "p3", {"b.txt": edit(1, "p3")})
-    pulls, batches, blocked = run_plan(repo, ["1=p1", "2=p2", "3=p3"])
+    pulls, batches, blocked = run_plan(repo, ["1=p1", "2=p2", "3=p3"], method=method)
     assert [b.pulls for b in batches] == [["1", "2", "3"]] and not blocked
     git(repo, "checkout", "-q", "main")
     for branch in ("p1", "p2", "p3"):
-        git(repo, "merge", "-q", "--no-edit", branch)
+        if method == "squash":
+            squash(repo, branch)
+        else:
+            git(repo, "merge", "-q", "--no-edit", branch)
     assert git(repo, "rev-parse", f"{batches[0].commit}^{{tree}}") == git(
         repo, "rev-parse", "main^{tree}"
     )
     assert merge_plan.overlaps(pulls) == [("1", "2", ["a.txt"])]
 
 
-def test_integration_commit_is_reproducible(repo):
+def test_integration_commit_is_reproducible_whatever_the_clock_and_identity(repo, monkeypatch):
     commit(repo, "p1", {"a.txt": edit(1, "p1")})
     commit(repo, "p2", {"b.txt": edit(1, "p2")})
     first = run_plan(repo, ["1=p1", "2=p2"])[1][0].commit
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2011-11-11T11:11:11Z")
+    monkeypatch.setenv("GIT_AUTHOR_DATE", "2011-11-11T11:11:11Z")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "someone else")
     assert run_plan(repo, ["1=p1", "2=p2"])[1][0].commit == first
+
+
+def test_squash_puts_a_stacked_pull_in_a_train_but_merge_commits_do_not(repo):
+    commit(repo, "p1", {"a.txt": edit(1, "p1")})
+    commit(repo, "p2", {"a.txt": edit(1, "p2")}, start="p1")  # stacked on p1, same line
+    _, batches, _ = run_plan(repo, ["1=p1", "2=p2"])
+    assert [b.pulls for b in batches] == [["1"], ["2"]]
+    assert batches[0].deferred == {"2": "conflicts with 1 in a.txt"}
+    _, batches, _ = run_plan(repo, ["1=p1", "2=p2"], method="merge")
+    assert [b.pulls for b in batches] == [["1", "2"]]
 
 
 def test_conflicting_pull_waits_for_a_later_batch_and_names_the_cause(repo):
@@ -79,7 +103,7 @@ def test_conflicting_pull_waits_for_a_later_batch_and_names_the_cause(repo):
     commit(repo, "p3", {"a.txt": edit(1, "p3")})
     _, batches, blocked = run_plan(repo, ["1=p1", "2=p2", "3=p3"])
     assert [b.pulls for b in batches] == [["1", "2"], ["3"]] and not blocked
-    assert batches[0].deferred == {"3": "conflicts with 1, 2 in a.txt"}
+    assert batches[0].deferred == {"3": "conflicts with 1 in a.txt"}
     assert batches[1].commit is None  # its car must be updated from main first
 
 
@@ -113,6 +137,8 @@ def test_cli_reports_json_and_rejects_bad_input(repo, capsys):
     assert merge_plan.main(["--repo", str(repo), "--base", "main", "--json", "1=p1"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["batches"][0]["pulls"] == ["1"] and report["blocked"] == {}
+    assert report["heads"] == {"1": git(repo, "rev-parse", "p1")}
+    assert report["base_commit"] == git(repo, "rev-parse", "main")
     for bad in (["p1"], ["1=p1", "1=p1"], ["--after", "1:7", "1=p1"], ["1=missing"]):
         assert merge_plan.main(["--repo", str(repo), "--base", "main", *bad]) == 1
     assert "merge plan:" in capsys.readouterr().err
@@ -124,3 +150,21 @@ def test_planning_leaves_branches_and_worktree_untouched(repo):
     refs = git(repo, "show-ref")
     run_plan(repo, ["1=p1", "2=p2"])
     assert git(repo, "show-ref") == refs and git(repo, "status", "--porcelain") == ""
+
+
+def test_text_report_pins_heads_and_explains_later_batches(repo, capsys):
+    commit(repo, "p1", {"a.txt": edit(1, "p1")})
+    commit(repo, "p3", {"a.txt": edit(1, "p3")})
+    assert merge_plan.main(["--repo", str(repo), "--base", "main", "1=p1", "3=p3"]) == 0
+    out = capsys.readouterr().out
+    assert f"Base {git(repo, 'rev-parse', 'main')}; method squash" in out
+    assert f"p3 @ {git(repo, 'rev-parse', 'p3')}" in out
+    assert "Batch 2: after batch 1 merges" in out and "conflicts with 1 in a.txt" in out
+
+
+def test_after_an_earlier_pull_blocked_by_the_base_blocks_the_later_one(repo):
+    commit(repo, "stale", {"c.txt": edit(5, "stale")})
+    commit(repo, "main", {"c.txt": edit(5, "main moved")})
+    commit(repo, "p1", {"a.txt": edit(1, "p1")})
+    _, batches, blocked = run_plan(repo, ["1=p1", "9=stale"], {"1": {"9"}})
+    assert batches == [] and set(blocked) == {"1", "9"}
