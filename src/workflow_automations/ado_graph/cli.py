@@ -1,4 +1,8 @@
-"""Command-line parser and `main` for the export and analyze modes."""
+"""Command-line parser and `main` for the export and analyze modes.
+
+Export's network modules load only when `export` runs, so `analyze` and `--help`
+need just the offline `ado-graph-analyze` extra.
+"""
 
 from __future__ import annotations
 
@@ -13,19 +17,24 @@ from workflow_automations.ado_graph.analyze import (
     DEFAULT_MAX_INDIRECT_EDGES,
     run_analyze,
 )
-from workflow_automations.ado_graph.client import ADO_BATCH_LIMIT, DEFAULT_SKIP_TYPES
-from workflow_automations.ado_graph.export import run_export
+from workflow_automations.ado_graph.client import (
+    ADO_BATCH_LIMIT,
+    DEFAULT_SKIP_TYPES,
+    ca_bundle_scope,
+    import_network_modules,
+)
 from workflow_automations.ado_graph.report import export_paths
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s – %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger("ado_tool")
+
+
+def configure_logging() -> None:
+    """Root logging for command-line runs; importing the package leaves it alone."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s – %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -203,9 +212,19 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
     check_outputs(parser, args)
+    configure_logging()
 
     if args.mode == "export":
-        run_export(args)
+        try:
+            import_network_modules()
+            from workflow_automations.ado_graph.export import run_export
+        except ModuleNotFoundError as exc:
+            parser.error(
+                "export needs the 'ado-graph' extra: "
+                f"python -m pip install 'workflow-automations[ado-graph]' ({exc})"
+            )
+        with ca_bundle_scope():
+            run_export(args)
     elif args.mode == "analyze":
         run_analyze(args)
     else:

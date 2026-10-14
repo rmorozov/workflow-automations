@@ -64,6 +64,19 @@ STEP_SUBGRAPH: dict[str, str] = {
 PARALLEL_LABEL_SEPARATOR = " & "
 
 
+def _longest_depth(dag: nx.DiGraph) -> dict:
+    """
+    Hops on the longest path from any source to each node of a DAG.
+
+    Topological dynamic programming: a source has depth 0 and every other node is one
+    more than its deepest predecessor, so a shortcut edge never lowers a depth.
+    """
+    depth: dict = {}
+    for node in nx.topological_sort(dag):
+        depth[node] = max((depth[p] + 1 for p in dag.predecessors(node)), default=0)
+    return depth
+
+
 def _edge_path(edge_data: dict) -> tuple[str, ...]:
     return edge_data.get("path") or (str(edge_data.get("link_type")),)
 
@@ -370,6 +383,7 @@ class GraphAnalyzer:
     def find_longest_chain(self, subgraph: str | None = None) -> pd.DataFrame:
         name, g = self._step_graph("longest_chain", subgraph)
         columns = [
+            "Chain_Length",
             "Chain_Rank",
             "SCC_Index",
             "WI_ID",
@@ -395,7 +409,12 @@ class GraphAnalyzer:
         rows = []
         for rank, scc_idx in enumerate(path_scc_indices):
             for wi_id in scc_members.get(scc_idx, []):
-                row = {"Chain_Rank": rank, "SCC_Index": scc_idx, "WI_ID": wi_id}
+                row = {
+                    "Chain_Length": length,
+                    "Chain_Rank": rank,
+                    "SCC_Index": scc_idx,
+                    "WI_ID": wi_id,
+                }
                 row.update(self._meta(wi_id))
                 rows.append(row)
         log.info("Longest chain in the %s subgraph (condensed DAG hops): %d", name, length)
@@ -435,12 +454,7 @@ class GraphAnalyzer:
         bc = nx.betweenness_centrality(g, normalized=True)
         cond = nx.condensation(g)
         mapping: dict = cond.graph.get("mapping", {})
-        sources = [n for n in cond.nodes if cond.in_degree(n) == 0]
-        scc_depth: dict[int, int] = {n: 0 for n in cond.nodes}
-        for src in sources:
-            for scc_idx, dist in nx.single_source_shortest_path_length(cond, src).items():
-                if dist > scc_depth.get(scc_idx, 0):
-                    scc_depth[scc_idx] = dist
+        scc_depth = _longest_depth(cond)
         rows = []
         for node in g.nodes:
             row = {

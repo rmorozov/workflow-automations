@@ -6,9 +6,9 @@ limitations not yet addressed stay listed here and in the backlog.
 
 Entry points after installation: `ado-graph`, `python scripts/ado_graph.py`, and
 `python -m workflow_automations.ado_graph`. Argument help retains `prog=ado_tool`.
-Install the `ado-graph` extra. All dependencies, including Kerberos, are imported
-at module startup, even for `--help` and offline `analyze`. Linux installations may
-need system Kerberos headers (`libkrb5-dev`) to build dependencies.
+Install the `ado-graph` extra for export, or only `ado-graph-analyze` for offline
+analysis (see below). Linux installations of `ado-graph` may need system Kerberos
+headers (`libkrb5-dev`) to build dependencies.
 
 ## Purpose and boundaries
 
@@ -18,6 +18,14 @@ query, traverses selected work-item relations, and writes node/edge tables.
 analysis sheets. Neither mode modifies ADO. Analysis makes no service calls.
 The tool is independent of `ado-triage`; it does not compute capacity, attention
 scores, RAG bands, or triage decisions.
+
+Analysis and `--help` need only the `ado-graph-analyze` extra (pandas, openpyxl,
+NetworkX, PyArrow). The ADO SDK, msrest, Kerberos, certifi and tqdm are in the
+`ado-graph` extra and load only when `export` runs; without them `export` exits 2
+before any work, naming the extra. Importing the package configures neither root
+logging nor certificates. Export sets `REQUESTS_CA_BUNDLE` to a merged temporary
+bundle while it runs, then deletes the bundle and restores the previous setting,
+also when export fails.
 
 ## Export CLI
 
@@ -228,20 +236,36 @@ scheduling graph.
 | `orphans` | Nodes with zero incoming and outgoing degree; full node fields plus URL/debug neighbors |
 | `no_cr_dep` | Nodes that are neither a Change Request nor downstream of one |
 | `has_cr_dep` | Change Requests and every node downstream of one (items that depend on a CR) |
-| `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count; every SCC member emitted |
+| `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count in `Chain_Length`; every SCC member emitted |
 | `scc` | Every strongly connected component including singletons; index, size, members, metadata |
-| `metrics` | Degrees (distinct neighbors), exact normalized betweenness, Dependency_Depth and metadata |
+| `metrics` | Degrees (distinct neighbors), exact normalized betweenness, longest-depth `Dependency_Depth` and metadata |
 | `cr_scope_impact` | CR descendants, count/IDs; numeric effort of CR plus descendants, invalid effort becomes zero |
 | `cr_prereqs` | CR ancestors (dependency subgraph by default), count/IDs and metadata |
 | `cr_impact_unpacked` | One row per CR/downstream node pair with both metadata sets |
 | `cr_prereqs_unpacked` | One row per CR/upstream node pair with both metadata sets |
 
 CR recognition is exact `WorkItemType == "Change Request"`. `Dependency_Depth` is
-the maximum, over source SCCs, of each source's *shortest* distance to an SCC; it
-is not longest prerequisite-chain depth. Longest-chain length is stored in
-DataFrame attrs and logs, not as a dedicated persisted Excel value. Set iteration
-and ties may change row order; deterministic report ordering is not guaranteed.
-The graph has no duration/capacity model, so longest chain is not a time critical path.
+the longest depth: the number of hops on the longest path from any source to the
+item in the step's SCC-condensed DAG, computed by dynamic programming in
+topological order (a source is 0; every other node is one more than its deepest
+predecessor). A shortcut link therefore never lowers a depth: with A→B→C and
+A→C, C has depth 2, although its shortest distance from A is 1. Members of one
+strongly connected component share its depth, so a cycle counts as a single step.
+The largest `Dependency_Depth` equals the `longest_chain` length on the same
+subgraph. Releases before AG-007 reported the maximum shortest distance from a
+source instead, which could be lower.
+
+The `longest_chain` sheet repeats the chain's hop count in a `Chain_Length` column
+on every row (the DataFrame attr `longest_path_length` and the log carry the same
+value). Set iteration and ties may change row order and which of several equally
+long chains is listed; deterministic report ordering is not guaranteed.
+
+Both measures count links (hops), not time. The graph has no duration, effort-based
+scheduling, capacity or calendar model, so the longest chain is the longest
+sequence of linked items, not a critical path: a chain of three one-day tasks has
+more hops than one three-month epic but finishes sooner. A critical path would need
+per-item durations and edges that mean finish-to-start, which hierarchy and impact
+links do not.
 
 Analysis writes requested sheets, no index, with widths capped at 50. `all` runs
 every step, including unbounded simple-cycle enumeration and exact centrality.
@@ -297,7 +321,9 @@ synthetic chain (`ADO_GRAPH_BENCH_NODES`, default 5,000).
 Tests use synthetic SDK-like objects and Parquet/XLSX files: CLI help and argument
 validation, saved-query result shapes, edge normalization, scope/prerequisite
 orientation, report publication, traversal through filtered bridges in both
-relation modes, once-per-ID WIQL classification, omitted-ID reporting, bridge
-contraction, and export normalization (literal Excel text, identities, zoned dates,
-empty exports and schema errors) across all formats. No actual ADO server was used. Remaining fixes and shared-code
-opportunities with ADO scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).
+relation modes, once-per-ID WIQL classification, omitted-ID reporting with
+export's exit codes 4 and 5, bridge contraction, export normalization (literal
+Excel text, identities, zoned dates, empty exports and schema errors) across all
+formats, offline analysis without the network extras, and CA-bundle cleanup. No
+actual ADO server was used. Remaining fixes and shared-code opportunities with ADO
+scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).

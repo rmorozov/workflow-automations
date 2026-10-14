@@ -17,10 +17,12 @@ outline = ["openpyxl>=3.1.5,<4", "pyyaml>=6,<7"]
 ado-triage = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4", "azure-devops>=7.1.0b4,<8"]
 # Separate: on Linux this builds gssapi and needs system Kerberos headers (libkrb5-dev).
 ado-kerberos = ["requests-kerberos>=0.15,<1"]
-# The graph tool imports its network dependencies even in analyze mode.
-ado-graph = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4", "networkx>=3,<4",
-             "pyarrow>=15,<27", "azure-devops>=7.1.0b4,<8", "msrest>=0.7.1,<0.8",
-             "requests-kerberos>=0.15,<1", "certifi>=2024.2.2", "tqdm>=4,<5"]
+# Offline graph analysis: no ADO SDK, no Kerberos.
+ado-graph-analyze = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4", "networkx>=3,<4", "pyarrow>=15,<27"]
+# Export as well; on Linux requests-kerberos builds gssapi (see ado-kerberos above).
+ado-graph = ["workflow-automations[ado-graph-analyze]", "azure-devops>=7.1.0b4,<8",
+             "msrest>=0.7.1,<0.8", "requests-kerberos>=0.15,<1", "certifi>=2024.2.2",
+             "tqdm>=4,<5"]
 # Every tool's runtime dependencies, including Kerberos (see ado-kerberos above).
 all = ["workflow-automations[translation,outline,ado-triage,ado-kerberos,ado-graph]"]
 dev = ["pytest>=8,<10", "ruff==0.16.9", "build>=1.2,<2"]

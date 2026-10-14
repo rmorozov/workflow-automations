@@ -145,14 +145,46 @@ def test_bridges_contract_within_each_subgraph():
     assert 2 not in analyzer.graph("impact")
 
 
-def test_dependency_depth_is_not_longest_chain_depth():
+def test_dependency_depth_is_longest_depth_not_shortest_distance():
+    # The shortcut 1->3 gives 3 a shortest distance of 1; its longest depth is 2.
     links = pd.DataFrame(
         [(1, 2, "Blocks"), (2, 3, "Blocks"), (1, 3, "Blocks")], columns=edges().columns
     )
     analyzer = analyze.GraphAnalyzer(nodes(), links)
     metrics = analyzer.compute_metrics().set_index("WI_ID")
-    assert metrics.loc[3, "Dependency_Depth"] == 1
-    assert analyzer.find_longest_chain().attrs["longest_path_length"] == 2
+    assert metrics["Dependency_Depth"].to_dict() == {1: 0, 2: 1, 3: 2, 4: 0}
+    chain = analyzer.find_longest_chain()
+    assert chain.attrs["longest_path_length"] == 2
+    assert list(chain["WI_ID"]) == [1, 2, 3]
+    assert set(chain["Chain_Length"]) == {2}
+    assert metrics["Dependency_Depth"].max() == chain.attrs["longest_path_length"]
+
+
+def test_dependency_depth_counts_a_cycle_as_one_step():
+    # 2<->3 is one SCC: both members share its depth, and 4 is one hop below it.
+    links = pd.DataFrame(
+        [(1, 2, "Blocks"), (2, 3, "Blocks"), (3, 2, "Blocks"), (3, 4, "Blocks"), (1, 4, "Blocks")],
+        columns=edges().columns,
+    )
+    analyzer = analyze.GraphAnalyzer(nodes(), links)
+    metrics = analyzer.compute_metrics().set_index("WI_ID")
+    assert metrics["Dependency_Depth"].to_dict() == {1: 0, 2: 1, 3: 1, 4: 2}
+    assert set(analyzer.find_longest_chain()["Chain_Length"]) == {2}
+
+
+def test_longest_chain_length_is_written_to_the_report(tmp_path):
+    links = pd.DataFrame(
+        [(1, 2, "Blocks"), (2, 3, "Blocks"), (1, 3, "Blocks")], columns=edges().columns
+    )
+    analyzer = analyze.GraphAnalyzer(nodes(), links)
+    output = tmp_path / "report.xlsx"
+    analyze.write_analysis_report(
+        {"longest_chain": analyzer.find_longest_chain(), "metrics": analyzer.compute_metrics()},
+        output,
+    )
+    sheets = pd.read_excel(output, sheet_name=None)
+    assert set(sheets["longest_chain"]["Chain_Length"]) == {2}
+    assert sheets["metrics"].set_index("WI_ID").loc[3, "Dependency_Depth"] == 2
 
 
 def test_bridge_chains_contract_and_direct_links_win():
