@@ -579,8 +579,15 @@ class GraphAnalyzer:
 
         sort_col = f"Total_{effort_label}" if has_effort else "Impacted_WI_Count"
         if not rows:
+            # The same leading columns as a non-empty result, each named once.
             return pd.DataFrame(
-                columns=["CR_ID", "CR_Title", sort_col, "Impacted_WI_Count", "Impacted_WI_IDs"]
+                columns=[
+                    "CR_ID",
+                    "CR_Title",
+                    f"Total_{effort_label}",
+                    "Impacted_WI_Count",
+                    "Impacted_WI_IDs",
+                ]
             )
         return pd.DataFrame(rows).sort_values(sort_col, ascending=False)
 

@@ -416,3 +416,14 @@ def test_interrupted_step_writes_no_report(tmp_path, monkeypatch, caplog):
     assert "Running step 2/2: metrics" in caplog.text
     assert "Step scc finished" in caplog.text
     assert "Interrupted during step metrics" in caplog.text
+
+
+def test_cr_scope_without_crs_names_each_column_once():
+    links = pd.DataFrame([(2, 3, "Blocks")], columns=edges().columns)
+    no_crs = nodes()[nodes()["WorkItemType"] != "Change Request"]
+    for effort_field in ("", "Effort"):
+        empty = analyze.GraphAnalyzer(no_crs, links, effort_field=effort_field)
+        columns = list(empty.analyze_cr_scope_and_impact().columns)
+        assert len(columns) == len(set(columns))
+        assert "Impacted_WI_Count" in columns
+    assert list(empty.analyze_cr_scope_and_impact().columns)[2] == "Total_Effort"
