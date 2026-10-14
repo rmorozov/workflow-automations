@@ -357,8 +357,8 @@ before the results:
 
 | Sheet | Content |
 | --- | --- |
-| `About` | `Item`/`Value` rows: purpose, how to read the report, tool version, the input files, work items and links loaded, relations after normalization, links skipped for an absent endpoint or an unknown type, bridge items contracted or dropped, work items analyzed, result-sheet count, and `Complete` (`yes`, or `no:` with the partial sheets) |
-| `Config` | `Setting`/`Value` rows: input and output file, `ado_url`, `effort_field`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
+| `About` | `Item`/`Value` rows: purpose, how to read the report, tool version, the input file names, work items and links loaded, relations after normalization, links skipped for an absent endpoint or an unknown type, bridge items contracted or dropped, work items analyzed, result-sheet count, and `Complete` (`yes`, or `no:` with the partial sheets) |
+| `Config` | `Setting`/`Value` rows: input and output file names (without their folder), `ado_url`, `effort_field`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
 | `Summary` | One row per result sheet: `Sheet` (a link to it), `Step`, `Subgraph`, `Rows`, a headline `Count` and what it `Counted`, `Complete` and `Note` |
 
 The headline count is cycles for `cycles`, components for `scc` (the note adds how

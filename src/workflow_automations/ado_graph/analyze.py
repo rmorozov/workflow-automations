@@ -915,8 +915,8 @@ def about_frame(
         ("Purpose", REPORT_PURPOSE),
         ("How to read", REPORT_GUIDE),
         ("Tool version", _tool_version()),
-        ("Nodes file", str(args.nodes_file)),
-        ("Edges file", str(args.edges_file)),
+        ("Nodes file", Path(args.nodes_file).name),
+        ("Edges file", Path(args.edges_file).name),
         ("Work items loaded", stats["nodes_loaded"]),
         ("Links loaded", stats["edges_loaded"]),
         ("Relations after normalization", stats["relations"]),
@@ -933,10 +933,13 @@ def about_frame(
 def config_frame(
     args: argparse.Namespace, analyzer: GraphAnalyzer, sheets: list[str]
 ) -> pd.DataFrame:
-    """Settings of this run, as Setting/Value rows; budgets come from the analyzer."""
+    """Settings of this run, as Setting/Value rows; budgets come from the analyzer.
+
+    Files are named without their directory, so runs from different folders compare.
+    """
     settings = [
-        ("nodes_file", str(args.nodes_file)),
-        ("edges_file", str(args.edges_file)),
+        ("nodes_file", Path(args.nodes_file).name),
+        ("edges_file", Path(args.edges_file).name),
         ("output_file", Path(args.output_file).name),
         ("ado_url", args.ado_url),
         ("effort_field", args.effort_field),
