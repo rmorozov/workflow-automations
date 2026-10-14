@@ -16,7 +16,7 @@ from backlog import TIERS, load_tasks
 ROOT = Path(__file__).resolve().parents[1]
 EFFORTS = {"low", "medium", "high", "xhigh"}
 TASK_ROLES = {"implementer", "planner", "reviewer"}
-FIXED_ROLES = {"coordinator", "curator", "checker", "arbiter"}
+FIXED_ROLES = {"coordinator", "curator", "checker", "arbiter", "steward"}
 FIELDS = {"name", "description", "developer_instructions", "model", "model_reasoning_effort"}
 FEATURES = {"apps", "plugins", "memories", "request_permissions_tool"}
 
