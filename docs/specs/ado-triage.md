@@ -194,10 +194,42 @@ ado-triage export --url https://ado.example.com/tfs/Collection/Project \
   --output work/triage-2026-10-01.xlsx
 ```
 
+`--config FILE` reads a JSON object for sites whose process differs from the
+defaults. Every key is optional; an omitted one keeps its default.
+
+```json
+{
+  "fields": {"uat_expected_date": "Custom.UATTargetDate"},
+  "hours": {"quick_win_min": 1, "quick_win_max": 20, "minor_progress_below": 16},
+  "weights": {"DATE_DRIFT": 3, "STALE": 2},
+  "rag": {"red_above_pct": 100, "amber_from_pct": 85}
+}
+```
+
+- `fields` maps `estimation_expected_date`, `estimation_ready_date`,
+  `uat_expected_date`, `uat_ready_date`, `original_estimate`, `completed_work` and
+  `remaining_work` to the ADO reference names that hold them (defaults as listed
+  under Inputs). The heuristics read the configured field, and every sheet and the
+  CSV label the column with the configured name. Two fields may not resolve to the
+  same name or to a `System.*` field the tool reads.
+- `hours` sets the QUICK_WIN band (completed > 0 and remaining between the two
+  bounds, inclusive) and the Minor Progress sheet (completed > 0 and below
+  `minor_progress_below`). Values are non-negative; `quick_win_min` ≤ `quick_win_max`.
+- `weights` sets non-negative integer weights of **risk** flags only, so it changes
+  `Attention_Score`, the agenda (a weight of 0 keeps the flag but scores nothing)
+  and the legend. Opportunity flags never score and are refused.
+- `rag` sets the Executive Summary bands: RED when `Load_Pct` > `red_above_pct`,
+  AMBER when ≥ `amber_from_pct` (≤ `red_above_pct`), else GREEN.
+
+The Config sheet names the file and lists the effective hour bands, RAG bands,
+renamed fields and weights. Malformed JSON, unknown keys, wrong types and the
+constraints above are validation errors (exit 2) found before ADO is contacted or
+any file is written; `--config` may not be the output.
+
 | Exit | Meaning |
 | --- | --- |
 | 0 | Report written (warnings, if any, are printed and listed on the Config sheet) |
-| 2 | Invalid options, capacity, previous report, or existing output without `--overwrite` |
+| 2 | Invalid options, config, capacity, previous report, or existing output without `--overwrite` |
 | 3 | File IO failure |
 | 4 | Query returned no work items; nothing written |
 | 5 | ADO connection, authentication or query failure; nothing written |

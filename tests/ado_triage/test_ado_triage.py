@@ -1,5 +1,6 @@
 """Behavior contracts for ado-triage using synthetic snapshots; no ADO access."""
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -892,3 +893,136 @@ def test_control_characters_in_fields_do_not_break_the_workbook(tmp_path):
     master = load_workbook(out)[tool.SHEET_MASTER]
     titles = [c.value for c in master[tool.DATA_START_ROW - 1]]
     assert master.cell(tool.DATA_START_ROW, titles.index(tool.FIELD_TITLE) + 1).value == "Badtitle"
+
+
+# ---------------------------------------------------------------------------
+# JSON configuration (--config)
+# ---------------------------------------------------------------------------
+
+CUSTOM_UAT = "Custom.UATTargetDate"
+
+
+def write_config(path, config):
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+def test_config_changes_weights_hour_bands_and_rag(snapshot, tmp_path):
+    default = tool.build_report(snapshot, CAPACITY, settings())
+    config = {
+        "weights": {"DATE_DRIFT": 10, "BLOCKS_OTHERS": 0},
+        "hours": {"quick_win_max": 4, "minor_progress_below": 12},
+        "rag": {"red_above_pct": 200, "amber_from_pct": 150},
+    }
+    tuned = tool.build_report(
+        snapshot, CAPACITY, settings(**tool.load_config(write_config(tmp_path / "c.json", config)))
+    )
+    before, after = by_id(default), by_id(tuned)
+
+    # Item 1 drifts and blocks item 2: 3 + 3 by default, 10 + 0 when configured.
+    assert {"DATE_DRIFT", "BLOCKS_OTHERS"} <= set(after.loc[1, tool.COL_FLAGS].split("|"))
+    assert after.loc[1, tool.COL_SCORE] - before.loc[1, tool.COL_SCORE] == 10 - 3 - 3
+    # Item 3 has 5 h left: a quick win in 1-20 h, not in 1-4 h.
+    assert "QUICK_WIN" in before.loc[3, tool.COL_OPP_FLAGS]
+    assert "QUICK_WIN" not in after.loc[3, tool.COL_OPP_FLAGS]
+    # Item 1 logged 10 h and item 3 15 h: minor progress below 16 h, only item 1 below 12 h.
+    minor = "8. Minor Progress"
+    assert set(default.sheets[minor][tool.FIELD_ID]) == {1, 3}
+    assert set(tuned.sheets[minor][tool.FIELD_ID]) == {1}
+    # TeamX carries 155 % load: RED by default, AMBER under 150-200 bands.
+    rag = {
+        r.sheets[tool.SHEET_SUMMARY].set_index("Team").loc[TEAM_X, tool.COL_RAG]
+        for r in (default, tuned)
+    }
+    assert rag == {"RED", "AMBER"}
+    assert {h.flag: h.weight for h in tuned.legend}["DATE_DRIFT"] == 10
+
+
+def test_config_reads_renamed_fields_and_labels_them_in_the_report(tmp_path):
+    items = [item(1, TEAM_X, "Late UAT", rw=10, **{CUSTOM_UAT: iso(10)})]
+    config = write_config(tmp_path / "c.json", {"fields": {"uat_expected_date": CUSTOM_UAT}})
+    cfg = settings(**tool.load_config(config))
+    report = tool.build_report(tool.Snapshot(items=items), CAPACITY, cfg)
+    assert by_id(report).loc[1, tool.COL_FLAGS] == "DATE_DRIFT"
+    drift = report.sheets["9. Date Drift Risk"]
+    assert CUSTOM_UAT in drift.columns and tool.FIELD_UAT_EXPECTED not in drift.columns
+    master = report.sheets[tool.SHEET_MASTER]
+    assert list(master.columns).count(CUSTOM_UAT) == 1
+
+
+def test_cli_config_reaches_the_workbook_and_csv(snapshot, tmp_path, monkeypatch):
+    monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
+    snapshot.items[0]["fields"][CUSTOM_UAT] = snapshot.items[0]["fields"].pop(
+        tool.FIELD_UAT_EXPECTED
+    )
+    config = write_config(
+        tmp_path / "c.json",
+        {"fields": {"uat_expected_date": CUSTOM_UAT}, "weights": {"DATE_DRIFT": 7}},
+    )
+    out = tmp_path / "r.xlsx"
+    assert tool.main(cli(tmp_path, "--config", str(config), "--output", str(out))) == 0
+    ws = load_workbook(out)[tool.SHEET_CONFIG]
+    values = [[c.value for c in row] for row in ws.iter_rows()]
+    assert ["Config file", str(config)] in [row[:2] for row in values]
+    assert ["DATE_DRIFT", "risk", 7] in [row[:3] for row in values]
+
+    csv = tmp_path / "r.csv"
+    args = cli(tmp_path, "--config", str(config), "--format", "csv", "--output", str(csv))
+    assert tool.main(args) == 0
+    frame = pd.read_csv(csv)
+    assert CUSTOM_UAT in frame.columns
+    assert frame.set_index(tool.FIELD_ID).loc[1, tool.COL_SCORE] >= 7
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("{not json", "not valid JSON"),
+        ("[]", "top level"),
+        ('{"weight": {}}', "unknown keys"),
+        ('{"weights": {"QUICK_WIN": 2}}', "unknown keys"),
+        ('{"weights": {"STALE": 1.5}}', "non-negative integer"),
+        ('{"weights": {"STALE": true}}', "non-negative integer"),
+        ('{"hours": {"quick_win_min": 30}}', "exceeds quick_win_max"),
+        ('{"hours": {"minor_progress_below": -1}}', "negative"),
+        ('{"hours": {"quick_win_max": NaN}}', "finite number"),
+        ('{"rag": {"amber_from_pct": 120}}', "exceeds red_above_pct"),
+        ('{"fields": {"uat_ready_date": ""}}', "non-empty"),
+        ('{"fields": {"uat_ready_date": "my.UATExpectedDate"}}', "several fields"),
+        ('{"fields": {"remaining_work": "System.State"}}', "several fields"),
+        ('{"fields": {"uat_date": "Custom.X"}}', "unknown keys"),
+    ],
+)
+def test_invalid_config_exits_before_any_service_call(
+    tmp_path, no_network, capsys, content, message
+):
+    config = tmp_path / "c.json"
+    config.write_text(content, encoding="utf-8")
+    out = tmp_path / "r.xlsx"
+    assert tool.main(cli(tmp_path, "--config", str(config), "--output", str(out))) == 2
+    assert message in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_missing_config_and_config_as_output_are_validation_errors(tmp_path, no_network):
+    missing = cli(
+        tmp_path, "--config", str(tmp_path / "nope.json"), "--output", str(tmp_path / "r.xlsx")
+    )
+    assert tool.main(missing) == tool.EXIT_VALIDATION
+    config = write_config(tmp_path / "c.json", {})
+    same = cli(tmp_path, "--config", str(config), "--output", str(config), "--overwrite")
+    assert tool.main(same) == tool.EXIT_VALIDATION
+    assert json.loads(config.read_text()) == {}
+
+
+def test_swapped_field_names_are_read_from_the_original_fields(tmp_path):
+    fields = {
+        "original_estimate": tool.FIELD_COMPLETED_WORK,
+        "completed_work": tool.FIELD_ORIGINAL_ESTIMATE,
+    }
+    cfg = settings(**tool.load_config(write_config(tmp_path / "c.json", {"fields": fields})))
+    items = [item(1, TEAM_X, "Swapped", oe=30, cw=5, rw=1)]
+    master = by_id(tool.build_report(tool.Snapshot(items=items), CAPACITY, cfg))
+    assert master.loc[1, tool.FIELD_ORIGINAL_ESTIMATE] == 5
+    assert master.loc[1, tool.FIELD_COMPLETED_WORK] == 30
+    assert "OVER_ESTIMATE" in master.loc[1, tool.COL_FLAGS]
