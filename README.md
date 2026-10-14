@@ -230,13 +230,15 @@ The equivalent script invocation is `python scripts/ado_graph.py ...` after inst
 ## Agentic development
 
 The repository includes Claude and Codex role definitions, a per-task backlog,
-provider-neutral tiers and conflict-aware planning. See
+provider-neutral tiers, conflict-aware planning and a merge planner that batches
+ready PRs and turns conflicting ones into trains. See
 [agentic workflow](docs/agentic-workflow.md#codex-setup).
 
 ```bash
 python scripts/backlog.py plan --busy AG-018
 python scripts/agent_profiles.py check
 python scripts/agent_profiles.py route --task AG-004 --role reviewer
+python scripts/merge_plan.py --base origin/main 16=origin/<branch> 20=origin/<branch>
 ```
 
 Codex runtime activation depends on your client; profile parsing alone does not

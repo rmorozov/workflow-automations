@@ -50,7 +50,7 @@ def test_routine_and_complex_routes_and_fixed_coordinator(tmp_path):
     assert reviewer["profile"] == "reviewer"
 
 
-@pytest.mark.parametrize("role", ["coordinator", "curator", "checker", "arbiter"])
+@pytest.mark.parametrize("role", ["coordinator", "curator", "checker", "arbiter", "steward"])
 def test_fixed_roles_need_no_task_but_validate_a_supplied_task(role):
     result = run("route", "--role", role)
     assert result.returncode == 0, result.stderr
