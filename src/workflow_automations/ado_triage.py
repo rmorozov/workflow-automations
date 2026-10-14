@@ -9,6 +9,7 @@ previous report, so the whole report pipeline is testable offline.
 import argparse
 import logging
 import os
+import re
 import sys
 import tempfile
 import zipfile
@@ -1028,6 +1029,28 @@ class Report:
     sheets: dict[str, pd.DataFrame]
     omitted: list[str]
     notes: list[str]
+    resolved: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=RESOLVED_COLUMNS))
+    team: str | None = None  # set on a per-team report
+
+
+def _assemble(
+    master: pd.DataFrame,
+    relations: pd.DataFrame,
+    resolved: pd.DataFrame,
+    capacity: dict[str, float],
+    cfg: Settings,
+) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    sheets: dict[str, pd.DataFrame] = {}
+    omitted: list[str] = []
+    for spec in SHEETS:
+        if cfg.profile == "exec" and not spec.exec_profile:
+            continue
+        frame = resolved if spec.view is None else spec.view(master, relations, capacity, cfg)
+        if frame.empty and not spec.always:
+            omitted.append(spec.name)
+            continue
+        sheets[spec.name] = frame
+    return sheets, omitted
 
 
 def build_report(
@@ -1041,18 +1064,79 @@ def build_report(
     relations = build_relations(snapshot, cfg)
     master = annotate(build_master(snapshot, capacity, cfg), relations, cfg)
     master, resolved, notes = apply_deltas(master, previous)
+    sheets, omitted = _assemble(master, relations, resolved, capacity, cfg)
+    return Report(master, relations, sheets, omitted, [*snapshot.warnings, *notes], resolved)
 
-    sheets: dict[str, pd.DataFrame] = {}
-    omitted: list[str] = []
-    for spec in SHEETS:
-        if cfg.profile == "exec" and not spec.exec_profile:
-            continue
-        frame = resolved if spec.view is None else spec.view(master, relations, capacity, cfg)
-        if frame.empty and not spec.always:
-            omitted.append(spec.name)
-            continue
-        sheets[spec.name] = frame
-    return Report(master, relations, sheets, omitted, [*snapshot.warnings, *notes])
+
+def build_team_reports(
+    report: Report,
+    capacity: dict[str, float],
+    cfg: Settings,
+    previous: pd.DataFrame | None = None,
+) -> tuple[dict[str, Report], list[str]]:
+    """Split ``report`` into one report per team (``Matched_Capacity_Level``).
+
+    Each work item belongs to exactly one team, so its rows appear only in that
+    team's report. A relation belongs to the team of its source item. A resolved
+    item belongs to its current team or, if dropped from the query, to its team in
+    ``previous``. Flags, scores and deltas are those of the combined report; only
+    rankings and rollups are recomputed within the team. Returns the reports and
+    notes on resolved items whose team is unknown (they stay in the combined report).
+    """
+    master = report.master
+    level = master[COL_LEVEL].fillna("").astype(str)  # a blank AreaPath is a team too
+    team_names = sorted(level.unique())
+    team_of = level.set_axis(master[FIELD_ID])
+    if previous is not None and COL_LEVEL in previous.columns:
+        earlier = previous.dropna(subset=[COL_LEVEL]).drop_duplicates(FIELD_ID)
+        team_of = team_of.combine_first(earlier.set_index(FIELD_ID)[COL_LEVEL].astype(str))
+    resolved_team = report.resolved[FIELD_ID].map(team_of)
+    unplaced = ~resolved_team.isin(team_names)
+    unknown = report.resolved.loc[unplaced, FIELD_ID].tolist()
+    notes = (
+        [f"Resolved items of no current team are only in the combined report: {unknown}"]
+        if unknown
+        else []
+    )
+
+    teams: dict[str, Report] = {}
+    for team in team_names:
+        rows = master[level == team]
+        relations = report.relations[report.relations[REL_COL_SOURCE_ID].isin(rows[FIELD_ID])]
+        resolved = report.resolved[resolved_team == team]
+        sheets, omitted = _assemble(rows, relations, resolved, capacity, cfg)
+        notes_t = [*report.notes, *notes]
+        teams[team] = Report(rows, relations, sheets, omitted, notes_t, resolved, team)
+    return teams, notes
+
+
+# Characters Windows forbids or that would split a path; everything else is kept.
+_UNSAFE_FILENAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
+_WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10))}
+_WINDOWS_RESERVED |= {f"LPT{i}" for i in range(1, 10)}
+
+
+def team_filename(team: str) -> str:
+    """File-name-safe form of a team AreaPath: ``Proj\\Dept\\Team A`` -> ``Proj_Dept_Team A``."""
+    name = _UNSAFE_FILENAME.sub("_", str(team)).strip(" ._") or "NO_AREA"
+    if name.split(".")[0].upper() in _WINDOWS_RESERVED:
+        name += "_"
+    return name
+
+
+def team_paths(output: Path, team_dir: Path, teams: Sequence[str]) -> dict[str, Path]:
+    """``<team_dir>/<output stem>.<team><output suffix>`` per team; fails on name clashes."""
+    paths: dict[str, Path] = {}
+    seen: dict[str, str] = {}
+    for team in teams:
+        name = f"{output.stem}.{team_filename(team)}{output.suffix}"
+        if name.casefold() in seen:  # Windows and macOS file systems ignore case
+            raise TriageError(
+                f"teams {seen[name.casefold()]!r} and {team!r} map to the same file {name}"
+            )
+        seen[name.casefold()] = team
+        paths[team] = team_dir / name
+    return paths
 
 
 RAG_FILLS = {
@@ -1125,6 +1209,8 @@ def _write_config(writer: pd.ExcelWriter, report: Report, meta: dict[str, str]) 
 
 def write_excel(path: Path, report: Report, meta: dict[str, str]) -> None:
     purposes = {spec.name: spec.purpose for spec in SHEETS}
+    if report.team is not None:
+        meta = {"Team": report.team, **meta}
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         _write_config(writer, report, meta)
         for name, frame in report.sheets.items():
@@ -1193,6 +1279,11 @@ def parser() -> argparse.ArgumentParser:
     ex.add_argument("--stale-days", type=int, default=21)
     ex.add_argument("--timebox-days", type=int, default=60)
     ex.add_argument("--as-of", help="Report date YYYY-MM-DD (default: today)")
+    ex.add_argument(
+        "--team-dir",
+        type=Path,
+        help="Also write one report per team into this directory (<output stem>.<team>.<ext>)",
+    )
     return root
 
 
@@ -1239,9 +1330,25 @@ def run_export(args: argparse.Namespace) -> Report:
     previous = read_previous_master(args.previous_file) if args.previous_file else None
     if args.output.exists() and not args.overwrite:
         raise TriageError(f"{args.output} exists; pass --overwrite to replace it")
+    if args.team_dir is not None and args.team_dir.exists() and not args.team_dir.is_dir():
+        raise TriageError(f"--team-dir {args.team_dir} is not a directory")
 
     snapshot = fetch_snapshot(args.url, args.query_id)
     report = build_report(snapshot, capacity, cfg, previous)
+    teams: dict[str, Report] = {}
+    targets: dict[str, Path] = {}
+    if args.team_dir is not None:
+        teams, team_notes = build_team_reports(report, capacity, cfg, previous)
+        for note in team_notes:
+            logger.warning(note)
+        targets = team_paths(args.output, args.team_dir, list(teams))
+        # Check every target before writing any, so a clash leaves no partial set.
+        inputs = {p.resolve() for p in (args.capacity_file, args.previous_file) if p is not None}
+        for path in targets.values():
+            if path.resolve() in inputs | {output}:
+                raise TriageError(f"team report {path} would replace an input or --output")
+            if path.exists() and not args.overwrite:
+                raise TriageError(f"{path} exists; pass --overwrite to replace it")
     meta = {
         "Generated": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "As of": cfg.as_of.strftime("%Y-%m-%d"),
@@ -1256,10 +1363,13 @@ def run_export(args: argparse.Namespace) -> Report:
         "Timebox (days)": str(cfg.timebox_days),
         "RAG (Load_Pct)": f"RED > {RAG_RED_PCT:g}, AMBER >= {RAG_AMBER_PCT:g}, else GREEN",
     }
-    if args.format == "csv":
-        publish(args.output, lambda p: report.master.to_csv(p, index=False), args.overwrite)
-    else:
-        publish(args.output, lambda p: write_excel(p, report, meta), args.overwrite)
+    for path, part in [(args.output, report), *((targets[t], r) for t, r in teams.items())]:
+        if args.format == "csv":
+            publish(path, lambda p, r=part: r.master.to_csv(p, index=False), args.overwrite)
+        else:
+            publish(path, lambda p, r=part: write_excel(p, r, meta), args.overwrite)
+    if teams:
+        logger.info("Wrote %d team reports to %s", len(teams), args.team_dir)
     return report
 
 
