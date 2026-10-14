@@ -409,6 +409,21 @@ def test_items_without_area_path_form_their_own_team():
     assert {t: set(r.master[tool.FIELD_ID]) for t, r in teams.items()} == {"": {2}, TEAM_X: {1}}
 
 
+def test_items_without_area_path_appear_in_every_team_view(tmp_path):
+    missing = item(2, None, "Missing area", rw=7)
+    del missing["fields"][tool.FIELD_AREA_PATH]  # ADO omits empty fields
+    items = [item(1, TEAM_X, "A", rw=5), missing, item(3, None, "Null area", rw=3)]
+    report = tool.build_report(tool.Snapshot(items=items), CAPACITY, settings())
+
+    top = report.sheets["15. Top 20% Remaining Work"]
+    assert set(top[tool.FIELD_ID]) == {1, 2}  # one per team; used to raise IntCastingNaNError
+    summary = report.sheets[tool.SHEET_SUMMARY].set_index("Team")
+    assert summary.loc["", "Total_CRs"] == 2 and summary.loc["", "Total_Remaining_Work"] == 10
+    triage = report.sheets["4. Capacity Triage"].set_index(tool.COL_LEVEL).loc[""]
+    assert triage["Total_CRs"] == 2 and triage[tool.COL_CAPACITY] == tool.UNDEFINED_CAPACITY
+    tool.write_excel(tmp_path / "report.xlsx", report, {})
+
+
 def test_dropped_item_without_area_path_stays_with_the_blank_team(tmp_path):
     items = [item(1, None, "No area", owner=None), item(2, None, "Also no area")]
     first = tool.build_report(tool.Snapshot(items=items), {}, settings())
