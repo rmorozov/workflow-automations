@@ -227,6 +227,7 @@ objects may fail serialization.
 Tests use synthetic SDK-like objects and Parquet/XLSX files: CLI help and argument
 validation, saved-query result shapes, edge normalization, scope/prerequisite
 orientation, report publication, traversal through filtered bridges in both
-relation modes, once-per-ID WIQL classification, omitted-ID reporting, and bridge
-contraction. No actual ADO server was used. Remaining fixes and shared-code
-opportunities with ADO scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).
+relation modes, once-per-ID WIQL classification, omitted-ID reporting with
+export's exit codes 4 and 5, bridge contraction, offline analysis without the
+network extras, and CA-bundle cleanup. No actual ADO server was used. Remaining
+fixes and shared-code opportunities with ADO scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).
