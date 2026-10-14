@@ -63,15 +63,36 @@ With `--filtered-relations stop` (default), relations of out-of-scope items are 
 followed.
 Before a fetch batch that contains IDs not yet checked, up to 1,000 unchecked queued
 IDs from the head of the queue are sent to one WIQL filter query; IDs it rejects are
-dropped without being fetched and counted as pruned. Each ID is sent to WIQL at most
-once, so WIQL work is linear in the number of distinct queued IDs. If a WIQL chunk
-fails, it warns and its IDs are fetched and filtered after fetch instead; they are not
+dropped without being fetched and counted as pruned. Each ID is sent to the WIQL
+filter at most once (a rejected ID to one more existence query, below), so WIQL work
+is linear in the number of distinct queued IDs. If a WIQL chunk fails, it warns and its IDs are fetched and filtered after fetch instead; they are not
 re-sent to WIQL. Accepted items reachable only through filtered items are not
 exported in this mode.
 
+WIQL returns only existing, readable items, so an ID the filter query rejects may be
+missing rather than filtered. Rejected IDs are sent to one more WIQL query without
+filters; only those it returns are pruned. The rest are fetched, so the batch fetch
+reports them as omitted. If that existence query fails, all rejected IDs of the chunk
+are fetched and filtered after fetch.
+
 IDs requested but not returned by ADO (deleted or inaccessible) are counted as
-omitted and logged with a warning listing up to 20 IDs. They are not retried, and the
-run still exits 0; there is no separate incomplete-run status yet.
+omitted and are not retried. They are split the way `ado-triage` separates core items
+from label lookups:
+
+| Omitted | Status | Exit | Outputs |
+| --- | --- | --- | --- |
+| none | `complete` | 0 | written |
+| only linked IDs (reached via relations) | `incomplete` | 4 | written |
+| any seed ID (returned by the saved query) | `failed` | 5 | none written |
+
+A missing linked ID loses a node and every path through it; whether it would have
+been in scope or a bridge is unknown, so this is reported in both relation modes.
+A missing seed means the requested scope itself is incomplete. Seeds head the queue,
+so the run stops as soon as every seed is fetched or pruned. The last seed batch may
+be topped up with linked IDs, so on a failed run the linked count is partial and
+depends on the batch size; the seed count does not. The summary prints the omitted total, its seed and linked counts and the
+completion status; the omitted IDs are logged sorted, up to 20 per list. Pruned items
+are out of scope, not missing, and do not affect the status.
 
 Recognized relations: hierarchy forward, affects forward/reverse, blocks
 forward/reverse, dependency forward/reverse, implements forward/reverse. Hierarchy
