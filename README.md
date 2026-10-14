@@ -200,6 +200,12 @@ only the leadership sheets plus Master Data, so it still works as `--previous-fi
 own items. Existing output requires
 `--overwrite`.
 
+Add `--save-snapshot work/triage-2026-10-01.json` to also keep the fetched ADO data.
+Later, `ado-triage export --from-snapshot work/triage-2026-10-01.json --as-of 2026-10-01
+--output work/rerun.xlsx` rebuilds the same report offline, with no Kerberos ticket or
+ADO access. The query ID and URL come from the snapshot, so omit `--query-id`.
+Capacity, previous-report and team options work as usual.
+
 ## Development
 
 ```bash

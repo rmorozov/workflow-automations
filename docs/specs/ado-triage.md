@@ -65,7 +65,22 @@ It enables deltas. A legacy report without flags gives `Delta_Status` but restar
 persistence and has no resolved list; this is recorded as a warning. A file that is not
 a readable XLSX (for example this tool's CSV output) is a validation error (exit 2).
 
-All local inputs are validated before ADO is contacted.
+**Saved snapshot.** `--save-snapshot FILE` also writes the fetched data as a
+versioned JSON snapshot (the shared `workflow-automations/ado-snapshot` format,
+producer `ado-triage`), published together with the report: an existing file needs
+`--overwrite`, and it may not be the output or an input. `--from-snapshot FILE`
+replaces the query: the report is rebuilt from the snapshot without contacting ADO,
+so a snapshot rebuilds the same report sheets as the live run that saved it, given
+the same `--as-of`, capacity and previous inputs. The query ID comes from the
+snapshot (`--query-id` is refused), and `--url` defaults to the snapshot's URL and is
+needed only when the snapshot has none. Snapshots written by `ado-graph` are accepted
+when they were captured without type or project filters; linked items and parents
+missing from them are labelled and counted as warnings. The Config sheet names the
+snapshot file. A file that is not a valid snapshot, or a filtered one, is a validation
+error (exit 2); a snapshot without queried items gives exit 4. `--from-snapshot` and
+`--save-snapshot` cannot be combined.
+
+All local inputs, including `--from-snapshot`, are validated before ADO is contacted.
 
 ## Heuristics
 

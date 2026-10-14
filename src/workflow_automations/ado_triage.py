@@ -28,7 +28,13 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from workflow_automations.ado_common.query import chunks, query_result_ids
-from workflow_automations.ado_common.snapshot import RawSnapshot, utc_timestamp
+from workflow_automations.ado_common.snapshot import (
+    RawSnapshot,
+    SnapshotError,
+    load_snapshot,
+    save_snapshot,
+    utc_timestamp,
+)
 
 logger = logging.getLogger("ado_triage")
 
@@ -1474,8 +1480,15 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     commands = root.add_subparsers(dest="mode", required=True)
     ex = commands.add_parser("export", help="Query ADO and write the triage report")
-    ex.add_argument("--url", required=True, help="ADO collection URL")
-    ex.add_argument("--query-id", required=True, help="Saved query GUID")
+    ex.add_argument("--url", help="ADO collection URL (default with --from-snapshot: its URL)")
+    ex.add_argument("--query-id", help="Saved query GUID (not with --from-snapshot)")
+    source = ex.add_mutually_exclusive_group()
+    source.add_argument(
+        "--from-snapshot", type=Path, help="Build the report from a saved JSON snapshot, offline"
+    )
+    source.add_argument(
+        "--save-snapshot", type=Path, help="Also save the fetched data as a JSON snapshot"
+    )
     ex.add_argument(
         "--output", "--file", dest="output", required=True, type=Path, help="Report path"
     )
@@ -1526,10 +1539,35 @@ def _settings(args: argparse.Namespace) -> Settings:
     )
 
 
+def _replay_source(args: argparse.Namespace) -> Snapshot | None:
+    """Load ``--from-snapshot`` and fill ``--url``/``--query-id`` from it.
+
+    Without a snapshot, both options are required for the live query.
+    """
+    if args.from_snapshot is None:
+        missing = [opt for opt in ("url", "query_id") if not getattr(args, opt)]
+        if missing:
+            names = " and ".join(f"--{m.replace('_', '-')}" for m in missing)
+            raise TriageError(f"{names} required unless --from-snapshot is given")
+        return None
+    if args.query_id:
+        raise TriageError("--query-id comes from the snapshot; omit it with --from-snapshot")
+    try:
+        raw = load_snapshot(args.from_snapshot)
+    except SnapshotError as exc:
+        raise TriageError(f"--from-snapshot {args.from_snapshot}: {exc}") from exc
+    args.url = args.url or raw.source.get("base_url", "")
+    if not args.url:
+        raise TriageError("the snapshot records no ADO URL; pass --url for work-item links")
+    args.query_id = raw.source.get("query_id", "")
+    return snapshot_from_raw(raw)
+
+
 def run_export(args: argparse.Namespace) -> Report:
+    replay = _replay_source(args)
     cfg = _settings(args)
     output = args.output.resolve()
-    for name in ("capacity_file", "previous_file"):
+    for name in ("capacity_file", "previous_file", "from_snapshot"):
         source = getattr(args, name)
         if source is not None and source.resolve() == output:
             raise TriageError(f"--output must differ from --{name.replace('_', '-')}")
@@ -1541,12 +1579,20 @@ def run_export(args: argparse.Namespace) -> Report:
     previous = read_previous_master(args.previous_file) if args.previous_file else None
     if args.output.exists() and not args.overwrite:
         raise TriageError(f"{args.output} exists; pass --overwrite to replace it")
+    if args.save_snapshot is not None:
+        saved = args.save_snapshot.resolve()
+        if saved == output or any(
+            p is not None and p.resolve() == saved for p in (args.capacity_file, args.previous_file)
+        ):
+            raise TriageError("--save-snapshot must differ from --output and every input")
+        if args.save_snapshot.exists() and not args.overwrite:
+            raise TriageError(f"{args.save_snapshot} exists; pass --overwrite to replace it")
     if args.team_dir is not None:
         existing = next(p for p in (args.team_dir, *args.team_dir.parents) if p.exists())
         if not existing.is_dir() or not os.access(existing, os.W_OK):
             raise TriageError(f"--team-dir {args.team_dir}: {existing} is not a writable directory")
 
-    snapshot = fetch_snapshot(args.url, args.query_id)
+    snapshot = replay if replay is not None else fetch_snapshot(args.url, args.query_id)
     report = build_report(snapshot, capacity, cfg, previous)
     teams: dict[str, Report] = {}
     targets: dict[str, Path] = {}
@@ -1555,7 +1601,13 @@ def run_export(args: argparse.Namespace) -> Report:
         for note in team_notes:
             logger.warning(note)
         targets = team_paths(args.output, args.team_dir, list(teams))
-        inputs = {p.resolve() for p in (args.capacity_file, args.previous_file) if p is not None}
+        inputs = {
+            p.resolve()
+            for p in (args.capacity_file, args.previous_file, args.from_snapshot)
+            if p is not None
+        }
+        if args.save_snapshot is not None:
+            inputs.add(args.save_snapshot.resolve())
         for path in targets.values():
             if path.resolve() in inputs | {output}:
                 raise TriageError(f"team report {path} would replace an input or --output")
@@ -1564,6 +1616,7 @@ def run_export(args: argparse.Namespace) -> Report:
         "As of": cfg.as_of.strftime("%Y-%m-%d"),
         "ADO URL": args.url,
         "Query ID": args.query_id,
+        "Snapshot": str(args.from_snapshot or "(fetched live)"),
         "Capacity file": str(args.capacity_file or "(none)"),
         "Capacity window": ", ".join(cfg.capacity_window) or "(none)",
         "Previous report": str(args.previous_file or "(none)"),
@@ -1580,7 +1633,11 @@ def run_export(args: argparse.Namespace) -> Report:
         return lambda p: write_excel(p, part, meta)
 
     parts = [(args.output, report), *((targets[t], r) for t, r in teams.items())]
-    publish_all([(path, writer(part)) for path, part in parts], args.overwrite)
+    writes = [(path, writer(part)) for path, part in parts]
+    if args.save_snapshot is not None:
+        raw = snapshot_to_raw(snapshot, args.url, args.query_id)
+        writes.append((args.save_snapshot, lambda p: save_snapshot(raw, p, overwrite=True)))
+    publish_all(writes, args.overwrite)
     if teams:
         logger.info("Wrote %d team reports to %s", len(teams), args.team_dir)
     return report
@@ -1591,7 +1648,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stderr)
     try:
         report = run_export(args)
-    except TriageError as exc:
+    except (TriageError, SnapshotError) as exc:
         print(f"Validation error: {exc}", file=sys.stderr)
         return EXIT_VALIDATION
     except EmptyQueryError as exc:

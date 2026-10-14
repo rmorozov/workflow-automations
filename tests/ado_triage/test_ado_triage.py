@@ -396,6 +396,119 @@ def test_csv_output_is_master_data(snapshot, tmp_path, monkeypatch):
     assert len(frame) == len(snapshot.items)
 
 
+# --- saved snapshots (--save-snapshot, --from-snapshot) ---
+
+
+def offline_args(snap_path, out, *extra):
+    return ["export", "--from-snapshot", str(snap_path), "--as-of", "2026-10-01",
+            "--output", str(out), *extra]  # fmt: skip
+
+
+def data_sheets(path):
+    """Every sheet's values, except the run-specific Config sheet."""
+    sheets = pd.read_excel(path, sheet_name=None)
+    return {name: frame for name, frame in sheets.items() if not name.startswith("0.")}
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    def unreachable(url, query):
+        raise AssertionError("network must not be touched")
+
+    monkeypatch.setattr(tool, "fetch_snapshot", unreachable)
+
+
+def test_saved_snapshot_rebuilds_the_same_report_offline(snapshot, tmp_path, monkeypatch):
+    snapshot.items[0]["relations"].append(rel(tool.REL_BLOCKS_FORWARD, 77))  # outside the query
+    snapshot.external = {77: {tool.FIELD_TITLE: "Elsewhere", tool.FIELD_AREA_PATH: "Proj\\Z"}}
+    snapshot.warnings = ["1 parent titles unavailable (deleted or no permission)"]
+    monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
+    live, snap = tmp_path / "live.xlsx", tmp_path / "snap.json"
+    assert tool.main(cli(tmp_path, "--output", str(live), "--save-snapshot", str(snap))) == 0
+
+    def unreachable(url, query):
+        raise AssertionError("network must not be touched")
+
+    monkeypatch.setattr(tool, "fetch_snapshot", unreachable)
+    replay = tmp_path / "replay.xlsx"
+    assert tool.main(offline_args(snap, replay)) == tool.EXIT_OK
+
+    expected, actual = data_sheets(live), data_sheets(replay)
+    assert expected.keys() == actual.keys()
+    for name, frame in expected.items():
+        pd.testing.assert_frame_equal(actual[name], frame, obj=name)
+    rows = load_workbook(replay)["0. Config & Legend"].iter_rows(values_only=True)
+    config = {row[0]: row[1] for row in rows if row}
+    assert config["ADO URL"] == BASE
+    assert config["Query ID"] == "00000000-0000-0000-0000-000000000000"
+    assert config["Snapshot"] == str(snap)
+
+
+def test_save_snapshot_refuses_existing_file_and_input_paths(snapshot, tmp_path, monkeypatch):
+    monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
+    snap = tmp_path / "snap.json"
+    snap.write_text("keep")
+    out = tmp_path / "r.xlsx"
+    assert tool.main(cli(tmp_path, "--output", str(out), "--save-snapshot", str(snap))) == 2
+    assert snap.read_text() == "keep" and not out.exists()
+    same = cli(tmp_path, "--output", str(out), "--save-snapshot", str(out), "--overwrite")
+    assert tool.main(same) == tool.EXIT_VALIDATION
+    replaced = cli(tmp_path, "--output", str(out), "--save-snapshot", str(snap), "--overwrite")
+    assert tool.main(replaced) == tool.EXIT_OK
+    assert tool.load_snapshot(snap).producer == tool.SNAPSHOT_PRODUCER
+
+
+@pytest.mark.parametrize(
+    ("content", "extra", "code"),
+    [
+        ("not json", [], tool.EXIT_VALIDATION),
+        ('{"schema": "other"}', [], tool.EXIT_VALIDATION),
+        (None, ["--query-id", "q"], tool.EXIT_VALIDATION),  # query comes from the snapshot
+        (None, ["--save-snapshot", "again.json"], tool.EXIT_VALIDATION),  # argparse refuses
+    ],
+)
+def test_from_snapshot_validates_before_any_write(
+    snapshot, tmp_path, no_network, content, extra, code
+):
+    snap = tmp_path / "snap.json"
+    if content is None:
+        tool.save_snapshot(tool.snapshot_to_raw(snapshot, BASE, "q"), snap)
+    else:
+        snap.write_text(content)
+    out = tmp_path / "r.xlsx"
+    try:
+        result = tool.main(offline_args(snap, out, *extra))
+    except SystemExit as exc:  # argparse usage error
+        result = exc.code
+    assert result == code
+    assert not out.exists()
+
+
+def test_from_snapshot_output_may_not_replace_it(snapshot, tmp_path, no_network):
+    snap = tmp_path / "snap.json"
+    tool.save_snapshot(tool.snapshot_to_raw(snapshot, BASE, "q"), snap)
+    assert tool.main(offline_args(snap, snap, "--overwrite")) == tool.EXIT_VALIDATION
+    assert tool.load_snapshot(snap).roots == [1, 2, 3, 4, 5, 6]
+
+
+def test_from_snapshot_empty_scope_and_missing_url(tmp_path, no_network):
+    snap = tmp_path / "snap.json"
+    tool.save_snapshot(tool.snapshot_to_raw(tool.Snapshot(items=[]), BASE, "q"), snap)
+    assert tool.main(offline_args(snap, tmp_path / "r.xlsx")) == tool.EXIT_EMPTY
+    nourl = tmp_path / "nourl.json"
+    tool.save_snapshot(
+        tool.snapshot_to_raw(tool.Snapshot(items=[item(1, TEAM_X, "A")]), "", "q"), nourl
+    )
+    assert tool.main(offline_args(nourl, tmp_path / "r.xlsx")) == tool.EXIT_VALIDATION
+    with_url = offline_args(nourl, tmp_path / "r.xlsx", "--url", BASE)
+    assert tool.main(with_url) == tool.EXIT_OK
+
+
+def test_live_export_still_requires_url_and_query(tmp_path, no_network):
+    args = ["export", "--url", BASE, "--output", str(tmp_path / "r.xlsx")]
+    assert tool.main(args) == tool.EXIT_VALIDATION
+
+
 # --- per-team reports (--team-dir) ---
 
 
