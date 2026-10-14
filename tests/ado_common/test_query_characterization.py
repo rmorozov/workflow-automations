@@ -81,25 +81,30 @@ def test_graph_batch_request_omits_missing_items_and_expands_relations():
 
 
 def test_graph_wiql_filter_chunks_by_1000_and_keeps_a_failed_chunk():
+    """Rejected IDs get one existence query; missing ones stay for the fetch (AG-003)."""
     queries = []
 
     def query_by_wiql(wiql, top):
-        queries.append(wiql.query)
-        if len(queries) == 2:
+        filtered = "WorkItemType" in wiql.query
+        queries.append(filtered)
+        if len(queries) == 3:
             raise RuntimeError("too long")
         ids = [int(i) for i in wiql.query.split("IN (")[1].split(")")[0].split(",")]
-        return SimpleNamespace(work_items=[ref(i) for i in ids if i % 2 == 0])
+        # Even IDs pass the filter; IDs above 2400 do not exist.
+        found = [i for i in ids if i <= 2400 and (i % 2 == 0 or not filtered)]
+        return SimpleNamespace(work_items=[ref(i) for i in found])
 
     client = graph_client(SimpleNamespace(query_by_wiql=query_by_wiql))
     ids = list(range(1, 2502))
 
-    valid = client.filter_ids_via_wiql(ids, frozenset(), frozenset())
+    valid = client.filter_ids_via_wiql(ids, frozenset(), frozenset({"task"}))
 
-    assert len(queries) == 3
+    assert queries == [True, False, True, True, False]
     assert valid == (
         {i for i in range(1, 1001) if i % 2 == 0}
         | set(range(1001, 2001))
-        | {i for i in range(2001, 2502) if i % 2 == 0}
+        | {i for i in range(2001, 2401) if i % 2 == 0}
+        | set(range(2401, 2502))
     )
 
 

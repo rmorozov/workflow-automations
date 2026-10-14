@@ -235,7 +235,9 @@ fetch filtered items, follow their links (including into other projects) and wri
 them as bridge nodes (`In_Scope=False`); analysis then replaces each bridge with an
 `Indirect` edge so a Feature → Task → Feature chain stays connected. A bridge with many
 links can multiply edges; `--max-indirect-edges` caps that (exiting before writing),
-and `analyze --bridges drop` skips contraction. Outputs are published atomically;
+and `analyze --bridges drop` skips contraction. Export exits 4 when ADO did not return
+some linked work items (outputs are written but incomplete) and 5, writing nothing,
+when items from the saved query itself are missing. Outputs are published atomically;
 replacing existing ones needs `--overwrite`, and analyze never writes over its inputs.
 The tool still needs the Kerberos dependencies even for offline analysis. The default `--steps all` includes
 unbounded cycle enumeration and exact centrality; choose steps deliberately on

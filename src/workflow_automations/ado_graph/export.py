@@ -26,6 +26,11 @@ from workflow_automations.ado_graph.report import _export_dataframes
 
 log = logging.getLogger("ado_tool")
 
+# Exit codes: 4 = outputs written but some linked IDs were omitted by ADO;
+# 5 = seed IDs from the saved query were omitted, nothing written.
+EXIT_INCOMPLETE = 4
+EXIT_SEEDS_MISSING = 5
+
 
 # ---------------------------------------------------------------------------
 # Export statistics tracker
@@ -41,18 +46,26 @@ class ExportStats:
       skipped_type     – WIs excluded by the type filter, keyed by WorkItemType.
       excluded_project – WIs excluded by the project filter, keyed by project name.
       visited          = added + skipped_type + excluded_project (derived).
-      pruned           – queued IDs rejected by the WIQL filter and never fetched
+      pruned           – queued IDs rejected by the WIQL filter, confirmed to
+                         exist, and never fetched
                          (only with --filtered-relations stop).
       omitted          – IDs requested from ADO but not returned (deleted or
-                         inaccessible); listed in omitted_ids.
+                         inaccessible); listed in omitted_ids and split into
+                         seeds (from the saved query) and linked IDs.
+
+    The completion status follows ado-triage's core-vs-label split, adapted
+    to a graph: a missing seed means the scope itself is incomplete
+    ("failed"); a missing linked ID loses a node and every path through it
+    ("incomplete").  Pruned items are out of scope, not missing.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, seed_ids: frozenset[int] = frozenset()) -> None:
         self.added: collections.Counter = collections.Counter()
         self.skipped_type: collections.Counter = collections.Counter()
         self.excluded_project: collections.Counter = collections.Counter()
         self.pruned: int = 0
         self.omitted_ids: list[int] = []
+        self.seed_ids = seed_ids
 
     def record_added(self, wi_type: str) -> None:
         self.added[wi_type] += 1
@@ -79,6 +92,22 @@ class ExportStats:
     def total_visited(self) -> int:
         return self.total_added + self.total_skipped_type + self.total_excluded_project
 
+    @property
+    def omitted_seeds(self) -> list[int]:
+        return sorted(i for i in self.omitted_ids if i in self.seed_ids)
+
+    @property
+    def omitted_linked(self) -> list[int]:
+        return sorted(i for i in self.omitted_ids if i not in self.seed_ids)
+
+    @property
+    def status(self) -> str:
+        if self.omitted_seeds:
+            return "failed"
+        if self.omitted_linked:
+            return "incomplete"
+        return "complete"
+
     def print_progress(self, queue_remaining: int) -> None:
         """Single-line progress update via logging (tqdm-friendly)."""
         log.info(
@@ -100,9 +129,27 @@ class ExportStats:
         self._print_project_table()
         print(f"  Pruned via WIQL (not fetched): {self.pruned:,}")
         print(f"  Omitted by ADO (not returned): {len(self.omitted_ids):,}")
+        print(f"    seeds (from the saved query): {len(self.omitted_seeds):,}")
+        print(f"    linked (reached via relations): {len(self.omitted_linked):,}")
         if queue_remaining:
             print(f"  Queue remaining: {queue_remaining:,}")
+        print(f"  Completion status: {self.status}")
         print()
+
+    def log_omitted(self) -> None:
+        """Log the omitted IDs, sorted, so a rerun can be compared."""
+        if self.omitted_seeds:
+            log.error(
+                "%d seed work item(s) from the saved query were not returned: %s",
+                len(self.omitted_seeds),
+                _preview_ids(self.omitted_seeds),
+            )
+        if self.omitted_linked:
+            log.warning(
+                "%d linked work item(s) were not returned; the graph is incomplete: %s",
+                len(self.omitted_linked),
+                _preview_ids(self.omitted_linked),
+            )
 
     def _print_type_table(self) -> None:
         all_types: set[str] = set(self.added) | set(self.skipped_type)
@@ -229,7 +276,8 @@ def _prune_queue_via_wiql(
 
     Runs only when the next fetch batch holds an ID not yet checked, and then
     checks up to one WIQL chunk of unchecked IDs from the queue head.  Every ID
-    is sent to WIQL at most once.  Returns the number of IDs dropped.
+    is sent to the WIQL filter at most once (rejected IDs to one more existence
+    query).  Returns the number of IDs dropped.
     """
     if all(wi_id in wiql_checked for wi_id in itertools.islice(queued, batch_size)):
         return 0
@@ -283,12 +331,12 @@ def run_export(args: argparse.Namespace) -> None:
     follow_filtered = args.filtered_relations == "follow"
 
     visited: set[int] = set()
-    # IDs already sent to the WIQL filter, so each ID is checked at most once.
+    # IDs already sent to the WIQL filter, so each ID is filtered at most once.
     wiql_checked: set[int] = set()
     queued: dict[int, None] = dict.fromkeys(initial_ids)
     all_node_rows: list[dict] = []
     all_edge_rows: list[dict] = []
-    stats = ExportStats()
+    stats = ExportStats(frozenset(initial_ids))
 
     log.info(
         "Starting BFS export (batch_size=%d, filtered relations: %s).",
@@ -382,6 +430,17 @@ def run_export(args: argparse.Namespace) -> None:
             )
             stats.print_progress(len(queued))
 
+            # Seeds head the FIFO queue, so they are all resolved before any
+            # linked ID is fetched; fail as soon as that is the case.
+            if stats.omitted_seeds and stats.seed_ids.isdisjoint(queued):
+                break
+
+    if stats.status == "failed":
+        stats.print_summary(len(queued))
+        stats.log_omitted()
+        log.error("Export failed: the saved query's scope is incomplete; nothing written.")
+        raise SystemExit(EXIT_SEEDS_MISSING)
+
     # 6. Build DataFrames
     df_nodes = pd.DataFrame(all_node_rows)
     df_nodes.rename(columns=FIELD_RENAME, inplace=True)
@@ -408,4 +467,8 @@ def run_export(args: argparse.Namespace) -> None:
     # 7. Export
     formats = [f.strip().lower() for f in args.formats.split(",")]
     _export_dataframes(df_nodes, df_edges, output_dir, formats)
+    stats.log_omitted()
+    if stats.status == "incomplete":
+        log.warning("Export incomplete → %s (exit %d).", output_dir, EXIT_INCOMPLETE)
+        raise SystemExit(EXIT_INCOMPLETE)
     log.info("Export complete → %s", output_dir)
