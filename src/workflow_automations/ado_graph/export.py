@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from workflow_automations.ado_common.snapshot import SnapshotError, save_snapshot, utc_timestamp
+from workflow_automations.ado_common.workitem import relation_target_id
 from workflow_automations.ado_graph.client import (
     ADO_BATCH_LIMIT,
     FIELD_RENAME,
@@ -212,10 +213,8 @@ def _parse_wi(wi: Any) -> tuple[dict, list[dict]]:
         rel_ref: str = rel.rel or ""
         if rel_ref not in GRAPH_LINK_TYPES:
             continue
-        url_parts = (rel.url or "").rstrip("/").split("/")
-        try:
-            target_id = int(url_parts[-1])
-        except (ValueError, IndexError):
+        target_id = relation_target_id(rel.url)
+        if target_id is None:
             continue  # hyperlink, attachment, or other non-WI relation
         edge_rows.append(
             {
