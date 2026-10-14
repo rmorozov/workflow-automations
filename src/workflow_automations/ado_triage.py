@@ -28,6 +28,14 @@ from openpyxl.utils import get_column_letter
 from workflow_automations.ado_common.excel import excel_safe, keep_text_literal
 from workflow_automations.ado_common.excel import publish_all as shared_publish_all
 from workflow_automations.ado_common.query import chunks, query_result_ids
+from workflow_automations.ado_common.relations import (
+    BLOCKS_FORWARD,
+    BLOCKS_REVERSE,
+    DEPENDENCY_FORWARD,
+    DEPENDENCY_REVERSE,
+    HIERARCHY_FORWARD,
+    TRIAGE,
+)
 from workflow_automations.ado_common.snapshot import (
     RawSnapshot,
     SnapshotError,
@@ -35,7 +43,7 @@ from workflow_automations.ado_common.snapshot import (
     save_snapshot,
     utc_timestamp,
 )
-from workflow_automations.ado_common.workitem import relation_target_id, safe_int, work_item_url
+from workflow_automations.ado_common.workitem import safe_int, work_item_url
 
 logger = logging.getLogger("ado_triage")
 
@@ -66,23 +74,17 @@ class EmptyQueryError(RuntimeError):
 # ADO names
 # ---------------------------------------------------------------------------
 
-REL_CHILD = "System.LinkTypes.Hierarchy-Forward"
-REL_PREDECESSOR = "System.LinkTypes.Dependency-Reverse"  # this item depends on X
-REL_SUCCESSOR = "System.LinkTypes.Dependency-Forward"  # X depends on this item
-REL_BLOCKS_FORWARD = "Microsoft.VSTS.Common.Blocks-Forward"  # this item blocks X
-REL_BLOCKS_REVERSE = "Microsoft.VSTS.Common.Blocks-Reverse"  # this item is blocked by X
+REL_CHILD = HIERARCHY_FORWARD
+REL_PREDECESSOR = DEPENDENCY_REVERSE  # this item depends on X
+REL_SUCCESSOR = DEPENDENCY_FORWARD  # X depends on this item
+REL_BLOCKS_FORWARD = BLOCKS_FORWARD  # this item blocks X
+REL_BLOCKS_REVERSE = BLOCKS_REVERSE  # this item is blocked by X
 
-RELATION_LABELS = {
-    REL_CHILD: "Child",
-    REL_PREDECESSOR: "Predecessor",
-    REL_SUCCESSOR: "Successor",
-    REL_BLOCKS_FORWARD: "Blocks",
-    REL_BLOCKS_REVERSE: "Blocked By",
-}
+RELATION_LABELS = TRIAGE.labels
 # Labels meaning "this item obstructs the destination item".
 BLAST_RADIUS_LABELS = ("Successor", "Blocks")
 # Reverse labels whose forward counterpart describes the same dependency.
-INVERSE_LABELS = {"Predecessor": "Successor", "Blocked By": "Blocks"}
+INVERSE_LABELS = TRIAGE.inverse_labels()
 
 FIELD_ID = "System.Id"
 FIELD_PARENT = "System.Parent"
@@ -268,10 +270,8 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
             {
                 target
                 for item in items
-                for rel in item["relations"]
-                if rel["rel"] in RELATION_LABELS
-                and (target := relation_target_id(rel["url"])) is not None
-                and target not in known
+                for target in TRIAGE.targets(item["relations"])
+                if target not in known
             }
         )
         parent_ids = sorted(
@@ -387,10 +387,8 @@ def snapshot_from_raw(raw: RawSnapshot) -> Snapshot:
     targets = {
         target
         for item in items
-        for rel in item["relations"]
-        if rel["rel"] in RELATION_LABELS
-        and (target := relation_target_id(rel["url"])) is not None
-        and target not in root_ids
+        for target in TRIAGE.targets(item["relations"])
+        if target not in root_ids
     }
     parents = {
         pid for item in items if (pid := safe_int(item["fields"].get(FIELD_PARENT))) is not None
@@ -575,10 +573,10 @@ def build_relations(snapshot: Snapshot, cfg: Settings) -> pd.DataFrame:
     for item in snapshot.items:
         src_title, src_area = info(item["id"])
         for rel in item["relations"]:
-            label = RELATION_LABELS.get(rel["rel"])
-            dest = relation_target_id(rel["url"])
-            if label is None or dest is None:
+            endpoint = TRIAGE.endpoint(rel["rel"], rel["url"])
+            if endpoint is None:
                 continue
+            label, dest = endpoint
             dest_title, dest_area = info(dest)
             rows.append(
                 [
