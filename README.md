@@ -217,11 +217,12 @@ applies to repository code.
 ## Export and analyze an ADO graph
 
 `ado-graph` (its help still says `ado_tool`) reads ADO in export mode; analysis
-reads local Parquet files.
+reads local Parquet files. The `ado-graph-analyze` extra is enough for `analyze`;
+`export` needs the `ado-graph` extra, which adds the ADO SDK and Kerberos.
 
 ```bash
 # Linux: install libkrb5-dev first if the Kerberos dependencies need building.
-python -m pip install -e '.[ado-graph]'
+python -m pip install -e '.[ado-graph]'            # or '.[ado-graph-analyze]' to analyze only
 ado-graph export --ado-url https://ado.example/DefaultCollection \
   --project Example --query-id QUERY-GUID --output-dir work/ado-graph
 ado-graph analyze --nodes-file work/ado-graph/nodes.parquet \
@@ -239,9 +240,8 @@ and `analyze --bridges drop` skips contraction. Export exits 4 when ADO did not 
 some linked work items (outputs are written but incomplete) and 5, writing nothing,
 when items from the saved query itself are missing. Outputs are published atomically;
 replacing existing ones needs `--overwrite`, and analyze never writes over its inputs.
-The tool still needs the Kerberos dependencies even for offline analysis. The default `--steps all` includes
-unbounded cycle enumeration and exact centrality; choose steps deliberately on
-large graphs. Read the [specification](docs/specs/ado-graph.md) and
+The default `--steps all` includes unbounded cycle enumeration and exact centrality;
+choose steps deliberately on large graphs. Read the [specification](docs/specs/ado-graph.md) and
 [prioritized findings](docs/backlog/README.md#ado-graph-and-triage-sharing) before using the results.
 The equivalent script invocation is `python scripts/ado_graph.py ...` after installation.
 

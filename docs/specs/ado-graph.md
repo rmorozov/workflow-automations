@@ -6,9 +6,9 @@ limitations not yet addressed stay listed here and in the backlog.
 
 Entry points after installation: `ado-graph`, `python scripts/ado_graph.py`, and
 `python -m workflow_automations.ado_graph`. Argument help retains `prog=ado_tool`.
-Install the `ado-graph` extra. All dependencies, including Kerberos, are imported
-at module startup, even for `--help` and offline `analyze`. Linux installations may
-need system Kerberos headers (`libkrb5-dev`) to build dependencies.
+Install the `ado-graph` extra for export, or only `ado-graph-analyze` for offline
+analysis (see below). Linux installations of `ado-graph` may need system Kerberos
+headers (`libkrb5-dev`) to build dependencies.
 
 ## Purpose and boundaries
 
@@ -18,6 +18,14 @@ query, traverses selected work-item relations, and writes node/edge tables.
 analysis sheets. Neither mode modifies ADO. Analysis makes no service calls.
 The tool is independent of `ado-triage`; it does not compute capacity, attention
 scores, RAG bands, or triage decisions.
+
+Analysis and `--help` need only the `ado-graph-analyze` extra (pandas, openpyxl,
+NetworkX, PyArrow). The ADO SDK, msrest, Kerberos, certifi and tqdm are in the
+`ado-graph` extra and load only when `export` runs; without them `export` exits 2
+before any work, naming the extra. Importing the package configures neither root
+logging nor certificates. Export sets `REQUESTS_CA_BUNDLE` to a merged temporary
+bundle while it runs, then deletes the bundle and restores the previous setting,
+also when export fails.
 
 ## Export CLI
 
@@ -294,7 +302,9 @@ objects may fail serialization.
 Tests use synthetic SDK-like objects and Parquet/XLSX files: CLI help and argument
 validation, saved-query result shapes, edge normalization, scope/prerequisite
 orientation, report publication, traversal through filtered bridges in both
-relation modes, once-per-ID WIQL classification, omitted-ID reporting, bridge
-contraction, and export normalization (literal Excel text, identities, zoned dates,
-empty exports and schema errors) across all formats. No actual ADO server was used. Remaining fixes and shared-code
-opportunities with ADO scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).
+relation modes, once-per-ID WIQL classification, omitted-ID reporting with
+export's exit codes 4 and 5, bridge contraction, export normalization (literal
+Excel text, identities, zoned dates, empty exports and schema errors) across all
+formats, offline analysis without the network extras, and CA-bundle cleanup. No
+actual ADO server was used. Remaining fixes and shared-code opportunities with ADO
+scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).

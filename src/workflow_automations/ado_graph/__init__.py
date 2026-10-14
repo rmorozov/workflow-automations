@@ -6,17 +6,20 @@ Two modes:
              Kerberos auth (using the official azure-devops-python-api SDK)
              and exports nodes/edges to parquet, CSV, or Excel.
   analyze – Loads those files and runs NetworkX graph analysis, writing results
-             to a multi-sheet Excel workbook.
+             to a multi-sheet Excel workbook.  It needs only the offline
+             `ado-graph-analyze` extra; export needs the `ado-graph` extra.
 
 Auth:
   Uses msrest.authentication.KerberosAuthentication (wraps requests-kerberos)
   injected into azure.devops.connection.Connection.
 
 Certificates:
-  A merged CA bundle is built at startup: certifi's default bundle is copied to
-  a temp file, then every .pem/.crt file found under --cert-dir (or the env var
-  ADO_CERT_DIR) is appended to it.  The merged file path is written to
-  REQUESTS_CA_BUNDLE so that msrest / requests picks it up automatically.
+  When export starts, a merged CA bundle is built: certifi's default bundle is
+  copied to a temp file, then every .pem/.crt file found under --cert-dir (or the
+  env var ADO_CERT_DIR) is appended to it.  The merged file path is written to
+  REQUESTS_CA_BUNDLE so that msrest / requests picks it up automatically.  When
+  export ends, also on failure, the file is deleted and REQUESTS_CA_BUNDLE is
+  restored.  Importing this package configures neither logging nor certificates.
 
 Work-item filtering (export mode):
   --skip-types        comma-separated WorkItemType values to mark out of scope.
