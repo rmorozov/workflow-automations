@@ -194,8 +194,11 @@ Authentication uses your Kerberos ticket. On Linux, install system Kerberos head
 **1. Executive Summary** (teams by RAG load), then **2. Triage Agenda** (items ranked
 by risk-flag weight, with recommended actions). Pass last week's report as
 `--previous-file` to see new, persisting and resolved risks. `--profile exec` writes
-only the leadership sheets plus Master Data, so it still works as `--previous-file`; `--as-of` makes date-based flags reproducible. Existing
-output requires `--overwrite`.
+only the leadership sheets plus Master Data, so it still works as `--previous-file`; `--as-of` makes date-based flags reproducible. Add
+`--team-dir work/teams` to also write one workbook per team, such as
+`work/teams/triage-2026-10-01.Proj_Dept_Team A.xlsx`, so each team lead gets only their
+own items; items without an AreaPath go to `NO_AREA`. Existing output requires
+`--overwrite`.
 
 ## Development
 
