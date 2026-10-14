@@ -232,12 +232,36 @@ Without edits, unfolding an outline (with its settings) to a new workbook restor
 the selected columns of the sheet, with these limits:
 
 - Columns not selected for the outline are not in it and do not come back.
-- Every value comes back as text; numbers, dates and booleans are not retyped.
+- Every value comes back as text unless `--retype` is given (below); booleans are
+  never retyped.
 - Without row tags, rows that the outline merged do not come back as separate rows:
   adjacent duplicate rows and a row whose shorter path is already covered by other
   rows. Repeats merged by `--group` come back in grouped order.
 - Under `#` headings, a detail line printed after a child section is read as
   belonging to that section.
+
+`--retype` writes number and date text as typed cells, in both modes, wherever a
+value would otherwise be written as literal text (column names in row 1 stay text). Text is
+retyped only when it is exactly how `xlsx-outline` renders that value and Excel
+stores it exactly:
+
+- Whole numbers below 10^15 in absolute value, without leading zeros or a sign other
+  than `-` (`42`, `-7`); longer digit strings such as IDs stay text.
+- Decimals in Python's shortest form with at most 15 significant digits, within
+  Excel's normal range (`0.1`, `2.5`, `1e-05`); `1.50`, `1e3`, `-0` and
+  `0.30000000000000004` stay text.
+- Dates `YYYY-MM-DD`, date-times `YYYY-MM-DD HH:MM:SS[.ffffff]` and times
+  `HH:MM:SS[.ffffff]`, from year 1900 and after the workbook's epoch day (1904-01-01
+  in 1904-date workbooks), with whole milliseconds and no time zone.
+  Other spellings (`2024-1-2`, a `T` separator, `12:30`) stay text.
+
+Everything else, including `TRUE`/`FALSE` and formula-like text, stays literal text.
+When merging, a cell formatted as Text (`@`) keeps text, so IDs in text columns stay
+text. A retyped date, date-time or time keeps the cell's format only when that format
+shows the same date and time parts, else gets openpyxl's default
+(`yyyy-mm-dd`, `yyyy-mm-dd h:mm:ss`, `h:mm:ss`); a retyped number replaces a date
+format with General, so an edit never displays as a different value. Only changed
+values are written, so unchanged cells keep their type with or without the option.
 
 ### Merge into the original
 
@@ -253,7 +277,8 @@ The data rows (row 2 to the last row with a value) are rewritten in outline orde
 
 - A tagged row copies every cell of its source row (values, formulas, styles,
   hyperlinks, comments) and its height, then writes each selected column whose text
-  differs from what the outline showed. Changed values are written as literal text;
+  differs from what the outline showed. Changed values are written as literal text
+  (or typed with `--retype`, see Rows);
   unchanged cells keep their type. With `fill_down`, a parent the outline filled in
   stays blank unless it was edited.
 - An untagged item is a new row with only its selected columns filled.
@@ -275,7 +300,8 @@ them; charts and images are outside this tool's fidelity guarantees.
 
 The new-workbook mode writes one sheet (`--sheet`, default `Outline`): row 1 holds
 the level then detail names, and each row follows in document order. Every value is
-stored as literal text, so `=1+1` stays text. Both modes save to a temporary file,
+stored as literal text, so `=1+1` stays text, unless `--retype` types numbers and
+dates (see Rows). Both modes save to a temporary file,
 check it by reopening, and rename it into place. An existing output requires
 `--overwrite`; neither the outline nor the `--into` workbook is accepted as the
 output, so the original is never modified.
