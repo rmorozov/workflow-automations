@@ -439,7 +439,9 @@ def build_master(snapshot: Snapshot, capacity: dict[str, float], cfg: Settings) 
         row = dict(item["fields"])
         wi_id = item["id"]
         parent = safe_int(row.get(FIELD_PARENT))
-        level, cap = resolve_capacity(row.get(FIELD_AREA_PATH, ""), capacity)
+        # A missing or null AreaPath is the blank team: groupby would drop NaN keys.
+        row[FIELD_AREA_PATH] = row.get(FIELD_AREA_PATH) or ""
+        level, cap = resolve_capacity(row[FIELD_AREA_PATH], capacity)
         row.update(
             {
                 FIELD_ID: wi_id,
@@ -477,7 +479,7 @@ def build_relations(snapshot: Snapshot, cfg: Settings) -> pd.DataFrame:
         fields = own.get(wi_id) or snapshot.external.get(wi_id)
         if fields is None:
             return "UNKNOWN", "UNKNOWN"
-        return fields.get(FIELD_TITLE, ""), fields.get(FIELD_AREA_PATH, "")
+        return fields.get(FIELD_TITLE, ""), fields.get(FIELD_AREA_PATH) or ""
 
     rows = []
     for item in snapshot.items:
