@@ -1,8 +1,12 @@
 """Plan the merge order of open pull requests as batches and trains, using local git only.
 
 Each pull request is given as LABEL=REF (for example 16=origin/claude/project-thread-b2ec4u),
-in the owner's priority order. The planner never fetches, pushes or merges; run
-`git fetch origin` first. It test-merges in memory with `git merge-tree`:
+in the owner's priority order. The planner never fetches, pushes or merges, and moves no
+ref; run `git fetch origin` first. It test-merges with `git merge-tree` (git 2.38 or newer),
+which writes only unreferenced objects. `--method` models how GitHub will merge: `squash`
+(the default, as on main) applies each pull request as one single-parent commit, so a
+pull request stacked on another conflicts or duplicates exactly as it would on GitHub;
+`merge` models merge commits.
 
 - Batch 1 holds every pull request that merges cleanly onto the base together with the
   ones before it. Its integration commit is printed so the checks can run on exactly
@@ -37,6 +41,7 @@ _COMMIT_ENV = {
 class Pull:
     label: str
     ref: str
+    head: str = ""
     files: list[str] = field(default_factory=list)
     behind: int = 0
 
@@ -59,8 +64,8 @@ def git(*args: str, repo: str = ".", check: bool = True) -> subprocess.Completed
     return result
 
 
-def trial_merge(ours: str, theirs: str, repo: str) -> tuple[str, list[str]]:
-    """Return the merged tree and the conflicted paths (empty when the merge is clean)."""
+def trial_merge(ours: str, theirs: str, repo: str) -> tuple[str, list[str] | None]:
+    """Return the merged tree and None when clean, or the conflicted paths."""
     result = git(
         "merge-tree", "--write-tree", "--name-only", "--no-messages", ours, theirs,
         repo=repo, check=False,
@@ -68,7 +73,19 @@ def trial_merge(ours: str, theirs: str, repo: str) -> tuple[str, list[str]]:
     if result.returncode not in (0, 1):
         raise ValueError(f"git merge-tree {ours} {theirs}: {result.stderr.strip()}")
     lines = [line for line in result.stdout.splitlines() if line]
-    return lines[0], sorted(set(lines[1:]))
+    if result.returncode == 0:
+        return lines[0], None
+    return lines[0], sorted(set(lines[1:])) or ["(unnamed paths)"]
+
+
+def apply(head: str, pull: Pull, method: str, message: str, repo: str) -> tuple[str, list | None]:
+    """Commit pull onto head as GitHub would; return the new commit, or head and the conflicts."""
+    tree, conflicts = trial_merge(head, pull.head, repo)
+    if conflicts is not None:
+        return head, conflicts
+    parents = ["-p", head] + (["-p", pull.head] if method == "merge" else [])
+    commit = git("commit-tree", "--no-gpg-sign", tree, *parents, "-m", message, repo=repo)
+    return commit.stdout.strip(), None
 
 
 def load_pulls(base: str, specs: list[str], repo: str) -> list[Pull]:
@@ -80,15 +97,20 @@ def load_pulls(base: str, specs: list[str], repo: str) -> list[Pull]:
         if label in seen:
             raise ValueError(f"duplicate label {label!r}")
         seen.add(label)
-        git("rev-parse", "--verify", f"{ref}^{{commit}}", repo=repo)
-        files = git("diff", "--name-only", f"{base}...{ref}", repo=repo).stdout.split()
-        behind = int(git("rev-list", "--count", f"{ref}..{base}", repo=repo).stdout)
-        pulls.append(Pull(label, ref, files, behind))
+        head = git("rev-parse", "--verify", f"{ref}^{{commit}}", repo=repo).stdout.strip()
+        names = git("diff", "-z", "--no-renames", "--name-only", f"{base}...{head}", repo=repo)
+        files = [name for name in names.stdout.split("\0") if name]
+        behind = int(git("rev-list", "--count", f"{head}..{base}", repo=repo).stdout)
+        pulls.append(Pull(label, ref, head, files, behind))
     return pulls
 
 
 def plan(
-    base: str, pulls: list[Pull], after: dict[str, set[str]], repo: str = "."
+    base: str,
+    pulls: list[Pull],
+    after: dict[str, set[str]],
+    repo: str = ".",
+    method: str = "squash",
 ) -> tuple[list[Batch], dict[str, str]]:
     """Group pulls into batches in priority order; return the batches and the blocked pulls."""
     labels = {pull.label for pull in pulls}
@@ -98,9 +120,14 @@ def plan(
             raise ValueError(f"--after names unknown labels: {', '.join(sorted(unknown))}")
     base_commit = git("rev-parse", f"{base}^{{commit}}", repo=repo).stdout.strip()
     blocked, remaining = {}, []
+    by_label = {pull.label: pull for pull in pulls}
     for pull in pulls:
-        _, conflicts = trial_merge(base_commit, pull.ref, repo)
-        if conflicts:
+        try:
+            _, conflicts = trial_merge(base_commit, pull.head, repo)
+        except ValueError as exc:
+            blocked[pull.label] = str(exc)
+            continue
+        if conflicts is not None:
             blocked[pull.label] = f"conflicts with the base in {', '.join(conflicts)}"
         else:
             remaining.append(pull)
@@ -114,17 +141,23 @@ def plan(
                 deferred.append(pull)
                 batch.deferred[pull.label] = f"after {', '.join(pending)}"
                 continue
-            tree, conflicts = trial_merge(head, pull.ref, repo)
-            if conflicts:
+            message = f"merge-plan: {' '.join(batch.pulls + [pull.label])}"
+            head, conflicts = apply(head, pull, method, message, repo)
+            if conflicts is not None:
                 deferred.append(pull)
+                culprits = [
+                    label
+                    for label in batch.pulls
+                    if apply(
+                        apply(base_commit, by_label[label], method, label, repo)[0],
+                        pull, method, pull.label, repo,
+                    )[1] is not None
+                ]  # fmt: skip
                 batch.deferred[pull.label] = (
-                    f"conflicts with {', '.join(batch.pulls)} in {', '.join(conflicts)}"
+                    f"conflicts with {', '.join(culprits) or 'the combined batch'}"
+                    f" in {', '.join(conflicts)}"
                 )
                 continue
-            message = f"merge-plan: {' '.join(batch.pulls + [pull.label])}"
-            head = git(
-                "commit-tree", tree, "-p", head, "-p", pull.ref, "-m", message, repo=repo
-            ).stdout.strip()
             batch.pulls.append(pull.label)
         if not batch.pulls:
             for pull in deferred:
@@ -149,9 +182,11 @@ def overlaps(pulls: list[Pull]) -> list[tuple[str, str, list[str]]]:
     return pairs
 
 
-def render(pulls: list[Pull], batches: list[Batch], blocked: dict[str, str]) -> str:
+def render(
+    base: str, pulls: list[Pull], batches: list[Batch], blocked: dict[str, str], method: str
+) -> str:
     by_label = {pull.label: pull for pull in pulls}
-    lines = []
+    lines = [f"Base {base}; method {method}; merge each pull only at the head listed"]
     for number, batch in enumerate(batches, 1):
         if number == 1:
             lines.append(f"Batch 1: merge now; test commit {batch.commit}")
@@ -161,10 +196,12 @@ def render(pulls: list[Pull], batches: list[Batch], blocked: dict[str, str]) -> 
             pull = by_label[label]
             why = batches[number - 2].deferred[label] if number > 1 else "clean"
             lines.append(
-                f"  {label}  {pull.ref}  {len(pull.files)} files, {pull.behind} behind; {why}"
+                f"  {label}  {pull.ref} @ {pull.head}  {len(pull.files)} files,"
+                f" {pull.behind} behind; {why}"
             )
     for label, why in blocked.items():
-        lines.append(f"Blocked: {label}  {by_label[label].ref}; {why}")
+        pull = by_label[label]
+        lines.append(f"Blocked: {label}  {pull.ref} @ {pull.head}; {why}")
     shared = overlaps(pulls)
     if shared:
         lines.append("Shared files (clean merges still need the batch checks):")
@@ -183,18 +220,23 @@ def main(argv: list[str] | None = None) -> int:
         metavar="LATER:EARLIER",
         help="LATER must merge in a later batch than EARLIER (repeatable)",
     )
+    parser.add_argument("--method", choices=["squash", "merge"], default="squash")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     after: dict[str, set[str]] = {}
     try:
+        version = git("version", repo=args.repo).stdout.split()[2]
+        if tuple(int(part) for part in version.split(".")[:2]) < (2, 38):
+            raise ValueError(f"git 2.38 or newer is required for merge-tree, found {version}")
         for spec in args.after:
             later, sep, earlier = spec.partition(":")
             if not sep or not later or not earlier or later == earlier:
                 raise ValueError(f"expected LATER:EARLIER, got {spec!r}")
             after.setdefault(later, set()).add(earlier)
         pulls = load_pulls(args.base, args.pulls, args.repo)
-        batches, blocked = plan(args.base, pulls, after, args.repo)
+        base = git("rev-parse", f"{args.base}^{{commit}}", repo=args.repo).stdout.strip()
+        batches, blocked = plan(base, pulls, after, args.repo, args.method)
     except ValueError as exc:
         print(f"merge plan: {exc}", file=sys.stderr)
         return 1
@@ -203,6 +245,9 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(
                 {
                     "base": args.base,
+                    "base_commit": base,
+                    "method": args.method,
+                    "heads": {pull.label: pull.head for pull in pulls},
                     "batches": [batch.__dict__ for batch in batches],
                     "blocked": blocked,
                     "overlaps": [
@@ -213,7 +258,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
     else:
-        print(render(pulls, batches, blocked))
+        print(render(base, pulls, batches, blocked, args.method))
     return 0
 
 

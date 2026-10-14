@@ -18,16 +18,26 @@ state) and any stacking (`LATER:EARLIER`). Then:
    `python scripts/backlog.py plan --busy <claimed IDs>`), then P1 before P2/P3, then
    older first.
 3. Run `python scripts/merge_plan.py --base origin/main [--after LATER:EARLIER] LABEL=REF ...`.
-4. Validate batch 1 on its test commit in a disposable worktree:
-   `git worktree add --detach <tmp> <commit>`, then `sh scripts/check.sh` there with the
-   dev and tool extras installed; remove the worktree afterwards.
-5. If the checks fail, find the culprit by re-planning with half the batch at a time;
-   report the culprit with the failing test and re-plan the rest without it.
+   It models squash merges, as `main` uses; pass `--method merge` only when told the
+   batch will be merged with merge commits.
+4. Validate batch 1 on its test commit in a disposable worktree with its own
+   environment, so the tests import that tree's `src/`:
+   ```bash
+   git worktree add --detach "$WT" <commit>
+   python -m venv "$WT/.venv" && "$WT/.venv/bin/pip" install -q -e "$WT[translation,outline,ado-triage,ado-graph,dev]"
+   "$WT/.venv/bin/python" -c "import workflow_automations as m; print(m.__file__)"  # must be under $WT
+   PATH="$WT/.venv/bin:$PATH" sh "$WT/scripts/check.sh"
+   git worktree remove --force "$WT"
+   ```
+5. If the checks fail, find the culprit by re-planning with half the batch at a time,
+   and with pairs across the halves when neither half fails alone; report the culprit
+   with the failing test and re-plan the rest without it.
 6. For PRs listed under "Shared files" that merged cleanly, read both diffs at those
    files and say whether one changes something the other relies on; the checks are the
    evidence, your reading is the warning.
 
-Report, in this order: batch 1 in merge order with its test commit, its tree id
+Report, in this order: the base SHA; batch 1 in merge order with each head SHA, its
+test commit, its tree id
 (`git rev-parse <commit>^{tree}`) and the check result; each later batch with the
 cause each car waits on and who must update which branch; blocked and not-ready PRs
 with the reason. No other prose.

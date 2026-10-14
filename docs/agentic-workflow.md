@@ -9,7 +9,7 @@ the backlog format is in [docs/backlog](backlog/README.md).
 
 | Role | Where it runs | Does | Does not |
 | --- | --- | --- | --- |
-| Owner (human) | Project chat, GitHub | Sets priorities, decides forks that change goals, approves and merges PRs, owns repository settings | Write task files by hand (optional) |
+| Owner (human) | Project chat, GitHub | Sets priorities, decides forks that change goals, reviews PRs and approves each merge batch, owns repository settings | Write task files by hand (optional) |
 | Coordinator | Project chat session | Triages asks, allocates backlog IDs, keeps the ledger of which thread works on which task, starts threads for the next wave | Edit code |
 | Thread lead | One thread session per task (or per lane bundle) | Owns one branch and its PR; runs the pipeline below with subagents; drives CI to green | Touch files outside its task's `touches:` |
 | `task-planner` | Subagent | Reads task + code, returns plan and the exact `touches:` | Edit files |
@@ -107,13 +107,19 @@ PRs that really collide.
 
 - A **batch** is a set of ready PRs that git merges cleanly together. The steward
   checks the batch's integration commit, which has exactly the tree `main` will
-  have after the whole batch merges, so the batch merges back to back without
-  re-running each PR's CI.
+  have after the whole batch merges with the modelled method, so the batch merges
+  back to back without re-running each PR's CI.
 - A **train** is a chain of PRs that cannot share a batch: a later car conflicts
   with an earlier one, or is stacked on it (`--after`). Each car lands in the next
   batch after the one it waits on, once its thread lead has merged `main` into its
   branch, resolved the conflict and got CI green again.
 - A PR that conflicts with `main` alone is blocked until its branch is updated.
+
+`main` is squash-merged, so `merge_plan.py` models squash by default: each PR lands
+as one single-parent commit. A PR stacked on another then conflicts or duplicates
+in the plan exactly as on GitHub, and becomes a train car without needing
+`--after`. Use `--method merge` only if the batch will be merged with merge
+commits; rebase merges are not modelled.
 
 ```bash
 git fetch origin
@@ -125,18 +131,25 @@ python scripts/merge_plan.py --base origin/main \
 Who does what:
 
 1. The integration owner (the coordinator, or a steward thread it starts for a
-   wave) gives the `merge-steward` subagent the PRs that are non-draft, green on
-   their head and free of unresolved review threads, in priority order: PRs that
-   unblock waiting tasks first, then P1, then older.
-2. The steward runs `merge_plan.py`, runs `scripts/check.sh` on batch 1's test
-   commit in a disposable worktree, and bisects a failing batch by re-planning half
-   of it at a time. It returns the plan; it never merges.
+   wave, which counts against the thread cap) gives the `merge-steward` subagent
+   the open thread PRs with their CI and review state.
+2. The steward keeps those that are non-draft, green on their head and free of
+   unresolved review threads, orders them (PRs that unblock waiting tasks first,
+   then P1, then older) and runs `merge_plan.py`. It runs `scripts/check.sh` on
+   batch 1's test commit in a disposable worktree with its own fresh virtual
+   environment and an editable install of that worktree, so the tests import the
+   batch's `src/` and not another checkout's. It bisects a failing batch by
+   re-planning half of it at a time, and checks pairs across the halves when
+   neither half fails alone. It returns the plan with the base and head SHAs; it
+   never merges.
 3. The owner approves the batch as one decision: its PRs, their order and the
    check result. Nothing merges without that approval.
-4. The integration owner merges the batch in the planned order with the
-   repository's merge method, then confirms that `git rev-parse origin/main^{tree}`
-   equals the test commit's tree. A mismatch means something else merged
-   meanwhile: stop and re-plan. If CI on `main` then fails on a combination the
+4. The integration owner fetches and confirms that `origin/main` is still the
+   planned base and each PR head is still the planned SHA; anything moved means
+   re-plan. It then squash-merges the batch in the planned order, pinning each
+   merge to its planned head SHA (GitHub refuses the merge if the head moved), and
+   confirms that `git rev-parse origin/main^{tree}` equals the test commit's tree.
+   A mismatch means something else merged meanwhile: stop and re-plan. If CI on `main` then fails on a combination the
    local check did not cover (another Python or pandas version), revert through a
    PR rather than pushing to `main`.
 5. For each train car, the coordinator asks the owning thread lead to merge `main`
