@@ -2,9 +2,10 @@
 
 The tree is a Markdown outline (nested bullets or headings) of Gerrit projects, such
 as `All-Projects` with its child projects nested beneath it. Each repository is looked
-up by exact name; its parent is the item directly above it. Results go to a new
-workbook (the sheet plus Parent, Path and Status columns), a Markdown outline that
-lists each parent once with its repositories, or both.
+up by its exact name, which may be a Gerrit path such as `platform/tools/repo`, and
+otherwise by the path's last segment; its parent is the item directly above it.
+Results go to a new workbook (the sheet plus Parent, Path and Status columns), a
+Markdown outline that lists each parent once with its repositories, or both.
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ class Place:
     """Where a name occurs in the tree: its ancestors from the root, outermost first."""
 
     ancestors: tuple[str, ...]
+    # The item's own name in the tree, which may differ from the repository looked up.
+    name: str
     # First tree lines of this item and of its parent (0 at the top level).
     line: int
     parent_line: int
@@ -91,7 +94,7 @@ def index_tree(root: Item, raw: bool) -> dict[str, list[Place]]:
             if same:
                 same[0].leaf &= not child.children
             else:
-                seen.append(Place(ancestors, line, first[ancestors], not child.children))
+                seen.append(Place(ancestors, name, line, first[ancestors], not child.children))
             walk(child, (*ancestors, name))
 
     walk(root, ())
@@ -108,10 +111,41 @@ def read_tree(path: Path, raw: bool, title: bool) -> dict[str, list[Place]]:
     return places
 
 
+def lookup(repo: str) -> str:
+    """A sheet name as it is looked up: leading and trailing slashes ignored."""
+    return repo.strip("/")
+
+
+def segment(name: str) -> str:
+    """The last segment of a Gerrit path: `repo` for `platform/tools/repo`."""
+    return name.rsplit("/", 1)[-1]
+
+
+def candidates(repo: str, places: dict[str, list[Place]]) -> list[Place]:
+    """Places named exactly `repo`, else those that share its last path segment.
+
+    A bare name matches any path ending in it, and a path matches a bare item named
+    after its last segment. Two different full paths are different projects. Leading
+    and trailing slashes are ignored, so `platform/tools/repo/` is that path.
+    """
+    repo = lookup(repo)
+    if repo in places:
+        return places[repo]
+    if "/" in repo:
+        return places.get(segment(repo), [])
+    found = [
+        place
+        for name, listed in places.items()
+        if "/" in name and segment(name) == repo
+        for place in listed
+    ]
+    return sorted(found, key=lambda place: place.line)
+
+
 def match(repos: list[tuple[int, str]], places: dict[str, list[Place]]) -> list[Match]:
     results = []
     for row, repo in repos:
-        found = places.get(repo, [])
+        found = candidates(repo, places)
         if not found:
             status = NOT_FOUND
         elif len(found) > 1:
@@ -156,7 +190,9 @@ def render(results: list[Match], indent: int, raw: bool) -> str:
         for result in seen:
             out.append(f"{pad}- {show(result.repo)}")
             if nested:
-                out.extend(f"{pad * 2}- {show(where(place))}" for place in result.places)
+                out.extend(
+                    f"{pad * 2}- {show(where(place, result.repo))}" for place in result.places
+                )
 
     # Labels start with punctuation so they cannot be mistaken for a project name.
     section("(top level, no parent)", NO_PARENT, False)
@@ -165,8 +201,10 @@ def render(results: list[Match], indent: int, raw: bool) -> str:
     return "\n".join(out) + "\n" if out else ""
 
 
-def where(place: Place) -> str:
-    return PATH_SEPARATOR.join(place.ancestors) or "(top level)"
+def where(place: Place, repo: str) -> str:
+    """A candidate's path; one matched by last segment also names the tree item."""
+    path = PATH_SEPARATOR.join(place.ancestors) or "(top level)"
+    return path if place.name == lookup(repo) else f"{path} ({place.name})"
 
 
 def workbook(sheet: str, headings: list[str], data, results: list[Match]) -> Workbook:
@@ -183,7 +221,7 @@ def workbook(sheet: str, headings: list[str], data, results: list[Match]) -> Wor
         added: list[str | None] = [None, None, None]
         if result is not None:
             if result.status == AMBIGUOUS:
-                path = "; ".join(where(place) for place in result.places)
+                path = "; ".join(where(place, result.repo) for place in result.places)
             else:
                 path = PATH_SEPARATOR.join(result.path) or None
             added = [result.parent, path, result.status]
@@ -239,6 +277,16 @@ def summary(results: list[Match]) -> str:
     ):
         if found := names(status):
             lines.append(f"{label} ({len(found)}): {', '.join(found)}")
+    by_segment = list(
+        dict.fromkeys(
+            f"{result.repo} ({result.places[0].name})"
+            for result in results
+            if result.status in {MATCHED, NO_PARENT}
+            and result.places[0].name != lookup(result.repo)
+        )
+    )
+    if by_segment:
+        lines.append(f"Matched by last path segment ({len(by_segment)}): {', '.join(by_segment)}")
     inner = list(
         dict.fromkeys(
             result.repo
