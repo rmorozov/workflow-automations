@@ -212,20 +212,36 @@ scheduling graph.
 | `orphans` | Nodes with zero incoming and outgoing degree; full node fields plus URL/debug neighbors |
 | `no_cr_dep` | Nodes that are neither a Change Request nor downstream of one |
 | `has_cr_dep` | Change Requests and every node downstream of one (items that depend on a CR) |
-| `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count; every SCC member emitted |
+| `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count in `Chain_Length`; every SCC member emitted |
 | `scc` | Every strongly connected component including singletons; index, size, members, metadata |
-| `metrics` | Degrees (distinct neighbors), exact normalized betweenness, Dependency_Depth and metadata |
+| `metrics` | Degrees (distinct neighbors), exact normalized betweenness, longest-depth `Dependency_Depth` and metadata |
 | `cr_scope_impact` | CR descendants, count/IDs; numeric effort of CR plus descendants, invalid effort becomes zero |
 | `cr_prereqs` | CR ancestors (dependency subgraph by default), count/IDs and metadata |
 | `cr_impact_unpacked` | One row per CR/downstream node pair with both metadata sets |
 | `cr_prereqs_unpacked` | One row per CR/upstream node pair with both metadata sets |
 
 CR recognition is exact `WorkItemType == "Change Request"`. `Dependency_Depth` is
-the maximum, over source SCCs, of each source's *shortest* distance to an SCC; it
-is not longest prerequisite-chain depth. Longest-chain length is stored in
-DataFrame attrs and logs, not as a dedicated persisted Excel value. Set iteration
-and ties may change row order; deterministic report ordering is not guaranteed.
-The graph has no duration/capacity model, so longest chain is not a time critical path.
+the longest depth: the number of hops on the longest path from any source to the
+item in the step's SCC-condensed DAG, computed by dynamic programming in
+topological order (a source is 0; every other node is one more than its deepest
+predecessor). A shortcut link therefore never lowers a depth: with A→B→C and
+A→C, C has depth 2, although its shortest distance from A is 1. Members of one
+strongly connected component share its depth, so a cycle counts as a single step.
+The largest `Dependency_Depth` equals the `longest_chain` length on the same
+subgraph. Releases before AG-007 reported the maximum shortest distance from a
+source instead, which could be lower.
+
+The `longest_chain` sheet repeats the chain's hop count in a `Chain_Length` column
+on every row (the DataFrame attr `longest_path_length` and the log carry the same
+value). Set iteration and ties may change row order and which of several equally
+long chains is listed; deterministic report ordering is not guaranteed.
+
+Both measures count links (hops), not time. The graph has no duration, effort-based
+scheduling, capacity or calendar model, so the longest chain is the longest
+sequence of linked items, not a critical path: a chain of three one-day tasks has
+more hops than one three-month epic but finishes sooner. A critical path would need
+per-item durations and edges that mean finish-to-start, which hierarchy and impact
+links do not.
 
 Analysis writes requested sheets, no index, with widths capped at 50. `all` runs
 every step, including unbounded simple-cycle enumeration and exact centrality.
