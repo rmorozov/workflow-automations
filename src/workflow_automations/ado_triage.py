@@ -11,7 +11,6 @@ import logging
 import os
 import re
 import sys
-import tempfile
 import unicodedata
 import zipfile
 from collections.abc import Callable, Sequence
@@ -22,11 +21,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from workflow_automations.ado_common.excel import excel_safe, keep_text_literal
+from workflow_automations.ado_common.excel import publish_all as shared_publish_all
 from workflow_automations.ado_common.query import chunks, query_result_ids
 from workflow_automations.ado_common.snapshot import (
     RawSnapshot,
@@ -1334,23 +1334,11 @@ RAG_FILLS = {
 }
 
 
-def _excel_safe(frame: pd.DataFrame) -> pd.DataFrame:
-    """Strip control characters openpyxl rejects (they occur in ADO rich-text fields)."""
-    text = frame.select_dtypes(include=["object", "string"]).columns
-    if text.empty:
-        return frame
-    frame = frame.copy()
-    for col in text:
-        frame[col] = frame[col].map(
-            lambda v: ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v
-        )
-    return frame
-
-
 def _write_frame(writer: pd.ExcelWriter, name: str, frame: pd.DataFrame, purpose: str) -> None:
-    frame = _excel_safe(frame)
+    frame = excel_safe(frame)
     frame.to_excel(writer, sheet_name=name, index=False, startrow=DATA_START_ROW - 2)
     ws = writer.sheets[name]
+    keep_text_literal(ws, min_row=DATA_START_ROW)
     ws.cell(row=1, column=1, value=purpose).font = Font(italic=True, color="808080")
     ws.freeze_panes = f"A{DATA_START_ROW}"
     for i, col in enumerate(frame.columns, start=1):
@@ -1425,34 +1413,9 @@ def write_excel(path: Path, report: Report, meta: dict[str, str]) -> None:
             )
 
 
-def publish(path: Path, write: Callable[[Path], None], overwrite: bool) -> None:
-    """Write to a sibling temp file, then atomically replace ``path``."""
-    publish_all([(path, write)], overwrite)
-
-
 def publish_all(targets: Sequence[tuple[Path, Callable[[Path], None]]], overwrite: bool) -> None:
-    """Write every target to a sibling temp file, then rename them all into place.
-
-    A failure while writing (permissions, full disk, invalid name) leaves no target
-    changed, so the run can simply be repeated.
-    """
-    for path, _ in targets:
-        if path.exists() and not overwrite:
-            raise TriageError(f"{path} exists; pass --overwrite to replace it")
-    staged: list[tuple[Path, Path]] = []
-    try:
-        for path, write in targets:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=path.suffix, dir=path.parent)
-            os.close(fd)
-            staged.append((Path(tmp), path))
-            write(Path(tmp))
-        for tmp, path in staged:
-            os.replace(tmp, path)
-    finally:
-        for tmp, _ in staged:
-            if tmp.exists():
-                tmp.unlink()
+    """Publish all targets or none (see ado_common.excel); refusals are TriageErrors."""
+    shared_publish_all(targets, overwrite, exists_error=TriageError)
 
 
 # ---------------------------------------------------------------------------
