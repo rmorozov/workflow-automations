@@ -116,8 +116,8 @@ the WIQL filter succeeded. In `follow` mode every fetched work item is a node, a
 items excluded by type or project have `In_Scope=False` and act as bridge nodes for
 analysis. Three names are changed:
 `System.Title` → `Title`, `System.WorkItemType` → `WorkItemType`, `System.State` →
-`State`. All other ADO field reference names remain unchanged. No source snapshot,
-root marker, completeness manifest or export-schema version is added.
+`State`. All other ADO field reference names remain unchanged. The tables carry no
+root marker or schema version; a saved snapshot (below) records the run instead.
 
 Before any file is written, the frames are validated and normalized so every format
 stores the same values:
@@ -149,6 +149,34 @@ fetched, pruned, or omitted).
 Batch progress and per-type/project statistics are printed, followed by the pruned
 (WIQL-rejected, not fetched) and omitted (not returned by ADO) totals. Per-type and
 per-project totals count fetched items only.
+
+#### Snapshots and offline replay
+
+`export --save-snapshot PATH` also writes every fetched work item, in or out of
+scope, as a [version 1 ADO snapshot](ado-snapshot.md): every field as ADO returned
+it and every relation, in fetch order. Its provenance is the run's
+`source` (`base_url` collection URL, `project`, `query_id`), `captured_at` (UTC
+time the saved query ran), the saved query's IDs as `roots`, the omitted IDs, the
+case-normalised `skip_types` and `include_projects` filters, and in `options` the
+`filtered_relations` policy, the producing `tool_version` and the run's
+`completeness` (`complete`, or `incomplete` when linked IDs were omitted). Pruned
+IDs are not fetched and are not in it. An existing snapshot file is refused before
+fetching unless `--overwrite` is passed, as is a path that is one of the export
+files. The snapshot is written, atomically, before the export files, so it is kept
+when writing the tables fails; an export that exits 5 writes neither.
+
+`ado-graph replay --snapshot PATH [--output-dir DIR] [--formats …] [--overwrite]`
+writes the export files of an `ado-graph` snapshot without contacting ADO, needing
+only the `ado-graph-analyze` extra. It applies the recorded filters and relation
+policy to the recorded items, so a snapshot replays into the same files as its
+export, and exits 4 when the snapshot's linked IDs were omitted, as the export did.
+Completeness comes from `omitted`, not from the recorded option, so snapshots saved
+without the provenance options replay the same. Output consent and atomic
+publication are as for export. A file that is not a valid snapshot, an `ado-triage`
+snapshot or one with an omitted root exits 2 and writes nothing. An unfiltered
+snapshot (`--skip-types ''`, no `--include-projects`) is also a complete
+`ado-triage` scope for the same saved query; a filtered one is not. CSV or Excel
+exports are not read back: the snapshot is the replay input.
 
 ## Analyze CLI and graph contract
 

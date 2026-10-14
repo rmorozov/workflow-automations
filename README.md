@@ -243,6 +243,9 @@ replacing existing ones needs `--overwrite`, and analyze never writes over its i
 The default `--steps all` includes unbounded cycle enumeration and exact centrality;
 choose steps deliberately on large graphs. Read the [specification](docs/specs/ado-graph.md) and
 [prioritized findings](docs/backlog/README.md#ado-graph-and-triage-sharing) before using the results.
+Add `--save-snapshot run.json` to an export to keep what ADO returned, and
+`ado-graph replay --snapshot run.json --output-dir DIR` rebuilds the same export files
+offline, with only the analyze extra.
 The equivalent script invocation is `python scripts/ado_graph.py ...` after installation.
 
 ## Agentic development
