@@ -185,10 +185,11 @@ refuses an `--output-file` that is the `--nodes-file` or `--edges-file` (also
 through a link) with exit 2, even with `--overwrite`. Consent is checked when the
 run starts: a file created at an output path during a long export is replaced.
 Export still creates `--output-dir` before fetching. Empty exports do not preserve a stable node schema; all-unknown steps can fail
-when saving a workbook with no sheets. Exceptions normally propagate; successful
-`main()` returns None (CLI exit 0), argparse errors/help use its usual exits
-(2 for invalid options, existing outputs and input collisions).
-There is no standardized partial-result status. Text beginning with `=` can be
+when saving a workbook with no sheets. Exceptions normally propagate. A complete
+run exits 0; export can also exit with the partial-result statuses described under
+[Traversal, filtering and completeness](#traversal-filtering-and-completeness).
+Argparse errors/help use its usual exits (2 for invalid options, existing outputs
+and input collisions). Text beginning with `=` can be
 written as an Excel formula by pandas/openpyxl; arbitrary identity/datetime field
 objects may fail serialization.
 
