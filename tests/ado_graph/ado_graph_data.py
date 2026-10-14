@@ -1,5 +1,6 @@
 """Synthetic frames and SDK-like fakes shared by the ado-graph tests."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pandas as pd
@@ -39,7 +40,7 @@ def fake_client(items, seeds, rejected=(), log=None):
     log = log if log is not None else {"fetched": [], "filtered": []}
 
     class Client:
-        def __init__(self, _url):
+        def __init__(self, _url, ca_bundle=None):
             pass
 
         def run_query_by_id(self, _project, _query):
@@ -58,7 +59,7 @@ def fake_client(items, seeds, rejected=(), log=None):
 
 def run_export(monkeypatch, tmp_path, client, *extra):
     monkeypatch.setattr(export, "ADOClient", client)
-    monkeypatch.setattr(export, "configure_ca_bundle", lambda _path: None)
+    monkeypatch.setattr(export, "ca_bundle", lambda _dir: nullcontext())
     tool.main(
         [
             "export",

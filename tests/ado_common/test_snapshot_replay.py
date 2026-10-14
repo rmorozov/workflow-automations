@@ -1,5 +1,6 @@
 """Snapshots saved by each ADO tool replay offline into that tool's output."""
 
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -54,7 +55,7 @@ def export_and_capture(monkeypatch, out, *extra):
     fetched, omitted = [], []
 
     class Client:
-        def __init__(self, _url):
+        def __init__(self, _url, ca_bundle=None):
             pass
 
         def run_query_by_id(self, _project, _query):
@@ -70,7 +71,7 @@ def export_and_capture(monkeypatch, out, *extra):
             return items
 
     monkeypatch.setattr(export, "ADOClient", Client)
-    monkeypatch.setattr(export, "configure_ca_bundle", lambda _path: None)
+    monkeypatch.setattr(export, "ca_bundle", lambda _dir: nullcontext())
     argv = ["export", "--ado-url", BASE, "--query-id", "q", "--output-dir", str(out)]
     with pytest.raises(SystemExit) as exit_info:  # 5 is omitted: exit 4, incomplete
         ado_graph.main([*argv, "--formats", "parquet", *extra])

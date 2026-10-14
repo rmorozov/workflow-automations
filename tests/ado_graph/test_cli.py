@@ -4,7 +4,7 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
+from contextlib import nullcontext
 
 import pandas as pd
 import pytest
@@ -63,20 +63,23 @@ def test_analyze_and_help_run_without_network_extras(tmp_path):
 
 
 def _export_with_real_ca(monkeypatch, tmp_path, fake, built, *extra):
-    """Export with a fake client but the real CA bundle setup, recording each bundle."""
+    """Export with a fake client but the real CA bundle, recording what each client got."""
 
-    def configure(cert_dir):
-        built.append(client.configure_ca_bundle(cert_dir))
-        assert os.environ["REQUESTS_CA_BUNDLE"] == built[-1]
+    class Recording(fake):
+        def __init__(self, url, ca_bundle=None):
+            built.append(ca_bundle)
+            # The bundle exists, holds the custom certs, and is not in the environment.
+            assert "synthetic certificate" in open(ca_bundle).read() or "--cert-dir" not in extra
+            assert os.environ.get("REQUESTS_CA_BUNDLE") != ca_bundle
+            super().__init__(url, ca_bundle=ca_bundle)
 
-    monkeypatch.setattr(export, "configure_ca_bundle", configure)
-    monkeypatch.setattr(export, "ADOClient", fake)
+    monkeypatch.setattr(export, "ADOClient", Recording)
     argv = ["export", "--ado-url", "https://ado.example", "--query-id", "synthetic"]
     tool.main([*argv, "--output-dir", str(tmp_path), "--formats", "parquet", *extra])
 
 
 @pytest.mark.parametrize("previous", [None, "/synthetic/prior-bundle.pem"])
-def test_ca_bundle_is_removed_and_setting_restored_after_failed_export(
+def test_ca_bundle_is_removed_and_setting_untouched_after_failed_export(
     tmp_path, monkeypatch, previous
 ):
     if previous is None:
@@ -88,7 +91,7 @@ def test_ca_bundle_is_removed_and_setting_restored_after_failed_export(
     (certs / "corp.pem").write_text("synthetic certificate\n")
 
     class Unreachable:
-        def __init__(self, _url):
+        def __init__(self, _url, ca_bundle=None):
             pass
 
         def run_query_by_id(self, _project, _query):
@@ -103,25 +106,15 @@ def test_ca_bundle_is_removed_and_setting_restored_after_failed_export(
     assert os.environ.get("REQUESTS_CA_BUNDLE") == previous
 
 
-def test_ca_bundle_is_removed_after_successful_export(tmp_path, monkeypatch):
+def test_each_export_gets_its_own_bundle_and_none_outlives_it(tmp_path, monkeypatch):
     monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
     fake, _log = fake_client({1: wi(1)}, [1])
     built = []
-    _export_with_real_ca(monkeypatch, tmp_path, fake, built)
-    assert (tmp_path / "nodes.parquet").exists()
-    assert len(built) == 1 and not os.path.exists(built[0])
+    _export_with_real_ca(monkeypatch, tmp_path / "a", fake, built)
+    _export_with_real_ca(monkeypatch, tmp_path / "b", fake, built)
+    assert (tmp_path / "b" / "nodes.parquet").exists()
+    assert len(set(built)) == 2 and not any(os.path.exists(path) for path in built)
     assert "REQUESTS_CA_BUNDLE" not in os.environ
-
-
-def test_failed_ca_bundle_build_leaves_no_file(tmp_path, monkeypatch):
-    bundles = tmp_path / "tmp"
-    bundles.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(bundles))
-    certs = tmp_path / "certs"
-    (certs / "unreadable.pem").mkdir(parents=True)  # read_bytes() fails on a directory
-    with pytest.raises(OSError):
-        client.build_merged_ca_bundle(str(certs))
-    assert list(bundles.iterdir()) == []
 
 
 def _rejected(capsys, argv):
@@ -162,7 +155,7 @@ def test_replay_rejects_unknown_formats_before_reading_the_snapshot(tmp_path, ca
 def test_formats_are_normalized_and_deduplicated(tmp_path, monkeypatch):
     fake, _log = fake_client({1: wi(1)}, [1])
     monkeypatch.setattr(export, "ADOClient", fake)
-    monkeypatch.setattr(export, "configure_ca_bundle", lambda _dir: None)
+    monkeypatch.setattr(export, "ca_bundle", lambda _dir: nullcontext())
     argv = ["export", "--ado-url", "https://ado.example", "--query-id", "q"]
     tool.main([*argv, "--output-dir", str(tmp_path), "--formats", " CSV,,csv ,Parquet,"])
     assert sorted(p.name for p in tmp_path.iterdir()) == [

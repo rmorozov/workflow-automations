@@ -154,7 +154,7 @@ def wiql_client(items, seeds, log, fail_existence=False):
         assert request.error_policy == "Omit"
         return [items[i] for i in request.ids if i in items]
 
-    def factory(_url):
+    def factory(_url, ca_bundle=None):
         ado = object.__new__(client.ADOClient)
         ado._wit_client = SimpleNamespace(
             query_by_id=lambda **_: SimpleNamespace(

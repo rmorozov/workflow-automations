@@ -23,9 +23,9 @@ Analysis and `--help` need only the `ado-graph-analyze` extra (pandas, openpyxl,
 NetworkX, PyArrow). The ADO SDK, msrest, Kerberos, certifi and tqdm are in the
 `ado-graph` extra and load only when `export` runs; without them `export` exits 2
 before any work, naming the extra. Importing the package configures neither root
-logging nor certificates. Export sets `REQUESTS_CA_BUNDLE` to a merged temporary
-bundle while it runs, then deletes the bundle and restores the previous setting,
-also when export fails.
+logging nor certificates. Export builds a merged temporary CA bundle, gives it to
+its own ADO connection only, and deletes it when export ends, also on failure;
+`REQUESTS_CA_BUNDLE` and the rest of the environment are never changed.
 
 ## Export CLI
 
@@ -47,11 +47,13 @@ Default excluded types: Task, Bug, Test Case, Test Suite, Test Plan, Test Run,
 Shared Steps, Shared Parameter.
 
 A temporary PEM combines certifi's bundle and recursively found `.pem`/`.crt`
-files (sorted separately per extension). It replaces `REQUESTS_CA_BUNDLE` for the
-process. Invalid certificate directories warn and use certifi alone. The temporary
-file is not deleted by this script. Authentication uses msrest
-`KerberosAuthentication(mutual_authentication=OPTIONAL)` with the current ticket
-cache. No password/PAT options or retry/timeout policy are exposed.
+files (sorted separately per extension). Every HTTPS request of the export's
+connection verifies against it, in place of any ambient `REQUESTS_CA_BUNDLE`; an
+explicit `verify=False` is kept. Invalid certificate directories warn and use
+certifi alone. The file lives only while export runs. Authentication is Kerberos
+with the current ticket cache and OPTIONAL mutual authentication, through the
+connection helper shared with `ado-triage` (`ado_common/session.py`). No
+password/PAT options or retry/timeout policy are exposed.
 
 ### Traversal, filtering and completeness
 

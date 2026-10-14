@@ -37,6 +37,7 @@ from workflow_automations.ado_common.relations import (
     HIERARCHY_FORWARD,
     TRIAGE,
 )
+from workflow_automations.ado_common.session import connect
 from workflow_automations.ado_common.snapshot import (
     RawSnapshot,
     SnapshotError,
@@ -225,31 +226,24 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
     labels and are recorded as warnings.
     """
     try:
+        # Imported here so a missing extra fails before any request.
+        import azure.devops.connection  # noqa: F401
         import requests
-        from azure.devops.connection import Connection
-        from msrest.authentication import Authentication
+        import requests_kerberos  # noqa: F401
         from msrest.exceptions import ClientException
-        from requests_kerberos import OPTIONAL, HTTPKerberosAuth
     except ImportError as exc:
         raise TriageError(
             "ADO access needs the 'ado-triage' and 'ado-kerberos' extras: "
             f"python -m pip install 'workflow-automations[ado-triage,ado-kerberos]' ({exc})"
         ) from exc
 
-    class KerberosAuthentication(Authentication):
-        def signed_session(self, session=None):
-            session = super().signed_session(session)
-            # IIS-hosted ADO servers often omit the mutual-auth token on success, which
-            # fails the default REQUIRED mode. OPTIONAL still verifies a token when sent.
-            session.auth = HTTPKerberosAuth(mutual_authentication=OPTIONAL)
-            return session
-
     # ClientException covers every azure-devops/msrest failure: wrapped service errors,
     # plain HTTP errors (404, 403), authentication (401) and wrapped connection errors.
     service_errors = (ClientException, requests.RequestException)
     warnings: list[str] = []
     try:
-        connection = Connection(base_url=base_url, creds=KerberosAuthentication())
+        # Kerberos with OPTIONAL mutual auth; CA verification from requests' defaults.
+        connection = connect(base_url)
         client = connection.clients.get_work_item_tracking_client()
 
         logger.info("Executing query %s", query_id)

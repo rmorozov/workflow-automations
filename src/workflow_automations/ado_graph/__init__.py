@@ -10,16 +10,16 @@ Two modes:
              `ado-graph-analyze` extra; export needs the `ado-graph` extra.
 
 Auth:
-  Uses msrest.authentication.KerberosAuthentication (wraps requests-kerberos)
-  injected into azure.devops.connection.Connection.
+  Kerberos (requests-kerberos, OPTIONAL mutual authentication) on an
+  azure.devops Connection, built by ado_common.session.connect().
 
 Certificates:
   When export starts, a merged CA bundle is built: certifi's default bundle is
   copied to a temp file, then every .pem/.crt file found under --cert-dir (or the
-  env var ADO_CERT_DIR) is appended to it.  The merged file path is written to
-  REQUESTS_CA_BUNDLE so that msrest / requests picks it up automatically.  When
-  export ends, also on failure, the file is deleted and REQUESTS_CA_BUNDLE is
-  restored.  Importing this package configures neither logging nor certificates.
+  env var ADO_CERT_DIR) is appended to it.  Only the export's connection verifies
+  against it; REQUESTS_CA_BUNDLE is not changed.  When export ends, also on
+  failure, the file is deleted.  Importing this package configures neither
+  logging nor certificates.
 
 Work-item filtering (export mode):
   --skip-types        comma-separated WorkItemType values to mark out of scope.

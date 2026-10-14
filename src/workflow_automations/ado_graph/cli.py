@@ -29,7 +29,6 @@ from workflow_automations.ado_graph.analyze import (
 from workflow_automations.ado_graph.client import (
     ADO_BATCH_LIMIT,
     DEFAULT_SKIP_TYPES,
-    ca_bundle_scope,
     import_network_modules,
 )
 from workflow_automations.ado_graph.report import EDGE_COLUMNS, EXPORT_FILES, NODE_KEY, export_paths
@@ -399,8 +398,7 @@ def main(argv: list[str] | None = None) -> None:
                 "export needs the 'ado-graph' extra: "
                 f"python -m pip install 'workflow-automations[ado-graph]' ({exc})"
             )
-        with ca_bundle_scope():
-            run_export(args)
+        run_export(args)
     elif args.mode == "replay":
         from workflow_automations.ado_common.snapshot import SnapshotError
         from workflow_automations.ado_graph.snapshot import run_replay
