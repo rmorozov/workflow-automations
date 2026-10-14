@@ -429,3 +429,91 @@ def test_cr_scope_without_crs_names_each_column_once():
         assert len(columns) == len(set(columns))
         assert "Impacted_WI_Count" in columns
     assert list(empty.analyze_cr_scope_and_impact().columns)[2] == "Total_Effort"
+
+
+def custom_field_nodes():
+    """Synthetic nodes with two organization-specific fields; item 4 has no team."""
+    return nodes().assign(
+        **{
+            "Custom.Team": ["Red", "Blue", "Blue", None],
+            "Org.Stage": ["Plan", "Build", "Done", "Plan"],
+        }
+    )
+
+
+def test_default_sheets_carry_no_organization_specific_field():
+    analyzer = analyze.GraphAnalyzer(nodes(), edges())
+    base = list(analyze.BASE_META_COLUMNS)
+    assert list(analyzer.find_scc().columns)[-6:] == base
+    assert list(analyzer.compute_metrics().columns)[-6:] == base
+    assert list(analyzer.find_cycles().columns)[-7:-1] == base
+
+
+def test_configured_fields_appear_under_their_labels_on_every_sheet():
+    meta = analyze.parse_meta_fields(["Team=Custom.Team", "Org.Stage"], [])
+    analyzer = analyze.GraphAnalyzer(custom_field_nodes(), edges(), meta_fields=meta)
+    scc = analyzer.find_scc().set_index("WI_ID")
+    # Configured fields follow State, in the order given.
+    columns = list(scc.columns)
+    assert columns[columns.index("State") + 1 : columns.index("WorkItemType")] == [
+        "Team",
+        "Org.Stage",
+    ]
+    assert scc.loc[2, "Team"] == "Blue" and scc.loc[3, "Org.Stage"] == "Done"
+    unpacked = analyzer.analyze_cr_impact_unpacked().iloc[0]
+    assert (unpacked["CR_Team"], unpacked["Impacted_Team"]) == ("Red", "Blue")
+    orphans = analyzer.find_orphans()
+    assert "Team" in orphans.columns and "Custom.Team" not in orphans.columns
+    assert orphans.loc[0, "Org.Stage"] == "Plan"
+    empty = analyzer.find_longest_chain("impact")
+    assert "Team" in empty.columns
+
+
+def test_legacy_preset_restores_roadmap_state():
+    graph_nodes = nodes().assign(**{"KL.Roadmap_State": ["Committed", "", "", ""]})
+    meta = analyze.parse_meta_fields([], ["legacy"])
+    analyzer = analyze.GraphAnalyzer(graph_nodes, edges(), meta_fields=meta)
+    assert analyzer.compute_metrics().set_index("WI_ID").loc[1, "Roadmap_State"] == "Committed"
+
+
+@pytest.mark.parametrize(("policy", "has_column"), [("omit", False), ("blank", True)])
+def test_absent_fields_are_reported_and_handled_by_policy(caplog, policy, has_column):
+    meta = analyze.parse_meta_fields(["Team=Custom.Team", "Sprint=Org.Sprint"], [])
+    with caplog.at_level("WARNING", logger="ado_tool"):
+        analyzer = analyze.GraphAnalyzer(
+            custom_field_nodes(), edges(), meta_fields=meta, missing_meta=policy
+        )
+    assert "not in the nodes file" in caplog.text and "Org.Sprint" in caplog.text
+    assert analyzer.meta_absent == ["Org.Sprint"]
+    for df in (analyzer.compute_metrics(), analyzer.find_orphans()):
+        assert "Team" in df.columns
+        assert ("Sprint" in df.columns) is has_column
+    if has_column:
+        assert set(analyzer.compute_metrics()["Sprint"]) == {""}
+
+
+def test_absent_field_with_error_policy_fails():
+    meta = analyze.parse_meta_fields(["Sprint=Org.Sprint"], [])
+    with pytest.raises(analyze.MetaFieldError, match="Org.Sprint is not in the nodes file"):
+        analyze.GraphAnalyzer(nodes(), edges(), meta_fields=meta, missing_meta="error")
+
+
+@pytest.mark.parametrize(
+    ("specs", "presets", "message"),
+    [
+        (["=Custom.Team"], [], "LABEL=FIELD"),
+        (["Team="], [], "LABEL=FIELD"),
+        (["State=Custom.Team"], [], "State is a column the report writes"),
+        (["Team=Custom.Team", "Team=Org.Stage"], [], "label Team is given twice"),
+        (["Roadmap=KL.Roadmap_State"], ["legacy"], "field KL.Roadmap_State is given twice"),
+    ],
+)
+def test_bad_field_specs_are_rejected(specs, presets, message):
+    with pytest.raises(analyze.MetaFieldError, match=message):
+        analyze.parse_meta_fields(specs, presets)
+
+
+def test_label_may_not_shadow_another_node_column():
+    meta = analyze.parse_meta_fields(["Effort=Custom.Team"], [])
+    with pytest.raises(analyze.MetaFieldError, match="Effort is already a column"):
+        analyze.GraphAnalyzer(custom_field_nodes(), edges(), meta_fields=meta)

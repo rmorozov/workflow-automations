@@ -273,3 +273,40 @@ def test_analyze_budget_options_reach_the_report(tmp_path):
 @pytest.mark.parametrize("option", ["--max-cycles", "--max-cycle-rows", "--centrality-sources"])
 def test_analyze_budgets_must_be_positive(parquet_inputs, capsys, option):
     assert "must be at least 1" in _rejected(capsys, _analyze(parquet_inputs, option, "0"))
+
+
+def test_meta_fields_reach_the_report_and_config(tmp_path):
+    nodes().assign(**{"Custom.Team": ["Red", "Blue", "Blue", "Red"]}).to_parquet(
+        tmp_path / "nodes.parquet"
+    )
+    edges().to_parquet(tmp_path / "edges.parquet")
+    meta = ["--meta-field", "Team=Custom.Team", "--meta-field", "Sprint=Org.Sprint"]
+    tool.main(_analyze(tmp_path, "--steps", "metrics", *meta, "--missing-meta", "blank"))
+    sheets = pd.read_excel(tmp_path / "out" / "report.xlsx", sheet_name=None)
+    assert sheets["metrics"].set_index("WI_ID").loc[2, "Team"] == "Blue"
+    assert sheets["metrics"]["Sprint"].isna().all()
+    config = sheets["Config"].set_index("Setting")["Value"]
+    assert config["meta_fields"] == "Team=Custom.Team, Sprint=Org.Sprint"
+    assert config["missing_meta"] == "blank"
+    about = sheets["About"].set_index("Item")["Value"]
+    assert about["Metadata fields not in the nodes file"] == "Org.Sprint"
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--meta-field", "Title=Custom.Team"], "Title is a column the report writes"),
+        (["--meta-field", "Effort=Custom.Team"], "Effort is already a column of the nodes file"),
+        (
+            ["--meta-preset", "legacy", "--missing-meta", "error"],
+            "field KL.Roadmap_State is not in the nodes file",
+        ),
+        (["--meta-preset", "acme"], "invalid choice: 'acme'"),
+    ],
+)
+def test_analyze_rejects_bad_meta_fields_before_analysis(
+    parquet_inputs, monkeypatch, capsys, extra, message
+):
+    monkeypatch.setattr(cli, "run_analyze", lambda _args: pytest.fail("analysis ran"))
+    assert message in _rejected(capsys, _analyze(parquet_inputs, *extra))
+    assert not (parquet_inputs / "out").exists()

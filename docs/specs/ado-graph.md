@@ -239,9 +239,25 @@ an unknown step or subgraph, or a list with no step, exits 2 before any input is
 read. `--bridges` (`contract` by default, or `drop`) and `--max-indirect-edges`
 (default 1,000,000) control bridge nodes, below.
 
+Metadata columns are configurable, because custom fields differ per organization.
+Every result sheet that describes work items carries `Title`, `WI_URL`, `State`,
+`WorkItemType`, `AreaPath` and `IterationPath` (with a `CR_`, `Impacted_` or
+`Prereq_` prefix on the CR sheets); by default nothing else. `--meta-field
+LABEL=FIELD` (repeatable) adds node column `FIELD` as `LABEL` after `State`, in the
+order given; `--meta-field FIELD` keeps the column's name. The sheets that list
+whole node rows (`orphans`, `has_cr_dep`, `no_cr_dep`) rename `FIELD` to `LABEL`.
+`--meta-preset legacy` adds `Roadmap_State=KL.Roadmap_State`, the column every
+sheet carried before AG-017, ahead of any `--meta-field`. A field absent from the
+nodes file is logged as a warning and named in the About sheet; `--missing-meta`
+then omits its column (`omit`, the default), writes it blank (`blank`), or exits 2
+before analysis (`error`). An empty label or field, a label used twice or a field
+used twice, a label the report writes itself (the columns above, `WI_ID`,
+`In_Scope`, `Graph_Neighbors_Debug`) and a label that is another column of the
+nodes file exit 2 before analysis.
+
 Minimum input columns: nodes `WI_ID`; edges `Source_ID`, `Target_ID`, `Link_Type`.
-Optional node metadata: Title, WorkItemType, State, `KL.Roadmap_State`,
-`System.AreaPath`, `System.IterationPath`, configured effort field. A missing
+Optional node metadata: Title, WorkItemType, State, `System.AreaPath`,
+`System.IterationPath`, configured effort field and `--meta-field` columns. A missing
 required column exits 2 before analysis (see
 [Files, errors and current limitations](#files-errors-and-current-limitations));
 column types and ID values are not validated.
@@ -394,8 +410,8 @@ before the results:
 
 | Sheet | Content |
 | --- | --- |
-| `About` | `Item`/`Value` rows: purpose, how to read the report, tool version, the input file names, work items and links loaded, relations after normalization, links skipped for an absent endpoint or an unknown type, bridge items contracted or dropped, work items analyzed, result-sheet count, and `Complete` (`yes`, or `no:` with the partial sheets) |
-| `Config` | `Setting`/`Value` rows: input and output file names (without their folder), `ado_url`, `effort_field`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
+| `About` | `Item`/`Value` rows: purpose, how to read the report, tool version, the input file names, work items and links loaded, relations after normalization, links skipped for an absent endpoint or an unknown type, bridge items contracted or dropped, work items analyzed, metadata fields not in the nodes file (or `none`), result-sheet count, and `Complete` (`yes`, or `no:` with the partial sheets) |
+| `Config` | `Setting`/`Value` rows: input and output file names (without their folder), `ado_url`, `effort_field`, `meta_fields` (`LABEL=FIELD` pairs, presets expanded), `missing_meta`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
 | `Summary` | One row per result sheet: `Sheet` (a link to it), `Step`, `Subgraph`, `Rows`, a headline `Count` and what it `Counted`, `Complete` and `Note` |
 
 The headline count is cycles for `cycles`, components for `scc` (the note adds how

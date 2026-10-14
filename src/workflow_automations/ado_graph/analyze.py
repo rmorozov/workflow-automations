@@ -39,6 +39,59 @@ class ContractionBudgetExceeded(ValueError):
     """Bridge contraction would create more indirect edges than allowed."""
 
 
+class MetaFieldError(ValueError):
+    """A configured metadata field is invalid, or absent under `--missing-meta error`."""
+
+
+# Metadata columns every node-listing sheet carries.  Configured fields are
+# organization-specific, so none is on by default: `--meta-field LABEL=FIELD` adds
+# one, and a preset restores a known set of labels.
+BASE_META_COLUMNS = ("Title", "WI_URL", "State", "WorkItemType", "AreaPath", "IterationPath")
+META_PRESETS: dict[str, dict[str, str]] = {
+    # Before AG-017 every sheet carried this field.
+    "legacy": {"Roadmap_State": "KL.Roadmap_State"},
+}
+MISSING_META_POLICIES = ("omit", "blank", "error")
+# Labels that would collide with columns the analyzer writes itself.
+RESERVED_META_LABELS = frozenset({*BASE_META_COLUMNS, "WI_ID", "In_Scope", "Graph_Neighbors_Debug"})
+
+
+def parse_meta_fields(specs: list[str], presets: list[str]) -> dict[str, str]:
+    """Map each label to its node column: presets first, then `LABEL=FIELD` or `FIELD`."""
+    fields: dict[str, str] = {}
+    pairs = [pair for name in presets for pair in META_PRESETS[name].items()]
+    for spec in specs:
+        label, eq, field = (part.strip() for part in spec.partition("="))
+        pairs.append((label, field) if eq else (label, label))
+    for label, field in pairs:
+        if not label or not field:
+            raise MetaFieldError(f"--meta-field needs LABEL=FIELD or FIELD, not {label}={field}")
+        if label in RESERVED_META_LABELS:
+            raise MetaFieldError(f"--meta-field label {label} is a column the report writes")
+        if label in fields:
+            raise MetaFieldError(f"--meta-field label {label} is given twice")
+        if field in fields.values():
+            raise MetaFieldError(f"--meta-field field {field} is given twice")
+        fields[label] = field
+    return fields
+
+
+def meta_field_errors(meta_fields: dict[str, str], columns, missing_meta: str) -> list[str]:
+    """Problems with the configured fields against the node columns (empty when usable)."""
+    errors = [
+        f"label {label} is already a column of the nodes file"
+        for label, field in meta_fields.items()
+        if label != field and label in columns
+    ]
+    if missing_meta == "error":
+        errors += [
+            f"field {field} is not in the nodes file"
+            for field in meta_fields.values()
+            if field not in columns
+        ]
+    return errors
+
+
 # Forward labels in report order, each with its relation family.  Reverse labels
 # (REVERSE_LINK_MAP) are flipped to these, so one relation is one directed edge.
 RELATION_FAMILY: dict[str, str] = {
@@ -136,6 +189,8 @@ class GraphAnalyzer:
         max_cycles: int = DEFAULT_MAX_CYCLES,
         max_cycle_rows: int = DEFAULT_MAX_CYCLE_ROWS,
         centrality_sources: int = DEFAULT_CENTRALITY_SOURCES,
+        meta_fields: dict[str, str] | None = None,
+        missing_meta: str = "omit",
     ) -> None:
         # Sorted inputs make the graph's insertion order, and so every traversal,
         # independent of the row order of the files.
@@ -148,6 +203,7 @@ class GraphAnalyzer:
         self.max_cycles = max_cycles
         self.max_cycle_rows = max_cycle_rows
         self.centrality_sources = centrality_sources
+        self._configure_meta(dict(meta_fields or {}), missing_meta)
         self.relations: nx.MultiDiGraph = nx.MultiDiGraph()
         self._graphs: dict[str, nx.DiGraph] = {}
         self._bridge_ids: list = []
@@ -165,6 +221,33 @@ class GraphAnalyzer:
         self.stats["bridges"] = len(self._bridge_ids)
         self.stats["nodes_analyzed"] = len(self.df_nodes)
 
+    def _configure_meta(self, meta_fields: dict[str, str], missing_meta: str) -> None:
+        """Keep the configured fields the policy allows; report the absent ones."""
+        columns = set(self.df_nodes.columns)
+        errors = meta_field_errors(meta_fields, columns, missing_meta)
+        if errors:
+            raise MetaFieldError("--meta-field: " + "; ".join(errors))
+        self.missing_meta = missing_meta
+        self.meta_configured = meta_fields
+        self.meta_absent = [field for field in meta_fields.values() if field not in columns]
+        if self.meta_absent:
+            log.warning(
+                "Metadata field(s) not in the nodes file, %s: %s",
+                "left blank" if missing_meta == "blank" else "omitted",
+                ", ".join(self.meta_absent),
+            )
+        self.meta_fields = {
+            label: field
+            for label, field in meta_fields.items()
+            if missing_meta == "blank" or field in columns
+        }
+
+    def _meta_columns(self, prefix: str = "") -> list[str]:
+        """Metadata column names in report order; configured fields follow State."""
+        base = list(BASE_META_COLUMNS)
+        names = base[:3] + list(self.meta_fields) + base[3:]
+        return [f"{prefix}{name}" for name in names]
+
     def _wi_url(self, wi_id: int) -> str:
         return f"{self.ado_url}/_workitems/edit/{wi_id}" if self.ado_url else ""
 
@@ -177,9 +260,9 @@ class GraphAnalyzer:
                 WorkItemType=row.get("WorkItemType", ""),
                 Title=row.get("Title", ""),
                 State=row.get("State", ""),
-                Roadmap_State=row.get("KL.Roadmap_State", ""),
                 AreaPath=row.get("System.AreaPath", ""),
                 IterationPath=row.get("System.IterationPath", ""),
+                **{label: row.get(field, "") for label, field in self.meta_fields.items()},
             )
         if "In_Scope" in self.df_nodes.columns:
             in_scope = self.df_nodes["In_Scope"].fillna(True).astype(bool)
@@ -313,13 +396,8 @@ class GraphAnalyzer:
         """Helper: Returns standardized metadata columns for any Node."""
         d = self.G.nodes.get(wi_id, {})
         return {
-            f"{prefix}Title": d.get("Title", ""),
-            f"{prefix}WI_URL": self._wi_url(wi_id),
-            f"{prefix}State": d.get("State", ""),
-            f"{prefix}Roadmap_State": d.get("Roadmap_State", ""),
-            f"{prefix}WorkItemType": d.get("WorkItemType", ""),
-            f"{prefix}AreaPath": d.get("AreaPath", ""),
-            f"{prefix}IterationPath": d.get("IterationPath", ""),
+            f"{prefix}{name}": self._wi_url(wi_id) if name == "WI_URL" else d.get(name, "")
+            for name in self._meta_columns()
         }
 
     def _get_neighborhood_diagnostic(self, node_id: int) -> str:
@@ -345,6 +423,11 @@ class GraphAnalyzer:
     def _nodes_subset(self, node_ids: list) -> pd.DataFrame:
         """Full node rows for a subset, in WI_ID order, enriched with debugging metrics."""
         df = self.df_nodes[self.df_nodes["WI_ID"].isin(node_ids)].copy().reset_index(drop=True)
+        # Configured fields appear under their labels, as on the other sheets.
+        df = df.rename(columns={field: label for label, field in self.meta_fields.items()})
+        for label in self.meta_fields:
+            if label not in df.columns:
+                df[label] = ""
         if df.empty:
             return df
 
@@ -418,13 +501,7 @@ class GraphAnalyzer:
         columns = [
             "Cycle_Index",
             "Node_ID",
-            "Title",
-            "WI_URL",
-            "State",
-            "Roadmap_State",
-            "WorkItemType",
-            "AreaPath",
-            "IterationPath",
+            *self._meta_columns(),
             "Cycles_Complete",
         ]
         df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
@@ -458,13 +535,7 @@ class GraphAnalyzer:
             "Chain_Rank",
             "SCC_Index",
             "WI_ID",
-            "Title",
-            "WI_URL",
-            "State",
-            "Roadmap_State",
-            "WorkItemType",
-            "AreaPath",
-            "IterationPath",
+            *self._meta_columns(),
         ]
         cond = nx.condensation(g)
         if len(cond) == 0:
@@ -513,13 +584,7 @@ class GraphAnalyzer:
                     "SCC_Index",
                     "WI_ID",
                     "SCC_Size",
-                    "Title",
-                    "WI_URL",
-                    "State",
-                    "Roadmap_State",
-                    "WorkItemType",
-                    "AreaPath",
-                    "IterationPath",
+                    *self._meta_columns(),
                 ]
             )
         return pd.DataFrame(rows)
@@ -760,8 +825,10 @@ def run_analyze(args: argparse.Namespace) -> None:
             max_cycles=args.max_cycles,
             max_cycle_rows=args.max_cycle_rows,
             centrality_sources=args.centrality_sources,
+            meta_fields=parse_meta_fields(args.meta_field, args.meta_preset),
+            missing_meta=args.missing_meta,
         )
-    except ContractionBudgetExceeded as exc:
+    except (ContractionBudgetExceeded, MetaFieldError) as exc:
         # Raised before any output is created.
         raise SystemExit(f"error: {exc}") from None
     step_fn_map = {
@@ -923,6 +990,10 @@ def about_frame(
         ("Links skipped: unknown link type", stats["edges_unknown_type"]),
         (f"Out-of-scope bridge items ({bridges})", stats["bridges"]),
         ("Work items analyzed", stats["nodes_analyzed"]),
+        (
+            "Metadata fields not in the nodes file",
+            ", ".join(analyzer.meta_absent) or "none",
+        ),
         ("Result sheets", len(summary)),
         ("Complete", "yes" if not partial else "no: " + ", ".join(partial)),
     ]
@@ -942,6 +1013,11 @@ def config_frame(
         ("output_file", Path(args.output_file).name),
         ("ado_url", args.ado_url),
         ("effort_field", args.effort_field),
+        (
+            "meta_fields",
+            ", ".join(f"{label}={field}" for label, field in analyzer.meta_configured.items()),
+        ),
+        ("missing_meta", analyzer.missing_meta),
         ("steps", args.steps),
         ("sheets", ", ".join(sheets)),
         ("bridges", analyzer.bridges),
