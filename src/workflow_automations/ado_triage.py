@@ -28,6 +28,7 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from workflow_automations.ado_common.query import chunks, query_result_ids
+from workflow_automations.ado_common.snapshot import RawSnapshot, utc_timestamp
 
 logger = logging.getLogger("ado_triage")
 
@@ -319,6 +320,91 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
         items=items,
         external=external,
         parent_titles={pid: f.get(FIELD_TITLE, "") for pid, f in parents.items()},
+        warnings=warnings,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared raw snapshot (offline replay)
+# ---------------------------------------------------------------------------
+
+SNAPSHOT_PRODUCER = "ado-triage"
+
+
+def snapshot_to_raw(
+    snapshot: Snapshot, base_url: str, query_id: str, captured_at: str | None = None
+) -> RawSnapshot:
+    """The shared raw form of a fetched triage snapshot.
+
+    Every item is a query result, so they are also the roots. Linked items and
+    parents become ``linked`` entries; an ID fetched as both keeps both field sets.
+    """
+    linked: dict[int, dict[str, Any]] = {wi_id: dict(f) for wi_id, f in snapshot.external.items()}
+    for pid, title in snapshot.parent_titles.items():
+        linked.setdefault(pid, {})[FIELD_TITLE] = title
+    return RawSnapshot(
+        producer=SNAPSHOT_PRODUCER,
+        captured_at=captured_at if captured_at is not None else utc_timestamp(),
+        source={"base_url": base_url, "project": "", "query_id": query_id},
+        roots=[item["id"] for item in snapshot.items],
+        items=[
+            {"id": item["id"], "fields": dict(item["fields"]), "relations": list(item["relations"])}
+            for item in snapshot.items
+        ],
+        linked=linked,
+        warnings=list(snapshot.warnings),
+    )
+
+
+def snapshot_from_raw(raw: RawSnapshot) -> Snapshot:
+    """Triage scope from a raw snapshot of any ADO tool.
+
+    The scope is the saved query's items (``roots``), all of which must have been
+    fetched. A filtered snapshot is refused: its items were chosen by type or
+    project, so the query's scope may be missing from it. Other fetched items only
+    label relations and parents.
+    """
+    if raw.is_filtered:
+        active = ", ".join(name for name, values in raw.filters.items() if values)
+        raise TriageError(
+            f"the {raw.producer} snapshot was filtered ({active}), so it is not a complete "
+            "triage scope; capture it without type or project filters"
+        )
+    root_ids = set(raw.roots)
+    missing = root_ids - set(raw.item_ids)
+    if missing:
+        raise TriageError(
+            f"{len(missing)} queried work items are missing from the snapshot: {sorted(missing)}"
+        )
+    items = [
+        {"id": item["id"], "fields": dict(item["fields"]), "relations": list(item["relations"])}
+        for item in raw.items
+        if item["id"] in root_ids
+    ]
+    known = {item["id"]: item["fields"] for item in raw.items}
+    known.update(raw.linked)
+    targets = {
+        target
+        for item in items
+        for rel in item["relations"]
+        if rel["rel"] in RELATION_LABELS
+        and (target := relation_target_id(rel["url"])) is not None
+        and target not in root_ids
+    }
+    parents = {
+        pid for item in items if (pid := safe_int(item["fields"].get(FIELD_PARENT))) is not None
+    }
+    warnings = list(raw.warnings)
+    if raw.producer != SNAPSHOT_PRODUCER:
+        # Triage records these when it fetches; another tool's snapshot does not.
+        for ids, what in ((targets, "linked items"), (parents, "parent titles")):
+            unresolved = len(ids - known.keys())
+            if unresolved:
+                warnings.append(f"{unresolved} {what} unavailable (not in the snapshot)")
+    return Snapshot(
+        items=items,
+        external={t: dict(known[t]) for t in sorted(targets) if t in known},
+        parent_titles={p: known[p].get(FIELD_TITLE, "") for p in sorted(parents) if p in known},
         warnings=warnings,
     )
 
