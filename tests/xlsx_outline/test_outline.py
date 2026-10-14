@@ -300,3 +300,121 @@ def test_formatting_far_from_data_is_not_materialized(tmp_path, capsys, monkeypa
     _, out, _ = run(capsys, "--input", path)
     assert out == "- Alpha\n  - One\n"
     assert len(opened[0].active._cells) < 10
+
+
+@pytest.fixture
+def two_sheets(tmp_path):
+    path = tmp_path / "teams.xlsx"
+    wb = Workbook()
+    wb.active.title = "Plan"
+    for row in [["Area", "Item", "Owner"], ["Core", "Scheduler", "Ann"], ["Core", "IPC", None]]:
+        wb.active.append(row)
+    wb.create_sheet("Empty")
+    risks = wb.create_sheet("Risks #")
+    for row in [["Risk", "Mitigation"], ["Outage", "Failover"], ["Churn", None]]:
+        risks.append(row)
+    wb.save(path)
+    wb.close()
+    return path
+
+
+def test_all_sheets_outline_one_heading_per_sheet(two_sheets, capsys):
+    status, out, err = run(capsys, "--input", two_sheets, "--all-sheets", "--levels", "2")
+    assert status == 0
+    # The empty sheet is skipped; a trailing "#" is escaped as for any heading.
+    assert out == (
+        "# Plan\n"
+        "\n"
+        "- Core\n"
+        "  - Scheduler\n"
+        "    - Owner: Ann\n"
+        "  - IPC\n"
+        "\n"
+        "# Risks \\#\n"
+        "\n"
+        "- Outage\n"
+        "  - Failover\n"
+        "- Churn\n"
+    )
+    assert err == "Outlined 4 rows into 6 items\n"
+
+
+def test_all_sheets_sections_unfold_back_separately(two_sheets, tmp_path, capsys):
+    from openpyxl import load_workbook
+
+    from workflow_automations import xlsx_unfold
+
+    md = tmp_path / "teams.md"
+    argv = ["--input", two_sheets, "--all-sheets", "--heading-levels", "1", "--output", md]
+    assert run(capsys, *argv)[0] == 0
+    text = md.read_text()
+    starts = [i for i, line in enumerate(text.splitlines()) if line.startswith("# ")]
+    assert len(starts) == 2
+    lines = text.splitlines()
+    sections = [lines[starts[0] : starts[1]], lines[starts[1] :]]
+    # Each section is that sheet's own outline titled with its name.
+    single = run(
+        capsys, "--input", two_sheets, "--sheet", "Plan", "--title", "Plan", "--heading-levels", "1"
+    )[1]
+    assert "\n".join(sections[0]).rstrip("\n") + "\n" == single
+    expected = {
+        "Plan": [("Area", "Item", "Owner"), ("Core", "Scheduler", "Ann"), ("Core", "IPC", None)],
+        "Risks #": [("Risk", "Mitigation"), ("Outage", "Failover"), ("Churn", None)],
+    }
+    for index, (sheet, rows) in enumerate(expected.items()):
+        part = tmp_path / f"part{index}.md"
+        part.write_text("\n".join(sections[index]) + "\n")
+        result = tmp_path / f"part{index}.xlsx"
+        status = xlsx_unfold.main(
+            ["--input", str(part), "--output", str(result), "--title", "--columns", *rows[0]]
+        )
+        capsys.readouterr()
+        assert status == 0
+        wb = load_workbook(result)
+        assert list(wb["Outline"].iter_rows(values_only=True)) == rows, sheet
+        wb.close()
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (["--title", "T"], "cannot be combined with --title"),
+        (["--front-matter"], "omit it with --all-sheets"),
+        (["--columns", "Area", "Item"], "Sheet Risks #: Unknown columns: Area, Item"),
+        (["--levels", "3"], "Sheet Risks #: --levels must be between 1 and 2"),
+        (["--heading-levels", "6"], "Sheet Plan: --heading-levels must be between 0 and 3"),
+    ],
+)
+def test_all_sheets_validation_errors(two_sheets, capsys, options, message):
+    status, out, err = run(capsys, "--input", two_sheets, "--all-sheets", *options)
+    assert status == 2
+    assert out == ""
+    assert message in err
+
+
+def test_all_sheets_rejects_sheet_and_empty_workbooks(two_sheets, tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        tool.main(["--input", str(two_sheets), "--all-sheets", "--sheet", "Plan"])
+    assert "not allowed with argument" in capsys.readouterr().err
+    empty = tmp_path / "empty.xlsx"
+    Workbook().save(empty)
+    status, _, err = run(capsys, "--input", empty, "--all-sheets")
+    assert status == 2
+    assert "Every sheet is empty" in err
+
+
+def test_options_are_checked_before_the_workbook_is_read(tmp_path, capsys):
+    status, _, err = run(capsys, "--input", tmp_path / "missing.xlsx", "--indent", "0")
+    assert status == 2
+    assert "--indent must be a positive integer" in err
+
+
+def test_all_sheets_heading_limit_counts_the_sheet_heading(tmp_path, capsys):
+    path = tmp_path / "deep.xlsx"
+    wb = Workbook()
+    wb.active.append([f"L{level}" for level in range(6)])
+    wb.active.append([f"v{level}" for level in range(6)])
+    wb.save(path)
+    status, _, err = run(capsys, "--input", path, "--all-sheets", "--heading-levels", "6")
+    assert status == 2
+    assert "including the sheet heading" in err
