@@ -270,9 +270,8 @@ links do not.
 Analysis writes requested sheets, no index, with widths capped at 50. `all` runs
 every step, including unbounded simple-cycle enumeration and exact centrality.
 No budgets, sampling, cancellation or progress policy are provided for analysis.
-Width sizing walks every written cell in Python. Unpacked/cycle outputs have no
-preflight check against Excel's 1,048,576-row limit (including the header), so a
-large result may fail after all graph computation and leave a partial workbook.
+Excel limits and column sizing are described under
+[Files, errors and current limitations](#files-errors-and-current-limitations).
 
 ## Files, errors and current limitations
 
