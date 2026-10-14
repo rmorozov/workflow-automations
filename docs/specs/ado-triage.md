@@ -118,9 +118,11 @@ AMBER from 85, GREEN below, GREY when capacity is undefined. The summary is sort
 RED, AMBER, GREY, GREEN, then by team score; RAG cells are colored, and score and
 staleness columns use color scales.
 
-An item without an AreaPath (the field is missing or null) has a blank AreaPath and a
-blank `Matched_Capacity_Level`. Every view treats the blanks as one team with
-undefined capacity: it has its own Summary, Capacity Triage and top-20% rows.
+ADO gives every work item an AreaPath (the project root by default), so items left at
+the default area form a team named after the project. As a guard against incomplete
+input, an item whose AreaPath is missing or null gets a blank AreaPath and
+`Matched_Capacity_Level`; every view treats the blanks as one team with undefined
+capacity instead of failing the run.
 
 `--profile exec` writes only Config, Summary, Agenda, Master Data, Capacity Triage and
 Resolved. Master Data is kept so an exec report can be the next `--previous-file`.
