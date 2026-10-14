@@ -41,6 +41,7 @@ also when export fails.
 | `--skip-types` | Case-insensitive comma list of types marked out of scope; empty string disables |
 | `--include-projects` | Case-insensitive comma list of projects kept in scope; empty means all |
 | `--filtered-relations` | `stop` (default) or `follow`; whether relations of filtered items are traversed |
+| `--save-snapshot` | Also save the fetched work items as a JSON snapshot for offline `replay`; see [Snapshots and offline replay](#snapshots-and-offline-replay) |
 
 Default excluded types: Task, Bug, Test Case, Test Suite, Test Plan, Test Run,
 Shared Steps, Shared Parameter.
@@ -124,8 +125,8 @@ the WIQL filter succeeded. In `follow` mode every fetched work item is a node, a
 items excluded by type or project have `In_Scope=False` and act as bridge nodes for
 analysis. Three names are changed:
 `System.Title` → `Title`, `System.WorkItemType` → `WorkItemType`, `System.State` →
-`State`. All other ADO field reference names remain unchanged. No source snapshot,
-root marker, completeness manifest or export-schema version is added.
+`State`. All other ADO field reference names remain unchanged. The tables carry no
+root marker or schema version; a saved snapshot (below) records the run instead.
 
 Before any file is written, the frames are validated and normalized so every format
 stores the same values:
@@ -157,6 +158,38 @@ fetched, pruned, or omitted).
 Batch progress and per-type/project statistics are printed, followed by the pruned
 (WIQL-rejected, not fetched) and omitted (not returned by ADO) totals. Per-type and
 per-project totals count fetched items only.
+
+#### Snapshots and offline replay
+
+`export --save-snapshot PATH` also writes every fetched work item, in or out of
+scope, as a [version 1 ADO snapshot](ado-snapshot.md): every field as ADO returned
+it and every relation, in fetch order. Its provenance is the run's
+`source` (`base_url` collection URL, `project`, `query_id`), `captured_at` (UTC
+time the saved query ran), the saved query's IDs as `roots`, the omitted IDs, the
+case-normalised `skip_types` and `include_projects` filters, and in `options` the
+`filtered_relations` policy, the producing `tool_version` and the run's
+`completeness` (`complete`, or `incomplete` when linked IDs were omitted). Pruned
+IDs are not fetched and are not in it. An existing snapshot file is refused before
+fetching unless `--overwrite` is passed, as are a directory and a path that is one
+of the export files (also through a link); as for the export files, a snapshot
+created at the path during the export is replaced. The snapshot is written,
+atomically, before the export files, so it is kept when writing the tables fails;
+an export that exits 5 writes neither. When the snapshot cannot be written (an
+unwritable path, a full disk, field values that are not JSON data) the error is
+logged, the export files are still written, and export exits 6, before exit 4.
+
+`ado-graph replay --snapshot PATH [--output-dir DIR] [--formats …] [--overwrite]`
+writes the export files of an `ado-graph` snapshot without contacting ADO, needing
+only the `ado-graph-analyze` extra. It applies the recorded filters and relation
+policy to the recorded items, so a snapshot replays into the same files as its
+export, and exits 4 when the snapshot's linked IDs were omitted, as the export did.
+Completeness comes from `omitted`, not from the recorded option, so snapshots saved
+without the provenance options replay the same. Output consent and atomic
+publication are as for export. A file that is not a valid snapshot, an `ado-triage`
+snapshot or one with an omitted root exits 2 and writes nothing. An unfiltered
+snapshot (`--skip-types ''`, no `--include-projects`) is also a complete
+`ado-triage` scope for the same saved query; a filtered one is not. CSV or Excel
+exports are not read back: the snapshot is the replay input.
 
 ## Analyze CLI and graph contract
 
@@ -332,6 +365,8 @@ orientation, report publication, traversal through filtered bridges in both
 relation modes, once-per-ID WIQL classification, omitted-ID reporting with
 export's exit codes 4 and 5, bridge contraction, export normalization (literal
 Excel text, identities, zoned dates, empty exports and schema errors) across all
-formats, offline analysis without the network extras, and CA-bundle cleanup. No
+formats, offline analysis without the network extras, CA-bundle cleanup, and
+snapshots saved by export replaying into identical export files offline (also
+without the network extras), with their provenance, consent and failure exits. No
 actual ADO server was used. Remaining fixes and shared-code opportunities with ADO
 scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).

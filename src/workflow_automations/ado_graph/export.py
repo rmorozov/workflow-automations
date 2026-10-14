@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from tqdm import tqdm
 
+from workflow_automations.ado_common.snapshot import SnapshotError, save_snapshot, utc_timestamp
 from workflow_automations.ado_graph.client import (
     ADO_BATCH_LIMIT,
     FIELD_RENAME,
@@ -27,9 +27,11 @@ from workflow_automations.ado_graph.report import _export_dataframes
 log = logging.getLogger("ado_tool")
 
 # Exit codes: 4 = outputs written but some linked IDs were omitted by ADO;
-# 5 = seed IDs from the saved query were omitted, nothing written.
+# 5 = seed IDs from the saved query were omitted, nothing written;
+# 6 = outputs written but the --save-snapshot file could not be written.
 EXIT_INCOMPLETE = 4
 EXIT_SEEDS_MISSING = 5
+EXIT_SNAPSHOT_FAILED = 6
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +301,8 @@ def _prune_queue_via_wiql(
 
 def run_export(args: argparse.Namespace) -> None:
     """Entry point for `export` mode."""
+    # tqdm is in the ado-graph extra only; replay imports this module offline.
+    from tqdm import tqdm
 
     # 1. Certificate setup
     cert_dir = getattr(args, "cert_dir", None) or os.environ.get("ADO_CERT_DIR")
@@ -324,6 +328,7 @@ def run_export(args: argparse.Namespace) -> None:
 
     # 3. Initial IDs from stored query
     log.info("Running ADO query %s …", args.query_id)
+    captured_at = utc_timestamp()
     initial_ids = client.run_query_by_id(project, args.query_id)
     log.info("Query returned %d work item(s).", len(initial_ids))
 
@@ -336,6 +341,8 @@ def run_export(args: argparse.Namespace) -> None:
     queued: dict[int, None] = dict.fromkeys(initial_ids)
     all_node_rows: list[dict] = []
     all_edge_rows: list[dict] = []
+    # Every fetched SDK work item, in or out of scope, for --save-snapshot.
+    fetched_items: list[Any] = []
     stats = ExportStats(frozenset(initial_ids))
 
     log.info(
@@ -377,6 +384,7 @@ def run_export(args: argparse.Namespace) -> None:
 
             # ── c) Batch fetch the IDs ─────────────────────────────────────
             raw_items = [wi for wi in client.get_work_items_batch(fetch_ids) if wi is not None]
+            fetched_items.extend(raw_items)
             returned = {wi.id for wi in raw_items}
             missing = [wi_id for wi_id in fetch_ids if wi_id not in returned]
             if missing:
@@ -464,11 +472,59 @@ def run_export(args: argparse.Namespace) -> None:
         len(stats.omitted_ids),
     )
 
-    # 7. Export
+    # 7. Snapshot first: it is the raw record even if writing the tables fails.
+    # A failed snapshot must not lose the fetch, so the tables are still written.
+    snapshot_saved = True
+    if getattr(args, "save_snapshot", None):
+        try:
+            _save_snapshot(
+                args, fetched_items, initial_ids, stats, skip_types, include_projects, captured_at
+            )
+        except (OSError, SnapshotError) as exc:
+            snapshot_saved = False
+            log.error("Snapshot not saved to %s: %s", args.save_snapshot, exc)
+
+    # 8. Export
     formats = [f.strip().lower() for f in args.formats.split(",")]
     _export_dataframes(df_nodes, df_edges, output_dir, formats)
     stats.log_omitted()
+    if not snapshot_saved:
+        log.error(
+            "Export written → %s, but not the snapshot (exit %d).",
+            output_dir,
+            EXIT_SNAPSHOT_FAILED,
+        )
+        raise SystemExit(EXIT_SNAPSHOT_FAILED)
     if stats.status == "incomplete":
         log.warning("Export incomplete → %s (exit %d).", output_dir, EXIT_INCOMPLETE)
         raise SystemExit(EXIT_INCOMPLETE)
     log.info("Export complete → %s", output_dir)
+
+
+def _save_snapshot(
+    args: argparse.Namespace,
+    fetched_items: list[Any],
+    initial_ids: list[int],
+    stats: ExportStats,
+    skip_types: frozenset[str],
+    include_projects: frozenset[str],
+    captured_at: str,
+) -> None:
+    from workflow_automations.ado_graph.snapshot import snapshot_from_work_items
+
+    snapshot = snapshot_from_work_items(
+        fetched_items,
+        initial_ids,
+        base_url=args.ado_url,
+        project=args.project or "",
+        query_id=args.query_id,
+        skip_types=skip_types,
+        include_projects=include_projects,
+        filtered_relations=args.filtered_relations,
+        omitted=stats.omitted_ids,
+        captured_at=captured_at,
+    )
+    path = Path(args.save_snapshot)
+    # Consent was checked when the run started, as for the export files.
+    save_snapshot(snapshot, path, overwrite=True)
+    log.info("Snapshot of %d fetched work item(s) → %s", len(snapshot.items), path)
