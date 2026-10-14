@@ -137,6 +137,7 @@ xlsx-outline --input plan.xlsx --levels 3 --row-ids --front-matter --output work
 
 # 1. Unfold into a new workbook (text values, outline columns only)
 xlsx-unfold --input work/plan.md --output work/plan-table.xlsx
+#    add --retype to write numbers and dates as typed cells
 # 2. Merge into a copy of the original, keeping other columns, types and formatting
 xlsx-unfold --input work/plan.md --into plan.xlsx --output work/plan-merged.xlsx
 ```
@@ -147,6 +148,9 @@ merging needs them, and the new-workbook mode uses them to restore duplicate row
 fingerprint that stops a merge into a sheet changed since. If your editor drops or
 mangles front matter, leave it out and pass `--columns`, `--details` (and any other
 outline options you used) to `xlsx-unfold` instead. Neither mode modifies its inputs.
+`--retype`, in either mode, writes text that is exactly how `xlsx-outline` prints a
+number or date (`42`, `0.1`, `2024-01-02`) as a typed cell; IDs with leading zeros,
+other spellings and Text-formatted cells stay text.
 
 ## Find Gerrit parents
 

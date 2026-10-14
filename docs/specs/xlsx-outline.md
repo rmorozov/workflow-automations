@@ -268,7 +268,8 @@ The data rows (row 2 to the last row with a value) are rewritten in outline orde
 
 - A tagged row copies every cell of its source row (values, formulas, styles,
   hyperlinks, comments) and its height, then writes each selected column whose text
-  differs from what the outline showed. Changed values are written as literal text;
+  differs from what the outline showed. Changed values are written as literal text
+  (or typed with `--retype`, see Rows);
   unchanged cells keep their type. With `fill_down`, a parent the outline filled in
   stays blank unless it was edited.
 - An untagged item is a new row with only its selected columns filled.
@@ -290,7 +291,8 @@ them; charts and images are outside this tool's fidelity guarantees.
 
 The new-workbook mode writes one sheet (`--sheet`, default `Outline`): row 1 holds
 the level then detail names, and each row follows in document order. Every value is
-stored as literal text, so `=1+1` stays text. Both modes save to a temporary file,
+stored as literal text, so `=1+1` stays text, unless `--retype` types numbers and
+dates (see Rows). Both modes save to a temporary file,
 check it by reopening, and rename it into place. An existing output requires
 `--overwrite`; neither the outline nor the `--into` workbook is accepted as the
 output, so the original is never modified.
