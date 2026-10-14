@@ -73,6 +73,8 @@ RELATION_LABELS = {
 }
 # Labels meaning "this item obstructs the destination item".
 BLAST_RADIUS_LABELS = ("Successor", "Blocks")
+# Reverse labels whose forward counterpart describes the same dependency.
+INVERSE_LABELS = {"Predecessor": "Successor", "Blocked By": "Blocks"}
 
 FIELD_ID = "System.Id"
 FIELD_PARENT = "System.Parent"
@@ -113,6 +115,8 @@ COL_VARIANCE = "Capacity_Variance"
 COL_OVER = "Is_OverCapacity"
 COL_DAYS_SINCE_CHANGE = "Days_Since_Last_Change"
 COL_BLOCKS_COUNT = "Blocks_Count"
+COL_CHAIN_LENGTH = "Blocker_Chain_Length"
+COL_CHAIN = "Blocker_Chain"
 COL_FLAGS = "Triage_Flags"
 COL_OPP_FLAGS = "Opportunity_Flags"
 COL_SCORE = "Attention_Score"
@@ -497,6 +501,96 @@ def build_relations(snapshot: Snapshot, cfg: Settings) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Transitive blocker chains
+# ---------------------------------------------------------------------------
+
+
+def blocking_edges(rel: pd.DataFrame) -> set[tuple[int, int]]:
+    """(blocker, blocked) pairs from forward links and mirrored reverse links."""
+    edges = set()
+    for src, dst, label in zip(
+        rel[REL_COL_SOURCE_ID], rel[REL_COL_DEST_ID], rel[REL_COL_TYPE], strict=True
+    ):
+        if label in BLAST_RADIUS_LABELS:
+            edges.add((int(src), int(dst)))
+        elif label in INVERSE_LABELS:  # "this item waits on dst": dst blocks this item
+            edges.add((int(dst), int(src)))
+    return {(a, b) for a, b in edges if a != b}
+
+
+def _strongly_connected(graph: dict[int, list[int]]) -> list[list[int]]:
+    """Tarjan's components, iterative; emitted downstream-first (sinks before sources)."""
+    index: dict[int, int] = {}
+    low: dict[int, int] = {}
+    stack: list[int] = []
+    on_stack: set[int] = set()
+    components: list[list[int]] = []
+    for root in sorted(graph):
+        if root in index:
+            continue
+        work = [(root, iter(graph[root]))]
+        index[root] = low[root] = len(index)
+        stack.append(root)
+        on_stack.add(root)
+        while work:
+            node, successors = work[-1]
+            for nxt in successors:
+                if nxt not in index:
+                    index[nxt] = low[nxt] = len(index)
+                    stack.append(nxt)
+                    on_stack.add(nxt)
+                    work.append((nxt, iter(graph[nxt])))
+                    break
+                if nxt in on_stack:
+                    low[node] = min(low[node], index[nxt])
+            else:
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[node])
+                if low[node] == index[node]:
+                    component = []
+                    while True:
+                        member = stack.pop()
+                        on_stack.discard(member)
+                        component.append(member)
+                        if member == node:
+                            break
+                    components.append(sorted(component))
+    return components
+
+
+def blocker_chains(rel: pd.DataFrame) -> dict[int, list[int]]:
+    """Longest chain of items transitively waiting on each blocker, nearest first.
+
+    A dependency cycle is collapsed: its members are counted once, in ID order.
+    """
+    graph: dict[int, list[int]] = {}
+    for blocker, blocked in sorted(blocking_edges(rel)):
+        graph.setdefault(blocker, []).append(blocked)
+        graph.setdefault(blocked, [])
+    component_of: dict[int, int] = {}
+    members_of: list[list[int]] = []
+    downstream: list[list[int]] = []  # per component: longest chain below it
+    for number, members in enumerate(_strongly_connected(graph)):
+        for member in members:
+            component_of[member] = number
+        best: list[int] = []
+        below = {component_of[n] for m in members for n in graph[m]} - {number}
+        for other in sorted(below):
+            candidate = members_of[other] + downstream[other]
+            if len(candidate) > len(best):
+                best = candidate
+        members_of.append(members)
+        downstream.append(best)
+    chains = {
+        node: [m for m in members_of[component_of[node]] if m != node]
+        + downstream[component_of[node]]
+        for node in graph
+    }
+    return chains
+
+
+# ---------------------------------------------------------------------------
 # Heuristic registry: single source of truth for every flag
 # ---------------------------------------------------------------------------
 
@@ -592,6 +686,10 @@ def annotate(df: pd.DataFrame, rel: pd.DataFrame, cfg: Settings) -> pd.DataFrame
     blocking = rel[rel[REL_COL_TYPE].isin(BLAST_RADIUS_LABELS)]
     counts = blocking.groupby(REL_COL_SOURCE_ID).size()
     df[COL_BLOCKS_COUNT] = df[FIELD_ID].map(counts).fillna(0).astype(int)
+    chains = blocker_chains(rel)
+    paths = [[wi_id, *chains.get(wi_id, [])] for wi_id in df[FIELD_ID]]
+    df[COL_CHAIN_LENGTH] = [len(path) - 1 for path in paths]
+    df[COL_CHAIN] = [" > ".join(map(str, path)) if len(path) > 1 else "" for path in paths]
 
     risk = pd.Series("", index=df.index, dtype=object)
     opportunity = pd.Series("", index=df.index, dtype=object)
@@ -815,14 +913,18 @@ def view_date_drift(df, rel, capacity, cfg) -> pd.DataFrame:
 
 
 def view_blockers(df, rel, capacity, cfg) -> pd.DataFrame:
-    cols = [FIELD_ID, FIELD_TITLE, FIELD_AREA_PATH, COL_BLOCKS_COUNT, FIELD_REMAINING_WORK]
+    cols = [
+        FIELD_ID,
+        FIELD_TITLE,
+        FIELD_AREA_PATH,
+        COL_BLOCKS_COUNT,
+        COL_CHAIN_LENGTH,
+        COL_CHAIN,
+        FIELD_REMAINING_WORK,
+    ]
     return _select(df, _blocks_others(df, cfg), [*cols, COL_WEB_URL]).sort_values(
-        COL_BLOCKS_COUNT, ascending=False
+        [COL_CHAIN_LENGTH, COL_BLOCKS_COUNT], ascending=False
     )
-
-
-# Reverse labels whose forward counterpart describes the same dependency.
-INVERSE_LABELS = {"Predecessor": "Successor", "Blocked By": "Blocks"}
 
 
 def view_cross_team(df, rel, capacity, cfg) -> pd.DataFrame:
@@ -956,7 +1058,7 @@ SHEETS: tuple[SheetSpec, ...] = (
     ),
     SheetSpec(
         "10. Top Blockers",
-        "Items others wait on (Successor/Blocks links). Prioritize to unblock.",
+        "Items others wait on, longest transitive chain first. Prioritize to unblock.",
         view_blockers,
     ),
     SheetSpec(

@@ -85,6 +85,15 @@ scores, agenda and team rollups all derive from it.
 | DEFER_CANDIDATE | opportunity | 1 | No completed work, blocks nothing, UAT blank or beyond timebox | Propose cut or defer |
 | QUICK_WIN | opportunity | 1 | Completed > 0 and remaining 1–20 h | Pull into sprint to finish |
 
+`Blocks_Count` stays the one-hop count behind `BLOCKS_OTHERS`. Each item also gets
+`Blocker_Chain_Length` and `Blocker_Chain`: the longest chain of items transitively
+waiting on it (its critical path), as a hop count and as IDs such as `1 > 2 > 3`
+(length 2). The chain follows Successor and Blocks links forward and Predecessor
+and Blocked By links mirrored, so a link ADO stores on both ends counts once, and
+it passes through linked items outside the query when their links are recorded on
+queried items. Members of a dependency cycle count once, in ascending ID order.
+Top Blockers sorts by chain length, then by `Blocks_Count`.
+
 `Attention_Score` is the sum of matched **risk** weights. Opportunities are listed
 in `Opportunity_Flags` and actions but never affect score, persistence or
 resolution. The timebox is `--timebox-days` (default 60) after `--as-of`.
