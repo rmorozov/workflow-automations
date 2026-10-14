@@ -224,13 +224,13 @@ scheduling graph.
 
 | Step / sheet | Current meaning |
 | --- | --- |
-| `cycles` | Enumerates all simple cycles; one row per cycle member with metadata |
+| `cycles` | Enumerates simple cycles within a budget; one row per cycle member with metadata and `Cycles_Complete` |
 | `orphans` | Nodes with zero incoming and outgoing degree; full node fields plus URL/debug neighbors |
 | `no_cr_dep` | Nodes that are neither a Change Request nor downstream of one |
 | `has_cr_dep` | Change Requests and every node downstream of one (items that depend on a CR) |
 | `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count in `Chain_Length`; every SCC member emitted |
 | `scc` | Every strongly connected component including singletons; index, size, members, metadata |
-| `metrics` | Degrees (distinct neighbors), exact normalized betweenness, longest-depth `Dependency_Depth` and metadata |
+| `metrics` | Degrees (distinct neighbors), normalized betweenness (exact or sampled, `Betweenness_Sources`), longest-depth `Dependency_Depth` and metadata |
 | `cr_scope_impact` | CR descendants, count/IDs; numeric effort of CR plus descendants, invalid effort becomes zero |
 | `cr_prereqs` | CR ancestors (dependency subgraph by default), count/IDs and metadata |
 | `cr_impact_unpacked` | One row per CR/downstream node pair with both metadata sets |
@@ -259,9 +259,32 @@ more hops than one three-month epic but finishes sooner. A critical path would n
 per-item durations and edges that mean finish-to-start, which hierarchy and impact
 links do not.
 
+Two steps can cost far more than the graph's size, so each has a budget.
+Simple cycles can number exponentially many in a dense strongly connected
+component (a complete graph of 12 items has over 10^8). `cycles` stops after
+1,000 cycles, or after the cycle that brings its member rows to 100,000 or more,
+whichever comes first; it then logs a warning and writes the cycles found so far
+with `Cycles_Complete` False on every row (True when every cycle was listed; the
+DataFrame attr `cycles_complete` carries the same value). A partial sheet still
+shows real cycles; `scc` lists every node that lies on any cycle, in linear time.
+Exact betweenness runs one breadth-first search per node, O(nodes × links): a
+20,000-item chain took about eight minutes. Up to 500 nodes it stays exact; above
+that, `metrics` estimates it from 500 source nodes sampled with a fixed seed (so
+repeat runs on the same graph agree) and logs a warning. `Betweenness_Sources` on
+every row (and the attr `betweenness_sources`) is the number of sources used, which
+equals the node count when the value is exact. These budgets have no command-line
+options yet; `GraphAnalyzer` takes them as `max_cycles`, `max_cycle_rows` and
+`centrality_sources`. With them, synthetic graphs of 10,000 and 50,000 items run
+every step in about 10 seconds and 60 to 90 seconds respectively on a development
+container, of which sampled betweenness takes about 40 seconds at 50,000 items.
+
+Analyze logs each step as `Running step i/n`, then how long it took, and cycle
+enumeration logs its count every 250 cycles. Ctrl-C during a step logs which step
+was interrupted and exits with code 130; the report is published only after every
+step, so nothing is written.
+
 Analysis writes requested sheets, no index, with widths capped at 50. `all` runs
-every step, including unbounded simple-cycle enumeration and exact centrality.
-No budgets, sampling, cancellation or progress policy are provided for analysis.
+every step within the budgets above.
 Width sizing walks every written cell in Python. Unpacked/cycle outputs have no
 preflight check against Excel's 1,048,576-row limit (including the header), so a
 large result may fail after all graph computation and leave a partial workbook.
