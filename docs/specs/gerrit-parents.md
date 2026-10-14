@@ -54,12 +54,21 @@ title rather than a project. Markdown backslash escapes are removed (`my\_repo` 
 
 ## Matching
 
-- A repository matches a tree item with exactly the same name (case-sensitive).
+- A repository matches a tree item with exactly the same name (case-sensitive). Names
+  may be Gerrit paths such as `platform/tools/repo`.
+- Only when no item has exactly that name, the last path segment is compared: a bare
+  name (`repo`) matches items whose path ends in it (`platform/tools/repo`), and a
+  path matches a bare item named after its last segment. Two different full paths
+  never match each other. So a full-path entry beats a same-named repository
+  elsewhere in the tree, and a bare name prefers a bare item. The summary lists names
+  matched this way with the tree item each one matched.
 - Its parent is the item directly above it; its path is every ancestor from the root.
 - The same name listed twice under the same parent counts once, at its first position;
   it has children if any of its listings has them.
-- A name not in the tree is `not found`; a name under two or more different parents is
-  `ambiguous`; a top-level item is `no parent`. None of these is guessed.
+- A name not in the tree is `not found`; a name under two or more different parents,
+  or whose last segment matches two or more items, is `ambiguous` (a candidate matched
+  by last segment shows its tree name in parentheses after its path); a top-level item
+  is `no parent`. None of these is guessed.
 - An item that has children of its own still matches; the summary lists such names,
   since a leaf repository was expected.
 

@@ -224,3 +224,69 @@ def test_tree_must_be_an_outline(tmp_path, capsys):
     status, _, err = run(capsys, "--input", source, "--tree", tree(tmp_path, "just prose\n"))
     assert status == 2
     assert "neither a heading nor a list item" in err
+
+
+PATHS_TREE = """\
+- All-Projects
+  - platform/parent
+    - platform/tools/repo
+  - device/parent
+    - repo
+    - vendor/lib
+"""
+
+
+def test_full_path_entry_beats_same_named_repository_elsewhere(tmp_path, capsys):
+    source = workbook(tmp_path, [["repos"], ["platform/tools/repo"], ["repo"]])
+    output = tmp_path / "out.xlsx"
+    status, out, err = run(
+        capsys, "--input", source, "--tree", tree(tmp_path, PATHS_TREE), "--output", output
+    )
+    assert status == 0
+    assert table(output)[1:] == [
+        ["platform/tools/repo", "platform/parent", "All-Projects / platform/parent", "matched"],
+        ["repo", "device/parent", "All-Projects / device/parent", "matched"],
+    ]
+    assert "last path segment" not in err
+
+
+def test_last_segment_matches_path_and_bare_names(tmp_path, capsys):
+    # A bare name finds a path ending in it; a path finds a bare item named after it.
+    source = workbook(tmp_path, [["repos"], ["lib"], ["other/tools/repo"]])
+    status, out, err = run(capsys, "--input", source, "--tree", tree(tmp_path, PATHS_TREE))
+    assert status == 0
+    assert out == "- device/parent\n  - other/tools/repo\n  - lib\n"
+    assert "Matched by last path segment (2): lib (vendor/lib), other/tools/repo (repo)" in err
+
+
+def test_different_full_paths_are_different_projects(tmp_path, capsys):
+    source = workbook(tmp_path, [["repos"], ["other/lib"]])
+    status, out, _ = run(capsys, "--input", source, "--tree", tree(tmp_path, PATHS_TREE))
+    assert status == 4
+    assert out == "- (not found in tree)\n  - other/lib\n"
+
+
+def test_last_segment_under_several_paths_is_ambiguous(tmp_path, capsys):
+    text = "- All-Projects\n  - a/repo\n  - b/repo\n- c/parent\n  - c/repo\n"
+    source = workbook(tmp_path, [["repos"], ["repo"]])
+    output = tmp_path / "out.xlsx"
+    status, out, _ = run(
+        capsys,
+        "--input",
+        source,
+        "--tree",
+        tree(tmp_path, text),
+        "--output",
+        output,
+        "--outline",
+        tmp_path / "out.md",
+    )
+    assert status == 4
+    assert (tmp_path / "out.md").read_text(encoding="utf-8") == (
+        "- (under more than one parent)\n  - repo\n"
+        "    - All-Projects (a/repo)\n    - All-Projects (b/repo)\n    - c/parent (c/repo)\n"
+    )
+    assert table(output)[1][2:] == [
+        "All-Projects (a/repo); All-Projects (b/repo); c/parent (c/repo)",
+        "ambiguous",
+    ]
