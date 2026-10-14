@@ -14,7 +14,6 @@ from pathlib import Path
 from backlog import TIERS, load_tasks
 
 ROOT = Path(__file__).resolve().parents[1]
-MODELS = {"gpt-6-luna", "gpt-6.1-sol", "gpt-6-astra"}
 EFFORTS = {"low", "medium", "high", "xhigh"}
 TASK_ROLES = {"implementer", "planner", "reviewer"}
 FIXED_ROLES = {"coordinator", "curator", "checker", "arbiter"}
@@ -22,15 +21,31 @@ FIELDS = {"name", "description", "developer_instructions", "model", "model_reaso
 FEATURES = {"apps", "plugins", "memories", "request_permissions_tool"}
 
 
-def strict_equal(actual, expected) -> bool:
-    """TOML bools/numbers must retain their exact types, unlike Python equality."""
-    if type(actual) is not type(expected):
-        return False
-    if isinstance(expected, dict):
-        return set(actual) == set(expected) and all(
-            strict_equal(actual[key], value) for key, value in expected.items()
-        )
-    return actual == expected
+def validate_config(config: dict) -> None:
+    """Check the documented subset's shape/types, not a snapshot of policy values."""
+    if set(config) != {"model", "model_reasoning_effort", "agents"}:
+        raise ValueError("project config: missing or unsupported fields")
+    agents = config["agents"]
+    if not isinstance(agents, dict) or set(agents) != {
+        "enabled",
+        "max_concurrent_threads_per_session",
+        "default_subagent_model",
+        "default_subagent_reasoning_effort",
+    }:
+        raise ValueError("project config: missing or unsupported agents fields")
+    for settings, model, effort in (
+        (config, "model", "model_reasoning_effort"),
+        (agents, "default_subagent_model", "default_subagent_reasoning_effort"),
+    ):
+        if not isinstance(settings[model], str) or not settings[model].strip():
+            raise ValueError("project config: models must be nonempty strings")
+        if not isinstance(settings[effort], str) or settings[effort] not in EFFORTS:
+            raise ValueError("project config: unsupported effort")
+    if type(agents["enabled"]) is not bool:
+        raise ValueError("project config: enabled must be a boolean")
+    cap = agents["max_concurrent_threads_per_session"]
+    if type(cap) is not int or cap < 1:
+        raise ValueError("project config: thread cap must be a positive integer")
 
 
 def policy(root: Path = ROOT) -> tuple[dict, dict]:
@@ -44,9 +59,14 @@ def policy(root: Path = ROOT) -> tuple[dict, dict]:
         name = profile["name"]
         if name != path.stem or name in profiles:
             raise ValueError(f"{path.name}: name must match its unique file stem")
-        if profile["model"] not in MODELS or profile["model_reasoning_effort"] not in EFFORTS:
-            raise ValueError(f"{path.name}: unsupported repository model/effort")
-        if not strict_equal(profile["features"], dict.fromkeys(FEATURES, False)):
+        if profile["model_reasoning_effort"] not in EFFORTS:
+            raise ValueError(f"{path.name}: unsupported effort")
+        features = profile["features"]
+        if (
+            not isinstance(features, dict)
+            or set(features) != FEATURES
+            or any(value is not False for value in features.values())
+        ):
             raise ValueError(f"{path.name}: external capabilities must be disabled")
         profiles[name] = profile
     routing = tomllib.loads((root / ".codex/routing.toml").read_text(encoding="utf-8"))
@@ -63,32 +83,25 @@ def policy(root: Path = ROOT) -> tuple[dict, dict]:
     if set(profiles) != referenced:
         raise ValueError("unrouted profiles are not allowed")
     config = tomllib.loads((root / ".codex/config.toml").read_text(encoding="utf-8"))
-    expected_config = {
-        "model": "gpt-6.1-sol",
-        "model_reasoning_effort": "medium",
-        "agents": {
-            "enabled": True,
-            "max_concurrent_threads_per_session": 3,
-            "default_subagent_model": "gpt-6.1-sol",
-            "default_subagent_reasoning_effort": "medium",
-        },
-    }
-    if not strict_equal(config, expected_config):
-        raise ValueError("project config differs from the reviewed root defaults/thread cap")
+    validate_config(config)
     return profiles, routing
 
 
-def resolve(root: Path, task_id: str, role: str) -> dict:
+def resolve(root: Path, task_id: str | None, role: str) -> dict:
     profiles, routing = policy(root)
-    tasks = load_tasks(root / "docs/backlog")
-    if task_id not in tasks:
-        raise ValueError(f"Unknown open task: {task_id}")
-    task = tasks[task_id]
-    name = routing["fixed"][role] if role in FIXED_ROLES else routing[task.tier][role]
+    tier = None
+    if task_id is not None:
+        tasks = load_tasks(root / "docs/backlog")
+        if task_id not in tasks:
+            raise ValueError(f"Unknown open task: {task_id}")
+        tier = tasks[task_id].tier
+    if role in TASK_ROLES and tier is None:
+        raise ValueError("task-dependent roles require a task")
+    name = routing["fixed"][role] if role in FIXED_ROLES else routing[tier][role]
     profile = profiles[name]
     return {
         "task": task_id,
-        "tier": task.tier,
+        "tier": tier,
         "role": role,
         "profile": name,
         "file": f".codex/agents/{name}.toml",
@@ -110,8 +123,8 @@ def main(argv: list[str] | None = None) -> int:
             load_tasks(ROOT / "docs/backlog")
             print(f"{len(profiles)} Codex profiles and all task tiers valid (static only)")
         else:
-            if not args.task:
-                parser.error("route requires --task")
+            if not args.task and args.role in TASK_ROLES:
+                parser.error("route requires --task for task-dependent roles")
             print(json.dumps(resolve(ROOT, args.task, args.role), indent=2))
     except (ValueError, OSError) as exc:
         print(f"agent profiles: {exc}", file=sys.stderr)

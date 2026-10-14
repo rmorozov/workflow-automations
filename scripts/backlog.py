@@ -25,7 +25,7 @@ BACKLOG = Path(__file__).resolve().parent.parent / "docs" / "backlog"
 ID_RE = re.compile(r"^[A-Z]{2}-\d{3}$")
 REQUIRED = ("id", "title", "tool", "priority", "depends_on", "touches", "tier")
 PRIORITIES = ("P1", "P2", "P3")
-TIERS = ("mechanical", "routine", "complex", "deep")
+TIERS = ("mechanical", "routine", "complex")
 
 
 @dataclass(frozen=True)

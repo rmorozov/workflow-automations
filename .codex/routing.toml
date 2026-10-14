@@ -14,12 +14,6 @@ implementer = "complex_implementer"
 planner = "complex_planner"
 reviewer = "complex_reviewer"
 
-[deep]
-# Implementation is still owned by the complex worker; arbiter resolves a dispute.
-implementer = "complex_implementer"
-planner = "complex_planner"
-reviewer = "complex_reviewer"
-
 [fixed]
 coordinator = "coordinator"
 curator = "backlog_curator"

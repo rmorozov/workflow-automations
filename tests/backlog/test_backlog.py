@@ -46,8 +46,9 @@ def backlog_dir(tmp_path):
     return directory
 
 
-def test_invalid_task_is_rejected(backlog_dir):
-    write_task(backlog_dir, "AG-001", "a.py", tier="unknown")
+@pytest.mark.parametrize("tier", ["unknown", "deep"])
+def test_invalid_task_is_rejected(backlog_dir, tier):
+    write_task(backlog_dir, "AG-001", "a.py", tier=tier)
     with pytest.raises(ValueError, match="tier must be one of"):
         backlog.load_tasks(backlog_dir)
     assert backlog.main(["check", "--dir", str(backlog_dir)]) == 1
