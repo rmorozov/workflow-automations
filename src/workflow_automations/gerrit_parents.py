@@ -111,6 +111,11 @@ def read_tree(path: Path, raw: bool, title: bool) -> dict[str, list[Place]]:
     return places
 
 
+def lookup(repo: str) -> str:
+    """A sheet name as it is looked up: leading and trailing slashes ignored."""
+    return repo.strip("/")
+
+
 def segment(name: str) -> str:
     """The last segment of a Gerrit path: `repo` for `platform/tools/repo`."""
     return name.rsplit("/", 1)[-1]
@@ -120,8 +125,10 @@ def candidates(repo: str, places: dict[str, list[Place]]) -> list[Place]:
     """Places named exactly `repo`, else those that share its last path segment.
 
     A bare name matches any path ending in it, and a path matches a bare item named
-    after its last segment. Two different full paths are different projects.
+    after its last segment. Two different full paths are different projects. Leading
+    and trailing slashes are ignored, so `platform/tools/repo/` is that path.
     """
+    repo = lookup(repo)
     if repo in places:
         return places[repo]
     if "/" in repo:
@@ -197,7 +204,7 @@ def render(results: list[Match], indent: int, raw: bool) -> str:
 def where(place: Place, repo: str) -> str:
     """A candidate's path; one matched by last segment also names the tree item."""
     path = PATH_SEPARATOR.join(place.ancestors) or "(top level)"
-    return path if place.name == repo else f"{path} ({place.name})"
+    return path if place.name == lookup(repo) else f"{path} ({place.name})"
 
 
 def workbook(sheet: str, headings: list[str], data, results: list[Match]) -> Workbook:
@@ -274,7 +281,8 @@ def summary(results: list[Match]) -> str:
         dict.fromkeys(
             f"{result.repo} ({result.places[0].name})"
             for result in results
-            if result.status in {MATCHED, NO_PARENT} and result.places[0].name != result.repo
+            if result.status in {MATCHED, NO_PARENT}
+            and result.places[0].name != lookup(result.repo)
         )
     )
     if by_segment:

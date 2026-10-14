@@ -62,6 +62,10 @@ title rather than a project. Markdown backslash escapes are removed (`my\_repo` 
   never match each other. So a full-path entry beats a same-named repository
   elsewhere in the tree, and a bare name prefers a bare item. The summary lists names
   matched this way with the tree item each one matched.
+- Leading and trailing slashes in a sheet name are ignored before lookup.
+- Each sheet name is matched on its own: two names that resolve to the same tree item
+  (`repo` and `platform/tools/repo`, or `a/repo` and `b/repo` against a bare `repo`)
+  both match it and are both listed.
 - Its parent is the item directly above it; its path is every ancestor from the root.
 - The same name listed twice under the same parent counts once, at its first position;
   it has children if any of its listings has them.

@@ -237,6 +237,7 @@ PATHS_TREE = """\
 
 
 def test_full_path_entry_beats_same_named_repository_elsewhere(tmp_path, capsys):
+    # Guards precedence: merging exact and segment candidates would make it ambiguous.
     source = workbook(tmp_path, [["repos"], ["platform/tools/repo"], ["repo"]])
     output = tmp_path / "out.xlsx"
     status, out, err = run(
@@ -290,3 +291,11 @@ def test_last_segment_under_several_paths_is_ambiguous(tmp_path, capsys):
         "All-Projects (a/repo); All-Projects (b/repo); c/parent (c/repo)",
         "ambiguous",
     ]
+
+
+def test_slashes_around_a_sheet_name_are_ignored(tmp_path, capsys):
+    source = workbook(tmp_path, [["repos"], ["platform/tools/repo/"], ["/lib"]])
+    status, out, err = run(capsys, "--input", source, "--tree", tree(tmp_path, PATHS_TREE))
+    assert status == 0
+    assert out == "- platform/parent\n  - platform/tools/repo/\n- device/parent\n  - /lib\n"
+    assert "Matched by last path segment (1): /lib (vendor/lib)" in err
