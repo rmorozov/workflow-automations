@@ -12,13 +12,11 @@ from typing import Any
 
 import pandas as pd
 
+from workflow_automations.ado_common.relations import GRAPH
 from workflow_automations.ado_common.snapshot import SnapshotError, save_snapshot, utc_timestamp
-from workflow_automations.ado_common.workitem import relation_target_id
 from workflow_automations.ado_graph.client import (
     ADO_BATCH_LIMIT,
     FIELD_RENAME,
-    GRAPH_LINK_TYPES,
-    LINK_LABEL,
     WIQL_FILTER_CHUNK,
     ADOClient,
     configure_ca_bundle,
@@ -263,19 +261,11 @@ def _parse_wi(wi: Any) -> tuple[dict, list[dict]]:
 
     edge_rows: list[dict] = []
     for rel in wi.relations or []:
-        rel_ref: str = rel.rel or ""
-        if rel_ref not in GRAPH_LINK_TYPES:
-            continue
-        target_id = relation_target_id(rel.url)
-        if target_id is None:
-            continue  # hyperlink, attachment, or other non-WI relation
-        edge_rows.append(
-            {
-                "Source_ID": wi_id,
-                "Target_ID": target_id,
-                "Link_Type": LINK_LABEL.get(rel_ref, rel_ref),
-            }
-        )
+        endpoint = GRAPH.endpoint(rel.rel, rel.url)
+        if endpoint is None:
+            continue  # unread link type, hyperlink, attachment, or other non-WI relation
+        label, target_id = endpoint
+        edge_rows.append({"Source_ID": wi_id, "Target_ID": target_id, "Link_Type": label})
 
     return node_row, edge_rows
 
