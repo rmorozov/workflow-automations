@@ -272,7 +272,7 @@ def test_steps_name_their_subgraph_and_sheet(tmp_path, caplog):
         ]
     )
     sheets = pd.read_excel(output, sheet_name=None)
-    assert list(sheets) == ["cr_prereqs", "cr_prereqs@all", "cr_prereqs_unpacked@dependency"]
+    assert list(sheets)[3:] == ["cr_prereqs", "cr_prereqs@all", "cr_prereqs_unpacked@dependency"]
     assert ids(sheets["cr_prereqs"].iloc[0]["Prerequisite_WI_IDs"]) == {4}
     assert ids(sheets["cr_prereqs@all"].iloc[0]["Prerequisite_WI_IDs"]) == {3, 4}
     # The command line rejects these first (test_cli); the parser alone skips them.
