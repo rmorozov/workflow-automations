@@ -37,7 +37,7 @@ also when export fails.
 | `--batch-size` | Default 200; upper-clamped to 200; values below 1 are rejected before any service call |
 | `--cert-dir` | Corporate certificate directory; falls back to `ADO_CERT_DIR` |
 | `--output-dir` | Default `./output`; directory created |
-| `--formats` | Comma-separated `parquet,excel,csv` by default; unknown names logged/skipped |
+| `--formats` | Comma-separated `parquet,excel,csv` by default; case-insensitive, repeats and empty entries ignored; an unknown name, or none, exits 2 before any service call or file creation (also for `replay`) |
 | `--skip-types` | Case-insensitive comma list of types marked out of scope; empty string disables |
 | `--include-projects` | Case-insensitive comma list of projects kept in scope; empty means all |
 | `--filtered-relations` | `stop` (default) or `follow`; whether relations of filtered items are traversed |
@@ -110,6 +110,40 @@ be topped up with linked IDs, so on a failed run the linked count is partial and
 depends on the batch size; the seed count does not. The summary prints the omitted total, its seed and linked counts and the
 completion status; the omitted IDs are logged sorted, up to 20 per list. Pruned items
 are out of scope, not missing, and do not affect the status.
+
+Every queued ID is counted exactly once, and the summary prints the counters as
+three identities and says whether they reconcile (a mismatch is also logged as an
+error; it is a bug, not a property of the data):
+
+- seeds + linked = pruned + fetched + queued. Seeds are the distinct IDs the saved
+  query returned; linked are relation targets queued for the first time; queued is
+  what remains when a failed run stops early (0 otherwise).
+- fetched = visited + omitted. Fetched IDs are those sent in batch requests; visited
+  are the ones ADO returned, each classified as added, skipped by type or excluded by
+  project.
+- exported nodes = added with `stop`, or visited with `follow` (bridges included).
+  A failed run exports nothing and prints `-`.
+
+The summary also counts the ADO requests the export makes:
+
+- one saved-query call (not paged);
+- one work-item batch request per fetch batch of up to `--batch-size` IDs (at most
+  200), so at least ⌈fetched ÷ batch size⌉, and more when the queue holds fewer IDs
+  than the batch size at fetch time;
+- with `stop` and an active filter only (the default `--skip-types` list is one), at
+  most one WIQL filter call before each fetch batch, each over up to 1,000 unchecked
+  IDs, plus one more when a call prunes every ID left in the queue, so at most
+  batches + 1 calls. One call is one WIQL query (one page), plus one existence query
+  when it rejects any ID. `follow`, or no filter, makes no WIQL calls.
+
+Measured in the tests: 2,000 seeds at `--batch-size 100` with one Task skipped take
+1 saved query, 2 WIQL filter calls and 20 batches with `stop` (1 pruned, 1,999
+fetched), and 1 saved query, 0 WIQL calls and 20 batches with `follow` (2,000
+fetched). In a small graph where one filter call of three rejects IDs, the three
+calls make four WIQL queries. When the last filter call prunes everything still
+queued, the run makes one filter call more than batches (2 calls and 1 batch for one
+seed linking only to a pruned Task; 1 call and 0 batches when the only seed is
+pruned).
 
 Recognized relations: hierarchy forward, affects forward/reverse, blocks
 forward/reverse, dependency forward/reverse, implements forward/reverse. Hierarchy
@@ -201,14 +235,16 @@ comma-separated list). A step may name its subgraph as `step@subgraph`, for exam
 `cycles@dependency`; its sheet is then named `step@subgraph`, lowercased with
 spaces removed, so one run can compare subgraphs. `all` in the list adds every
 step on its default subgraph (`all,cycles@dependency`). Empty entries are ignored;
-unknown steps and unknown subgraphs warn and are skipped. `--bridges` (`contract`
-by default, or `drop`) and `--max-indirect-edges` (default 1,000,000) control bridge
-nodes, below.
+an unknown step or subgraph, or a list with no step, exits 2 before any input is
+read. `--bridges` (`contract` by default, or `drop`) and `--max-indirect-edges`
+(default 1,000,000) control bridge nodes, below.
 
 Minimum input columns: nodes `WI_ID`; edges `Source_ID`, `Target_ID`, `Link_Type`.
 Optional node metadata: Title, WorkItemType, State, `KL.Roadmap_State`,
-`System.AreaPath`, `System.IterationPath`, configured effort field. Schema/ID
-validation is not performed; missing required columns raise exceptions.
+`System.AreaPath`, `System.IterationPath`, configured effort field. A missing
+required column exits 2 before analysis (see
+[Files, errors and current limitations](#files-errors-and-current-limitations));
+column types and ID values are not validated.
 
 Edges are normalized first. Reverse labels flip direction and normalize to their
 forward label; forward directions are parent→child, affects→affected,
@@ -298,8 +334,27 @@ source instead, which could be lower.
 
 The `longest_chain` sheet repeats the chain's hop count in a `Chain_Length` column
 on every row (the DataFrame attr `longest_path_length` and the log carry the same
-value). Set iteration and ties may change row order and which of several equally
-long chains is listed; deterministic report ordering is not guaranteed.
+value).
+
+Output order is deterministic and independent of the row order of the input files:
+the analyzer sorts nodes by `WI_ID` and edges by source, target and label before
+building the graph, so bridges are contracted in ID order and every traversal is
+repeatable. Within the sheets:
+
+| Sheet | Row order |
+| --- | --- |
+| `cycles` | Each cycle starts at its smallest member and keeps its direction; cycles shortest first, then by member sequence; `Cycle_Index` follows that order |
+| `scc` | Largest component first, ties by smallest member; members ascending; `SCC_Index` follows that order |
+| `longest_chain` | Chain order; among equally long chains, the one met first when components are visited by their smallest member; members of a component ascending |
+| `orphans`, `no_cr_dep`, `has_cr_dep`, `metrics` | `WI_ID` ascending |
+| `cr_scope_impact`, `cr_prereqs` | Effort total or count descending, ties by `CR_ID`; the ID lists ascending |
+| `cr_impact_unpacked`, `cr_prereqs_unpacked` | `CR_ID`, then the related item's ID |
+| neighbor debug column | Predecessors, then successors, each by ID |
+
+`longest_chain` keeps `SCC_Index` from the condensation of its own step, which is
+not the `scc` sheet's index. When `cycles` stops at its budget, the cycles listed are
+the first ones networkx enumerates on that graph, so the same snapshot and settings
+list the same cycles.
 
 Both measures count links (hops), not time. The graph has no duration, effort-based
 scheduling, capacity or calendar model, so the longest chain is the longest
@@ -321,9 +376,10 @@ Exact betweenness runs one breadth-first search per node, O(nodes × links): a
 that, `metrics` estimates it from 500 source nodes sampled with a fixed seed (so
 repeat runs on the same graph agree) and logs a warning. `Betweenness_Sources` on
 every row (and the attr `betweenness_sources`) is the number of sources used, which
-equals the node count when the value is exact. These budgets have no command-line
-options yet; `GraphAnalyzer` takes them as `max_cycles`, `max_cycle_rows` and
-`centrality_sources`. With them, synthetic graphs of 10,000 and 50,000 items run
+equals the node count when the value is exact. The options
+`--max-cycles`, `--max-cycle-rows` and `--centrality-sources` (each at least 1)
+change these budgets; `GraphAnalyzer` takes them as `max_cycles`, `max_cycle_rows`
+and `centrality_sources`. With the defaults, synthetic graphs of 10,000 and 50,000 items run
 every step in about 10 seconds and 60 to 90 seconds respectively on a development
 container, of which sampled betweenness takes about 40 seconds at 50,000 items.
 
@@ -333,7 +389,29 @@ was interrupted and exits with code 130; the report is published only after ever
 step, so nothing is written.
 
 Analysis writes requested sheets, no index, with widths capped at 50. `all` runs
-every step within the budgets above.
+every step within the budgets above. The workbook describes itself in three sheets
+before the results:
+
+| Sheet | Content |
+| --- | --- |
+| `About` | `Item`/`Value` rows: purpose, how to read the report, tool version, the input file names, work items and links loaded, relations after normalization, links skipped for an absent endpoint or an unknown type, bridge items contracted or dropped, work items analyzed, result-sheet count, and `Complete` (`yes`, or `no:` with the partial sheets) |
+| `Config` | `Setting`/`Value` rows: input and output file names (without their folder), `ado_url`, `effort_field`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
+| `Summary` | One row per result sheet: `Sheet` (a link to it), `Step`, `Subgraph`, `Rows`, a headline `Count` and what it `Counted`, `Complete` and `Note` |
+
+The headline count is cycles for `cycles`, components for `scc` (the note adds how
+many have more than one member), hops for `longest_chain`, change requests for the CR
+sheets and work items for the others. `Complete` is False for `cycles` stopped at its
+budget and for `metrics` with sampled betweenness, and the note says why; the note
+also names a sheet's spill file. Result sheets follow in the requested order, except
+that the one-row-per-pair `cr_impact_unpacked` and `cr_prereqs_unpacked` sheets
+(on any subgraph) come last. No sheet records the time of the run, so repeat runs
+on the same snapshot and settings give the same cells.
+
+Every sheet has a filter on its heading row, which is frozen in view. Values in
+columns whose name ends in `URL` (`WI_URL`, `CR_WI_URL`, ...) that start with
+`http://` or `https://` are hyperlinks; they are empty without `--ado-url`. Excel
+opens at most 65,530 hyperlinks per worksheet, so a sheet with more URL values keeps
+them all as text and logs a warning.
 Excel limits and column sizing are described under
 [Files, errors and current limitations](#files-errors-and-current-limitations).
 
@@ -344,19 +422,25 @@ Both modes publish atomically. Export writes every file of the requested formats
 hidden sibling temp files and renames the whole bundle into place only after every
 write succeeded; analyze does the same for its single workbook. A failed write
 (permissions, full disk, serialization error) leaves every existing output
-unchanged and removes the temp files. Unknown and repeated formats are skipped.
+unchanged and removes the temp files. Repeated formats are written once.
 
 An existing output needs `--overwrite`. Without it the run exits with code 2 and
 names the files before export calls ADO or analyze reads its inputs. Analyze
 refuses an `--output-file` that is the `--nodes-file` or `--edges-file` (also
 through a link) with exit 2, even with `--overwrite`. Consent is checked when the
 run starts: a file created at an output path during a long export is replaced.
-Export still creates `--output-dir` before fetching. Empty exports do not preserve a stable node schema; all-unknown steps can fail
-when saving a workbook with no sheets. Exceptions normally propagate. A complete
-run exits 0; export can also exit with the partial-result statuses described under
+Inputs are checked when the run starts too, with exit 2 and no service call, input
+read or output created: export and replay `--formats` must name only known formats,
+and analyze `--steps` only known steps and subgraphs (at least one). Analyze reads
+only the Parquet footer of each input first and refuses a missing or non-Parquet
+file, nodes without `WI_ID`, and edges without `Source_ID`, `Target_ID` or
+`Link_Type`. Column types and ID values are not checked there.
+Export still creates `--output-dir` before fetching. Empty exports do not preserve
+a stable node schema. Exceptions normally propagate. A complete run exits 0;
+export can also exit with the partial-result statuses described under
 [Traversal, filtering and completeness](#traversal-filtering-and-completeness).
-Argparse errors/help use its usual exits (2 for invalid options, existing outputs
-and input collisions). Text beginning with `=` can be
+Argparse errors/help use its usual exits (2 for invalid options and inputs,
+existing outputs and input collisions). Text beginning with `=` can be
 written as an Excel formula by pandas/openpyxl; arbitrary identity/datetime field
 objects may fail serialization.
 

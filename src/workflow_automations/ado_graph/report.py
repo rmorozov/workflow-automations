@@ -5,9 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import os
 import re
-import tempfile
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -15,9 +13,12 @@ from typing import Any
 
 import pandas as pd
 
+from workflow_automations.ado_common.excel import excel_safe, keep_text_literal, publish_all
+
 try:
     import openpyxl
     from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.hyperlink import Hyperlink
 except ImportError:
     openpyxl = None
 
@@ -47,31 +48,6 @@ def export_paths(output_dir: Path, formats: list[str]) -> list[Path]:
     """Paths an export with these formats publishes; unknown formats add none."""
     names = dict.fromkeys(name for fmt in formats for name in EXPORT_FILES.get(fmt, ()))
     return [output_dir / name for name in names]
-
-
-def publish_all(targets: Sequence[tuple[Path, Callable[[Path], None]]], overwrite: bool) -> None:
-    """Write every target to a sibling temp file, then rename them all into place.
-
-    The same approach as ``ado-triage``: a failure while writing (permissions, full
-    disk, a serialization error) leaves every existing target unchanged.
-    """
-    for path, _ in targets:
-        if path.exists() and not overwrite:
-            raise FileExistsError(f"{path} exists; pass --overwrite to replace it")
-    staged: list[tuple[Path, Path]] = []
-    try:
-        for path, write in targets:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=path.suffix, dir=path.parent)
-            os.close(fd)
-            staged.append((Path(tmp), path))
-            write(Path(tmp))
-        for tmp, path in staged:
-            os.replace(tmp, path)
-    finally:
-        for tmp, _ in staged:
-            if tmp.exists():
-                tmp.unlink()
 
 
 NODE_KEY = "WI_ID"
@@ -247,17 +223,8 @@ def _export_dataframes(
 def _write_excel(df_nodes: pd.DataFrame, df_edges: pd.DataFrame, path: Path) -> None:
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for sheet, frame in (("Nodes", df_nodes), ("Edges", df_edges)):
-            frame.to_excel(writer, sheet_name=sheet, index=False)
-            _keep_text_literal(writer.sheets[sheet])
-
-
-def _keep_text_literal(worksheet: Any) -> None:
-    """Store text that openpyxl would read as a formula (``=...``) as a string cell."""
-    for row in worksheet.iter_rows(min_row=2):
-        for cell in row:
-            if cell.data_type == "f":
-                cell.data_type = "s"
-                cell.quotePrefix = True
+            excel_safe(frame).to_excel(writer, sheet_name=sheet, index=False)
+            keep_text_literal(writer.sheets[sheet])
 
 
 # Column widths come from the heading and at most this many evenly spaced rows.
@@ -318,8 +285,14 @@ def write_analysis_report(
     output_path: Path,
     overwrite: bool = True,
     timings: dict[str, float] | None = None,
+    preamble: dict[str, pd.DataFrame] | None = None,
 ) -> None:
     """Publish one sheet per analysis step, with column widths sized to content.
+
+    ``preamble`` sheets (the report's About, Config and Summary) come first and
+    are never spilled; in them a ``Sheet`` column that names a sheet links to it.
+    Every sheet gets a filter on its heading row, which stays frozen in view, and
+    work-item URLs become hyperlinks (see _link_urls).
 
     A sheet that exceeds Excel's limits is written to a sibling CSV
     (``<report stem>.<sheet>.csv``) published with the workbook, and its sheet
@@ -329,6 +302,11 @@ def write_analysis_report(
     FileExistsError is raised before anything is written. ``timings``, when given,
     receives the seconds spent writing and sizing.
     """
+    preamble = preamble or {}
+    taken = {name[:31].lower() for name in results}
+    clashes = [name for name in preamble if name[:31].lower() in taken]
+    if clashes:
+        raise ValueError(f"preamble sheets {clashes} share a name with a result sheet")
     spills = plan_analysis_report(results, output_path)
     if not output_path.exists():
         stray = [str(path) for path, _ in spills.values() if path.exists()]
@@ -352,7 +330,7 @@ def write_analysis_report(
         return write
 
     targets: list[tuple[Path, Callable[[Path], None]]] = [
-        (output_path, lambda p: _write_workbook(results, p, spills, timings))
+        (output_path, lambda p: _write_workbook(results, p, spills, timings, preamble))
     ]
     targets += [(path, spill_writer(results[sheet])) for sheet, (path, _) in spills.items()]
     publish_all(targets, overwrite)
@@ -369,15 +347,18 @@ def _write_workbook(
     path: Path,
     spills: dict[str, tuple[Path, str]] | None = None,
     timings: dict[str, float] | None = None,
+    preamble: dict[str, pd.DataFrame] | None = None,
 ) -> None:
     spills = spills or {}
+    preamble = preamble or {}
     timings = timings if timings is not None else {"write": 0.0, "sizing": 0.0}
     # Writing includes the save on leaving the ExcelWriter, where openpyxl serializes.
     started, sized = time.perf_counter(), timings["sizing"]
+    sheet_names = [name[:31] for name in [*preamble, *results]]
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        for sheet_name, df in results.items():
+        for sheet_name, df in [*preamble.items(), *results.items()]:
             safe_name = sheet_name[:31]
-            if sheet_name in spills:
+            if sheet_name in spills and sheet_name not in preamble:
                 spill, reason = spills[sheet_name]
                 frame = pd.DataFrame(
                     [
@@ -398,8 +379,66 @@ def _write_workbook(
                 if width is not None:
                     worksheet.column_dimensions[get_column_letter(position)].width = width
             timings["sizing"] += time.perf_counter() - start
-            if sheet_name in spills:
+            _add_filter(worksheet)
+            _link_urls(worksheet, frame, safe_name)
+            if sheet_name in preamble:
+                _link_sheets(worksheet, frame, sheet_names)
+                log.info("  → sheet '%s'", safe_name)
+            elif sheet_name in spills:
                 log.info("  → sheet '%s' (pointer to %s)", safe_name, spills[sheet_name][0].name)
             else:
                 log.info("  → sheet '%s' (%d rows)", safe_name, len(df))
     timings["write"] += time.perf_counter() - started - (timings["sizing"] - sized)
+
+
+# Excel opens at most this many hyperlinks per worksheet.
+EXCEL_MAX_HYPERLINKS = 65_530
+SHEET_LINK_COLUMN = "Sheet"
+
+
+def _add_filter(worksheet: Any) -> None:
+    """Filter buttons on the heading row, which stays in view while scrolling."""
+    if worksheet.max_column and worksheet["A1"].value is not None:
+        worksheet.auto_filter.ref = worksheet.dimensions
+        worksheet.freeze_panes = "A2"
+
+
+def _link_urls(worksheet: Any, frame: pd.DataFrame, sheet: str) -> None:
+    """Make http(s) values in columns named ``*URL`` clickable.
+
+    Excel ignores hyperlinks beyond EXCEL_MAX_HYPERLINKS per worksheet, so a sheet
+    with more URL cells keeps them all as plain text and the skip is logged.
+    """
+    targets: list[tuple[int, int, str]] = []
+    for position, col in enumerate(frame.columns, start=1):
+        if not str(col).endswith("URL"):
+            continue
+        for row, value in enumerate(frame.iloc[:, position - 1], start=2):
+            if isinstance(value, str) and value.startswith(("https://", "http://")):
+                targets.append((row, position, value))
+    if len(targets) > EXCEL_MAX_HYPERLINKS:
+        log.warning(
+            "Sheet '%s': %d work-item URLs exceed Excel's %d hyperlinks per sheet; "
+            "keeping them as text.",
+            sheet,
+            len(targets),
+            EXCEL_MAX_HYPERLINKS,
+        )
+        return
+    for row, column, url in targets:
+        cell = worksheet.cell(row=row, column=column)
+        cell.hyperlink = url
+        cell.style = "Hyperlink"
+
+
+def _link_sheets(worksheet: Any, frame: pd.DataFrame, sheet_names: list[str]) -> None:
+    """Link each ``Sheet`` value that names a sheet of this workbook to its first cell."""
+    if SHEET_LINK_COLUMN not in frame.columns:
+        return
+    column = list(frame.columns).index(SHEET_LINK_COLUMN) + 1
+    for row, name in enumerate(frame[SHEET_LINK_COLUMN], start=2):
+        if name in sheet_names:
+            cell = worksheet.cell(row=row, column=column)
+            quoted = str(name).replace("'", "''")
+            cell.hyperlink = Hyperlink(ref=cell.coordinate, location=f"'{quoted}'!A1")
+            cell.style = "Hyperlink"

@@ -55,6 +55,15 @@ class ExportStats:
       omitted          – IDs requested from ADO but not returned (deleted or
                          inaccessible); listed in omitted_ids and split into
                          seeds (from the saved query) and linked IDs.
+      linked           – relation targets queued for the first time.
+      fetched          – IDs sent in work-item batch requests.
+      exported         – node rows written (None until the outputs are built).
+      requests         – ADO calls: saved_query, wiql_filter, batch_fetch.
+
+    Every ID is counted once, so the counters reconcile (see reconcile()):
+      seeds + linked = pruned + fetched + queued
+      fetched        = visited + omitted
+      exported       = added (stop mode) or visited (follow mode)
 
     The completion status follows ado-triage's core-vs-label split, adapted
     to a graph: a missing seed means the scope itself is incomplete
@@ -62,13 +71,18 @@ class ExportStats:
     ("incomplete").  Pruned items are out of scope, not missing.
     """
 
-    def __init__(self, seed_ids: frozenset[int] = frozenset()) -> None:
+    def __init__(self, seed_ids: frozenset[int] = frozenset(), follow: bool = False) -> None:
         self.added: collections.Counter = collections.Counter()
         self.skipped_type: collections.Counter = collections.Counter()
         self.excluded_project: collections.Counter = collections.Counter()
         self.pruned: int = 0
         self.omitted_ids: list[int] = []
         self.seed_ids = seed_ids
+        self.follow = follow
+        self.linked: int = 0
+        self.fetched: int = 0
+        self.exported: int | None = None
+        self.requests: collections.Counter = collections.Counter()
 
     def record_added(self, wi_type: str) -> None:
         self.added[wi_type] += 1
@@ -103,6 +117,27 @@ class ExportStats:
     def omitted_linked(self) -> list[int]:
         return sorted(i for i in self.omitted_ids if i not in self.seed_ids)
 
+    def reconcile(self, queue_remaining: int = 0) -> list[str]:
+        """Return the counter identities that do not hold (empty when consistent)."""
+        checks = [
+            (
+                "seeds + linked = pruned + fetched + queued",
+                len(self.seed_ids) + self.linked,
+                self.pruned + self.fetched + queue_remaining,
+            ),
+            (
+                "fetched = visited + omitted",
+                self.fetched,
+                self.total_visited + len(self.omitted_ids),
+            ),
+        ]
+        if self.exported is not None:
+            expected = self.total_visited if self.follow else self.total_added
+            checks.append(
+                ("exported = " + ("visited" if self.follow else "added"), self.exported, expected)
+            )
+        return [f"{name} ({left:,} != {right:,})" for name, left, right in checks if left != right]
+
     @property
     def status(self) -> str:
         if self.omitted_seeds:
@@ -136,8 +171,26 @@ class ExportStats:
         print(f"    linked (reached via relations): {len(self.omitted_linked):,}")
         if queue_remaining:
             print(f"  Queue remaining: {queue_remaining:,}")
+        print(
+            f"  IDs: seeds {len(self.seed_ids):,} + linked {self.linked:,}"
+            f" = pruned {self.pruned:,} + fetched {self.fetched:,} + queued {queue_remaining:,}"
+        )
+        exported = "-" if self.exported is None else f"{self.exported:,}"
+        print(
+            f"  Fetched {self.fetched:,} = visited {self.total_visited:,}"
+            f" + omitted {len(self.omitted_ids):,}; exported nodes: {exported}"
+        )
+        print(
+            f"  ADO requests: saved query {self.requests['saved_query']:,}"
+            f" | WIQL filter calls {self.requests['wiql_filter']:,}"
+            f" | work-item batches {self.requests['batch_fetch']:,}"
+        )
+        mismatches = self.reconcile(queue_remaining)
+        print(f"  Counters reconcile: {'yes' if not mismatches else 'NO'}")
         print(f"  Completion status: {self.status}")
         print()
+        for mismatch in mismatches:
+            log.error("Export counters do not reconcile: %s", mismatch)
 
     def log_omitted(self) -> None:
         """Log the omitted IDs, sorted, so a rerun can be compared."""
@@ -271,6 +324,7 @@ def _prune_queue_via_wiql(
     batch_size: int,
     include_projects: frozenset[str],
     skip_types: frozenset[str],
+    stats: ExportStats,
 ) -> int:
     """
     Drop queued IDs that fail the project/type filter, without fetching them.
@@ -285,6 +339,7 @@ def _prune_queue_via_wiql(
     pending = list(
         itertools.islice((i for i in queued if i not in wiql_checked), WIQL_FILTER_CHUNK)
     )
+    stats.requests["wiql_filter"] += 1
     valid = client.filter_ids_via_wiql(pending, include_projects, skip_types)
     wiql_checked.update(pending)
     pruned = 0
@@ -333,6 +388,8 @@ def run_export(args: argparse.Namespace) -> None:
 
     filtering = bool(include_projects or skip_types)
     follow_filtered = args.filtered_relations == "follow"
+    stats = ExportStats(frozenset(initial_ids), follow=follow_filtered)
+    stats.requests["saved_query"] += 1
 
     visited: set[int] = set()
     # IDs already sent to the WIQL filter, so each ID is filtered at most once.
@@ -342,7 +399,6 @@ def run_export(args: argparse.Namespace) -> None:
     all_edge_rows: list[dict] = []
     # Every fetched SDK work item, in or out of scope, for --save-snapshot.
     fetched_items: list[Any] = []
-    stats = ExportStats(frozenset(initial_ids))
 
     log.info(
         "Starting BFS export (batch_size=%d, filtered relations: %s).",
@@ -365,6 +421,7 @@ def run_export(args: argparse.Namespace) -> None:
                     batch_size,
                     include_projects,
                     skip_types,
+                    stats,
                 )
                 if not queued:
                     break
@@ -382,6 +439,8 @@ def run_export(args: argparse.Namespace) -> None:
                 continue
 
             # ── c) Batch fetch the IDs ─────────────────────────────────────
+            stats.requests["batch_fetch"] += 1
+            stats.fetched += len(fetch_ids)
             raw_items = [wi for wi in client.get_work_items_batch(fetch_ids) if wi is not None]
             fetched_items.extend(raw_items)
             returned = {wi.id for wi in raw_items}
@@ -415,8 +474,9 @@ def run_export(args: argparse.Namespace) -> None:
                 if in_scope or follow_filtered:
                     for er in edge_rows:
                         tid: int = er["Target_ID"]
-                        if tid not in visited:
-                            queued.setdefault(tid, None)
+                        if tid not in visited and tid not in queued:
+                            queued[tid] = None
+                            stats.linked += 1
 
                 # In follow mode every fetched item is exported; out-of-scope
                 # items are bridge nodes that keep accepted items connected in
@@ -458,6 +518,7 @@ def run_export(args: argparse.Namespace) -> None:
     )
     df_edges.drop_duplicates(inplace=True)
 
+    stats.exported = len(df_nodes)
     stats.print_summary()
     log.info(
         "Collected %d nodes (%d in scope), %d edges  "

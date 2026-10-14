@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from collections.abc import Callable
+from importlib import metadata
 from pathlib import Path
 
 import networkx as nx
 import pandas as pd
 
-from workflow_automations.ado_graph.report import write_analysis_report
+from workflow_automations.ado_graph.report import plan_analysis_report, write_analysis_report
 
 log = logging.getLogger("ado_tool")
 
@@ -74,6 +76,8 @@ STEP_SUBGRAPH: dict[str, str] = {
 
 PARALLEL_LABEL_SEPARATOR = " & "
 
+EDGE_SORT = ("Source_ID", "Target_ID", "Link_Type")
+
 
 def _longest_depth(dag: nx.DiGraph) -> dict:
     """
@@ -133,8 +137,10 @@ class GraphAnalyzer:
         max_cycle_rows: int = DEFAULT_MAX_CYCLE_ROWS,
         centrality_sources: int = DEFAULT_CENTRALITY_SOURCES,
     ) -> None:
-        self.df_nodes = df_nodes
-        self.df_edges = df_edges
+        # Sorted inputs make the graph's insertion order, and so every traversal,
+        # independent of the row order of the files.
+        self.df_nodes = df_nodes.sort_values("WI_ID", kind="stable").reset_index(drop=True)
+        self.df_edges = df_edges.sort_values(list(EDGE_SORT), kind="stable")
         self.ado_url = ado_url.rstrip("/")
         self.effort_field = effort_field
         self.bridges = bridges
@@ -145,12 +151,19 @@ class GraphAnalyzer:
         self.relations: nx.MultiDiGraph = nx.MultiDiGraph()
         self._graphs: dict[str, nx.DiGraph] = {}
         self._bridge_ids: list = []
+        # Input and normalization counts for the report's About sheet.
+        self.stats: dict[str, int] = {
+            "nodes_loaded": len(df_nodes),
+            "edges_loaded": len(df_edges),
+        }
         self._build_relations()
         # Contracting the full graph first bounds every other projection: a subset
         # of relations never gives a bridge more neighbours.
         self.G: nx.DiGraph = self.graph("all")
         self.df_nodes = self.df_nodes[~self.df_nodes["WI_ID"].isin(self._bridge_ids)]
         self.df_nodes = self.df_nodes.reset_index(drop=True)
+        self.stats["bridges"] = len(self._bridge_ids)
+        self.stats["nodes_analyzed"] = len(self.df_nodes)
 
     def _wi_url(self, wi_id: int) -> str:
         return f"{self.ado_url}/_workitems/edit/{wi_id}" if self.ado_url else ""
@@ -190,6 +203,9 @@ class GraphAnalyzer:
 
         for ltype, count in sorted(unknown.items()):
             log.warning("Ignored %d edge(s) with unknown link type %r.", count, ltype)
+        self.stats["relations"] = self.relations.number_of_edges()
+        self.stats["edges_absent_endpoint"] = phantom
+        self.stats["edges_unknown_type"] = sum(unknown.values())
         log.info(
             "Graph built: %d nodes, %d normalized relations; skipped %d edge(s) with an "
             "absent endpoint.",
@@ -291,7 +307,7 @@ class GraphAnalyzer:
         return name, self.graph(name)
 
     def _cr_nodes(self, g: nx.DiGraph) -> list:
-        return [n for n, d in g.nodes(data=True) if d.get("WorkItemType") == "Change Request"]
+        return sorted(n for n, d in g.nodes(data=True) if d.get("WorkItemType") == "Change Request")
 
     def _meta(self, wi_id: int, prefix: str = "") -> dict:
         """Helper: Returns standardized metadata columns for any Node."""
@@ -313,13 +329,13 @@ class GraphAnalyzer:
 
         diagnostics = []
         # Incoming edges (What points to this node)
-        for pred in self.G.predecessors(node_id):
+        for pred in sorted(self.G.predecessors(node_id)):
             edge_data = self.G.edges[pred, node_id]
             pred_type = self.G.nodes[pred].get("WorkItemType", "Unknown")
             diagnostics.append(f"<- [{_edge_label(edge_data)}] from {pred_type} ({pred})")
 
         # Outgoing edges (What this node points to)
-        for succ in self.G.successors(node_id):
+        for succ in sorted(self.G.successors(node_id)):
             edge_data = self.G.edges[node_id, succ]
             succ_type = self.G.nodes[succ].get("WorkItemType", "Unknown")
             diagnostics.append(f"-> [{_edge_label(edge_data)}] to {succ_type} ({succ})")
@@ -327,7 +343,7 @@ class GraphAnalyzer:
         return " | ".join(diagnostics) if diagnostics else "Isolated Node"
 
     def _nodes_subset(self, node_ids: list) -> pd.DataFrame:
-        """Generates full data-dumps for subsets enriched with debugging metrics."""
+        """Full node rows for a subset, in WI_ID order, enriched with debugging metrics."""
         df = self.df_nodes[self.df_nodes["WI_ID"].isin(node_ids)].copy().reset_index(drop=True)
         if df.empty:
             return df
@@ -359,24 +375,33 @@ class GraphAnalyzer:
         the member rows to max_cycle_rows or more.  `Cycles_Complete` on every row
         says whether every cycle was listed; when it is False, the `scc` step still
         names every node that lies on some cycle.
+
+        Each cycle starts at its smallest member and keeps its direction; cycles are
+        listed shortest first, then by their member sequence, and `Cycle_Index`
+        numbers them in that order.
         """
         name, g = self._step_graph("cycles", subgraph)
-        rows = []
-        count = 0
+        cycles: list[list] = []
+        member_rows = 0
         complete = True
         for cycle in nx.simple_cycles(g):
-            if count >= self.max_cycles or len(rows) >= self.max_cycle_rows:
+            if len(cycles) >= self.max_cycles or member_rows >= self.max_cycle_rows:
                 complete = False
                 break
+            start = cycle.index(min(cycle))
+            cycles.append(cycle[start:] + cycle[:start])
+            member_rows += len(cycle)
+            if len(cycles) % CYCLE_PROGRESS_EVERY == 0:
+                log.info("  … %d cycles, %d member rows so far", len(cycles), member_rows)
+        cycles.sort(key=lambda c: (len(c), c))
+        rows = []
+        for index, cycle in enumerate(cycles):
             for node in cycle:
-                row = {"Cycle_Index": count, "Node_ID": node}
+                row = {"Cycle_Index": index, "Node_ID": node}
                 row.update(self._meta(node))
+                row["Cycles_Complete"] = complete
                 rows.append(row)
-            count += 1
-            if count % CYCLE_PROGRESS_EVERY == 0:
-                log.info("  … %d cycles, %d member rows so far", count, len(rows))
-        for row in rows:
-            row["Cycles_Complete"] = complete
+        count = len(cycles)
         if complete:
             log.info("Cycles found in the %s subgraph: %d", name, count)
         else:
@@ -386,7 +411,7 @@ class GraphAnalyzer:
                 "The scc step lists every node on a cycle.",
                 name,
                 count,
-                len(rows),
+                member_rows,
                 self.max_cycles,
                 self.max_cycle_rows,
             )
@@ -447,14 +472,14 @@ class GraphAnalyzer:
             return pd.DataFrame(columns=columns)
 
         length = nx.dag_longest_path_length(cond)
-        path_scc_indices = nx.dag_longest_path(cond)
-        mapping: dict = cond.graph.get("mapping", {})
-        scc_members: dict[int, list] = {}
-        for node, scc_idx in mapping.items():
-            scc_members.setdefault(scc_idx, []).append(node)
+        # Among equally long chains, visiting components by their smallest member
+        # picks the same one on every run.
+        first = {i: min(cond.nodes[i]["members"]) for i in cond}
+        order = list(nx.lexicographical_topological_sort(cond, key=first.__getitem__))
+        path_scc_indices = nx.dag_longest_path(cond, topo_order=order)
         rows = []
         for rank, scc_idx in enumerate(path_scc_indices):
-            for wi_id in scc_members.get(scc_idx, []):
+            for wi_id in sorted(cond.nodes[scc_idx]["members"]):
                 row = {
                     "Chain_Length": length,
                     "Chain_Rank": rank,
@@ -470,7 +495,11 @@ class GraphAnalyzer:
 
     def find_scc(self, subgraph: str | None = None) -> pd.DataFrame:
         name, g = self._step_graph("scc", subgraph)
-        sccs = list(nx.strongly_connected_components(g))
+        # Largest components first, ties by smallest member; members ascending.
+        sccs = sorted(
+            (sorted(scc) for scc in nx.strongly_connected_components(g)),
+            key=lambda members: (-len(members), members[0]),
+        )
         rows = []
         for i, scc in enumerate(sccs):
             for node in scc:
@@ -502,7 +531,7 @@ class GraphAnalyzer:
         mapping: dict = cond.graph.get("mapping", {})
         scc_depth = _longest_depth(cond)
         rows = []
-        for node in g.nodes:
+        for node in sorted(g.nodes):
             row = {
                 "WI_ID": node,
                 "In_Degree": g.in_degree(node),
@@ -559,7 +588,7 @@ class GraphAnalyzer:
         effort_label = self.effort_field.split(".")[-1] if self.effort_field else "Effort"
 
         for cr_id in self._cr_nodes(g):
-            descendants = list(nx.descendants(g, cr_id))
+            descendants = sorted(nx.descendants(g, cr_id))
             total_effort = 0.0
             if has_effort:
                 subset = self.df_nodes[self.df_nodes["WI_ID"].isin([cr_id] + descendants)]
@@ -589,13 +618,18 @@ class GraphAnalyzer:
                     "Impacted_WI_IDs",
                 ]
             )
-        return pd.DataFrame(rows).sort_values(sort_col, ascending=False)
+        # CRs are already in ID order, so a stable sort keeps ties by CR_ID.
+        return (
+            pd.DataFrame(rows)
+            .sort_values(sort_col, ascending=False, kind="stable")
+            .reset_index(drop=True)
+        )
 
     def analyze_cr_prerequisites(self, subgraph: str | None = None) -> pd.DataFrame:
         _name, g = self._step_graph("cr_prereqs", subgraph)
         rows = []
         for cr_id in self._cr_nodes(g):
-            prereqs = list(nx.ancestors(g, cr_id))
+            prereqs = sorted(nx.ancestors(g, cr_id))
             row = {
                 "CR_ID": cr_id,
                 "CR_Title": g.nodes[cr_id].get("Title", ""),
@@ -608,7 +642,11 @@ class GraphAnalyzer:
             return pd.DataFrame(
                 columns=["CR_ID", "CR_Title", "Prerequisite_WI_Count", "Prerequisite_WI_IDs"]
             )
-        return pd.DataFrame(rows).sort_values("Prerequisite_WI_Count", ascending=False)
+        return (
+            pd.DataFrame(rows)
+            .sort_values("Prerequisite_WI_Count", ascending=False, kind="stable")
+            .reset_index(drop=True)
+        )
 
     def analyze_cr_impact_unpacked(self, subgraph: str | None = None) -> pd.DataFrame:
         """Flat 1:1 view of CRs and every individual downstream impact WI."""
@@ -617,7 +655,7 @@ class GraphAnalyzer:
         for cr_id in self._cr_nodes(g):
             cr_meta = self._meta(cr_id, prefix="CR_")
             cr_title = g.nodes[cr_id].get("Title", "")
-            for desc_id in nx.descendants(g, cr_id):
+            for desc_id in sorted(nx.descendants(g, cr_id)):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
                 row.update(
@@ -640,7 +678,7 @@ class GraphAnalyzer:
         for cr_id in self._cr_nodes(g):
             cr_meta = self._meta(cr_id, prefix="CR_")
             cr_title = g.nodes[cr_id].get("Title", "")
-            for asc_id in nx.ancestors(g, cr_id):
+            for asc_id in sorted(nx.ancestors(g, cr_id)):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
                 row.update(
@@ -719,10 +757,9 @@ def run_analyze(args: argparse.Namespace) -> None:
             args.effort_field,
             bridges=args.bridges,
             max_indirect_edges=args.max_indirect_edges,
-            # Budgets without a command-line option yet use their defaults.
-            max_cycles=getattr(args, "max_cycles", DEFAULT_MAX_CYCLES),
-            max_cycle_rows=getattr(args, "max_cycle_rows", DEFAULT_MAX_CYCLE_ROWS),
-            centrality_sources=getattr(args, "centrality_sources", DEFAULT_CENTRALITY_SOURCES),
+            max_cycles=args.max_cycles,
+            max_cycle_rows=args.max_cycle_rows,
+            centrality_sources=args.centrality_sources,
         )
     except ContractionBudgetExceeded as exc:
         # Raised before any output is created.
@@ -761,4 +798,156 @@ def run_analyze(args: argparse.Namespace) -> None:
     output_path = Path(args.output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    write_analysis_report(results, output_path)
+    results = order_sheets(results)
+    spills = plan_analysis_report(results, output_path)
+    summary = summarize_results(results, steps_requested, spills)
+    preamble = {
+        ABOUT_SHEET: about_frame(args, analyzer, summary),
+        CONFIG_SHEET: config_frame(args, analyzer, list(results)),
+        SUMMARY_SHEET: summary,
+    }
+    write_analysis_report(results, output_path, preamble=preamble)
+
+
+# ---------------------------------------------------------------------------
+# Report front sheets
+# ---------------------------------------------------------------------------
+
+ABOUT_SHEET = "About"
+CONFIG_SHEET = "Config"
+SUMMARY_SHEET = "Summary"
+
+REPORT_PURPOSE = (
+    "Structural analysis of the work-item link graph in one export snapshot: cycles, "
+    "orphans, Change Request dependencies, the longest chain, strongly connected "
+    "components and centrality. Chains and depths count links (hops), not time."
+)
+REPORT_GUIDE = (
+    "Summary lists every result sheet with its rows, headline count and completeness, "
+    "and links to it. Detailed sheets follow in the requested order; the one-row-per-"
+    "pair unpacked sheets come last. Config holds the settings of this run. Rows are "
+    "in a fixed order, so repeat runs on the same snapshot compare cell by cell."
+)
+
+# Headline count per step: what it counts, and how from the step's result.
+_HEADLINE: dict[str, tuple[str, Callable[[pd.DataFrame], int]]] = {
+    "cycles": ("cycles", lambda df: df["Cycle_Index"].nunique() if len(df) else 0),
+    "orphans": ("work items", len),
+    "no_cr_dep": ("work items", len),
+    "has_cr_dep": ("work items", len),
+    "longest_chain": ("hops", lambda df: int(df.attrs.get("longest_path_length", 0))),
+    "scc": ("components", lambda df: df["SCC_Index"].nunique() if len(df) else 0),
+    "metrics": ("work items", len),
+    "cr_scope_impact": ("change requests", len),
+    "cr_prereqs": ("change requests", len),
+    "cr_impact_unpacked": ("change requests", lambda df: df["CR_ID"].nunique() if len(df) else 0),
+    "cr_prereqs_unpacked": (
+        "change requests",
+        lambda df: df["CR_ID"].nunique() if len(df) else 0,
+    ),
+}
+
+
+def order_sheets(results: dict[str, pd.DataFrame]) -> dict[str, pd.DataFrame]:
+    """Detailed sheets in their requested order, then the unpacked sheets."""
+    unpacked = [name for name in results if name.partition("@")[0].endswith("_unpacked")]
+    detailed = [name for name in results if name not in unpacked]
+    return {name: results[name] for name in detailed + unpacked}
+
+
+def summarize_results(
+    results: dict[str, pd.DataFrame],
+    steps: list[tuple[str, str, str | None]],
+    spills: dict[str, tuple[Path, str]],
+) -> pd.DataFrame:
+    """One row per result sheet: rows, headline count, completeness and notes."""
+    step_of = {sheet: (step, subgraph or STEP_SUBGRAPH[step]) for sheet, step, subgraph in steps}
+    rows = []
+    for sheet, df in results.items():
+        step, subgraph = step_of[sheet]
+        counted, count = _HEADLINE[step]
+        complete, notes = True, []
+        if step == "cycles" and not df.attrs.get("cycles_complete", True):
+            complete = False
+            notes.append("cycle budget reached; scc lists every node on a cycle")
+        if step == "scc" and len(df):
+            multi = df.loc[df["SCC_Size"] > 1, "SCC_Index"].nunique()
+            notes.append(f"{multi} with more than one member")
+        if step == "metrics" and df.attrs.get("betweenness_sources", len(df)) < len(df):
+            complete = False
+            notes.append(f"betweenness sampled from {df.attrs['betweenness_sources']} sources")
+        if sheet in spills:
+            path, reason = spills[sheet]
+            notes.append(f"rows written to {path.name}: {reason}")
+        rows.append(
+            {
+                "Sheet": sheet[:31],
+                "Step": step,
+                "Subgraph": subgraph,
+                "Rows": len(df),
+                "Count": int(count(df)),
+                "Counted": counted,
+                "Complete": complete,
+                "Note": "; ".join(notes),
+            }
+        )
+    columns = ["Sheet", "Step", "Subgraph", "Rows", "Count", "Counted", "Complete", "Note"]
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _tool_version() -> str:
+    try:
+        return metadata.version("workflow-automations")
+    except metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def about_frame(
+    args: argparse.Namespace, analyzer: GraphAnalyzer, summary: pd.DataFrame
+) -> pd.DataFrame:
+    """Purpose, inputs, scope and completeness of the report, as Item/Value rows."""
+    stats = analyzer.stats
+    partial = summary.loc[~summary["Complete"].astype(bool), "Sheet"].tolist()
+    bridges = "dropped" if analyzer.bridges == "drop" else "contracted"
+    items = [
+        ("Report", "ado-graph analysis report"),
+        ("Purpose", REPORT_PURPOSE),
+        ("How to read", REPORT_GUIDE),
+        ("Tool version", _tool_version()),
+        ("Nodes file", Path(args.nodes_file).name),
+        ("Edges file", Path(args.edges_file).name),
+        ("Work items loaded", stats["nodes_loaded"]),
+        ("Links loaded", stats["edges_loaded"]),
+        ("Relations after normalization", stats["relations"]),
+        ("Links skipped: endpoint not in the nodes file", stats["edges_absent_endpoint"]),
+        ("Links skipped: unknown link type", stats["edges_unknown_type"]),
+        (f"Out-of-scope bridge items ({bridges})", stats["bridges"]),
+        ("Work items analyzed", stats["nodes_analyzed"]),
+        ("Result sheets", len(summary)),
+        ("Complete", "yes" if not partial else "no: " + ", ".join(partial)),
+    ]
+    return pd.DataFrame(items, columns=["Item", "Value"])
+
+
+def config_frame(
+    args: argparse.Namespace, analyzer: GraphAnalyzer, sheets: list[str]
+) -> pd.DataFrame:
+    """Settings of this run, as Setting/Value rows; budgets come from the analyzer.
+
+    Files are named without their directory, so runs from different folders compare.
+    """
+    settings = [
+        ("nodes_file", Path(args.nodes_file).name),
+        ("edges_file", Path(args.edges_file).name),
+        ("output_file", Path(args.output_file).name),
+        ("ado_url", args.ado_url),
+        ("effort_field", args.effort_field),
+        ("steps", args.steps),
+        ("sheets", ", ".join(sheets)),
+        ("bridges", analyzer.bridges),
+        ("max_indirect_edges", analyzer.max_indirect_edges),
+        ("max_cycles", analyzer.max_cycles),
+        ("max_cycle_rows", analyzer.max_cycle_rows),
+        ("centrality_sources", analyzer.centrality_sources),
+    ]
+    return pd.DataFrame(settings, columns=["Setting", "Value"])
