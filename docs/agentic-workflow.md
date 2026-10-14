@@ -115,11 +115,14 @@ PRs that really collide.
   branch, resolved the conflict and got CI green again.
 - A PR that conflicts with `main` alone is blocked until its branch is updated.
 
-`main` is squash-merged, so `merge_plan.py` models squash by default: each PR lands
-as one single-parent commit. A PR stacked on another then conflicts or duplicates
-in the plan exactly as on GitHub, and becomes a train car without needing
-`--after`. Use `--method merge` only if the batch will be merged with merge
-commits; rebase merges are not modelled.
+PRs merge with merge commits by default. Each tool's change then stays a
+sequence of small commits on `main` that `git bisect` and `git log -- <path>` can
+pin down, instead of one large squash per task; a branch built on another PR also
+merges cleanly once its base has landed. `merge_plan.py` models this by default.
+When the owner chooses squash for a batch, pass `--method squash`: each PR then
+lands as one single-parent commit, and a PR stacked on another conflicts or
+duplicates in the plan exactly as on GitHub, becoming a train car without
+`--after`. Rebase merges are not modelled.
 
 ```bash
 git fetch origin
@@ -146,12 +149,13 @@ Who does what:
    check result. Nothing merges without that approval.
 4. The integration owner fetches and confirms that `origin/main` is still the
    planned base and each PR head is still the planned SHA; anything moved means
-   re-plan. It then squash-merges the batch in the planned order, pinning each
-   merge to its planned head SHA (GitHub refuses the merge if the head moved), and
-   confirms that `git rev-parse origin/main^{tree}` equals the test commit's tree.
-   A mismatch means something else merged meanwhile: stop and re-plan. If CI on `main` then fails on a combination the
-   local check did not cover (another Python or pandas version), revert through a
-   PR rather than pushing to `main`.
+   re-plan. It then merges the batch in the planned order with the planned method,
+   pinning each merge to its planned head SHA (GitHub refuses the merge if the
+   head moved), and confirms that `git rev-parse origin/main^{tree}` equals the
+   test commit's tree. A mismatch means something else merged meanwhile: stop and
+   re-plan. If CI on `main` then fails on a combination the local check did not
+   cover (another Python or pandas version), revert through a PR rather than
+   pushing to `main`.
 5. For each train car, the coordinator asks the owning thread lead to merge `main`
    into its branch and resolve the conflict; the integration owner updates a
    branch itself only when that thread has ended, with a merge commit, never a

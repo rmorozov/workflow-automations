@@ -3,10 +3,10 @@
 Each pull request is given as LABEL=REF (for example 16=origin/claude/project-thread-b2ec4u),
 in the owner's priority order. The planner never fetches, pushes or merges, and moves no
 ref; run `git fetch origin` first. It test-merges with `git merge-tree` (git 2.38 or newer),
-which writes only unreferenced objects. `--method` models how GitHub will merge: `squash`
-(the default, as on main) applies each pull request as one single-parent commit, so a
-pull request stacked on another conflicts or duplicates exactly as it would on GitHub;
-`merge` models merge commits.
+which writes only unreferenced objects. `--method` models how GitHub will merge: `merge`
+(the default) models merge commits, which keep each branch's history; `squash` applies
+each pull request as one single-parent commit, so a pull request stacked on another
+conflicts or duplicates exactly as it would on GitHub.
 
 - Batch 1 holds every pull request that merges cleanly onto the base together with the
   ones before it. Its integration commit is printed so the checks can run on exactly
@@ -110,7 +110,7 @@ def plan(
     pulls: list[Pull],
     after: dict[str, set[str]],
     repo: str = ".",
-    method: str = "squash",
+    method: str = "merge",
 ) -> tuple[list[Batch], dict[str, str]]:
     """Group pulls into batches in priority order; return the batches and the blocked pulls."""
     labels = {pull.label for pull in pulls}
@@ -220,7 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         metavar="LATER:EARLIER",
         help="LATER must merge in a later batch than EARLIER (repeatable)",
     )
-    parser.add_argument("--method", choices=["squash", "merge"], default="squash")
+    parser.add_argument("--method", choices=["merge", "squash"], default="merge")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)

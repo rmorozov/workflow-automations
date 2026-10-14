@@ -46,7 +46,7 @@ def repo(tmp_path):
     return tmp_path
 
 
-def run_plan(repo: Path, specs: list[str], after: dict | None = None, method: str = "squash"):
+def run_plan(repo: Path, specs: list[str], after: dict | None = None, method: str = "merge"):
     pulls = merge_plan.load_pulls("main", specs, str(repo))
     return pulls, *merge_plan.plan("main", pulls, after or {}, str(repo), method)
 
@@ -90,7 +90,7 @@ def test_integration_commit_is_reproducible_whatever_the_clock_and_identity(repo
 def test_squash_puts_a_stacked_pull_in_a_train_but_merge_commits_do_not(repo):
     commit(repo, "p1", {"a.txt": edit(1, "p1")})
     commit(repo, "p2", {"a.txt": edit(1, "p2")}, start="p1")  # stacked on p1, same line
-    _, batches, _ = run_plan(repo, ["1=p1", "2=p2"])
+    _, batches, _ = run_plan(repo, ["1=p1", "2=p2"], method="squash")
     assert [b.pulls for b in batches] == [["1"], ["2"]]
     assert batches[0].deferred == {"2": "conflicts with 1 in a.txt"}
     _, batches, _ = run_plan(repo, ["1=p1", "2=p2"], method="merge")
@@ -157,7 +157,7 @@ def test_text_report_pins_heads_and_explains_later_batches(repo, capsys):
     commit(repo, "p3", {"a.txt": edit(1, "p3")})
     assert merge_plan.main(["--repo", str(repo), "--base", "main", "1=p1", "3=p3"]) == 0
     out = capsys.readouterr().out
-    assert f"Base {git(repo, 'rev-parse', 'main')}; method squash" in out
+    assert f"Base {git(repo, 'rev-parse', 'main')}; method merge" in out
     assert f"p3 @ {git(repo, 'rev-parse', 'p3')}" in out
     assert "Batch 2: after batch 1 merges" in out and "conflicts with 1 in a.txt" in out
 

@@ -18,8 +18,8 @@ state) and any stacking (`LATER:EARLIER`). Then:
    `python scripts/backlog.py plan --busy <claimed IDs>`), then P1 before P2/P3, then
    older first.
 3. Run `python scripts/merge_plan.py --base origin/main [--after LATER:EARLIER] LABEL=REF ...`.
-   It models squash merges, as `main` uses; pass `--method merge` only when told the
-   batch will be merged with merge commits.
+   It models merge commits, the repository's preferred method; pass `--method squash`
+   only when the owner chose squash for this batch.
 4. Validate batch 1 on its test commit in a disposable worktree with its own
    environment, so the tests import that tree's `src/`:
    ```bash
