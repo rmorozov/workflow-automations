@@ -1,6 +1,7 @@
 """Offline behavior tests for the ado-graph command line."""
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -9,7 +10,7 @@ import pytest
 from ado_graph_data import edges, fake_client, nodes, run_export, wi
 
 from workflow_automations import ado_graph as tool
-from workflow_automations.ado_graph import client, export
+from workflow_automations.ado_graph import cli, client, export
 
 
 def test_batch_size_must_be_positive(tmp_path, monkeypatch):
@@ -120,3 +121,134 @@ def test_failed_ca_bundle_build_leaves_no_file(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         client.build_merged_ca_bundle(str(certs))
     assert list(bundles.iterdir()) == []
+
+
+def _rejected(capsys, argv):
+    """Run main expecting an argparse error; return its message."""
+    with pytest.raises(SystemExit) as exc:
+        tool.main(argv)
+    assert exc.value.code == 2
+    return capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("formats", "message"),
+    [
+        ("parquet,xlsx", "--formats: unknown xlsx; choose from parquet, csv, excel"),
+        (" , ", "--formats: no format given"),
+    ],
+)
+def test_export_rejects_bad_formats_before_any_service_call(
+    tmp_path, monkeypatch, capsys, formats, message
+):
+    fake, log = fake_client({1: wi(1)}, [1])
+    monkeypatch.setattr(export, "ADOClient", fake)
+    monkeypatch.setattr(client, "import_network_modules", lambda: pytest.fail("imported"))
+    out = tmp_path / "out"
+    argv = ["export", "--ado-url", "https://ado.example", "--query-id", "q"]
+    err = _rejected(capsys, [*argv, "--output-dir", str(out), "--formats", formats])
+    assert message in err
+    assert log["fetched"] == [] and not out.exists()
+
+
+def test_replay_rejects_unknown_formats_before_reading_the_snapshot(tmp_path, capsys):
+    out = tmp_path / "out"
+    argv = ["replay", "--snapshot", str(tmp_path / "absent.json"), "--output-dir", str(out)]
+    assert "--formats: unknown pdf" in _rejected(capsys, [*argv, "--formats", "csv,pdf"])
+    assert not out.exists()
+
+
+def test_formats_are_normalized_and_deduplicated(tmp_path, monkeypatch):
+    fake, _log = fake_client({1: wi(1)}, [1])
+    monkeypatch.setattr(export, "ADOClient", fake)
+    monkeypatch.setattr(export, "configure_ca_bundle", lambda _dir: None)
+    argv = ["export", "--ado-url", "https://ado.example", "--query-id", "q"]
+    tool.main([*argv, "--output-dir", str(tmp_path), "--formats", " CSV,,csv ,Parquet,"])
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "edges.csv",
+        "edges.parquet",
+        "nodes.csv",
+        "nodes.parquet",
+    ]
+
+
+def _analyze(tmp_path, *extra):
+    argv = ["analyze", "--nodes-file", str(tmp_path / "nodes.parquet")]
+    argv += ["--edges-file", str(tmp_path / "edges.parquet")]
+    return [*argv, "--output-file", str(tmp_path / "out" / "report.xlsx"), *extra]
+
+
+@pytest.fixture
+def parquet_inputs(tmp_path):
+    nodes().to_parquet(tmp_path / "nodes.parquet")
+    edges().to_parquet(tmp_path / "edges.parquet")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    ("steps", "message"),
+    [
+        ("orphans,cycle", "--steps: unknown cycle;"),
+        (
+            "cycles@deps,all@dependency,@hierarchy",
+            "unknown cycles@deps, all@dependency, @hierarchy",
+        ),
+        (", ,", "--steps: no step given"),
+    ],
+)
+def test_analyze_rejects_bad_steps_before_reading_inputs(
+    parquet_inputs, monkeypatch, capsys, steps, message
+):
+    monkeypatch.setattr(cli, "run_analyze", lambda _args: pytest.fail("analysis ran"))
+    err = _rejected(capsys, _analyze(parquet_inputs, "--steps", steps))
+    assert message in err
+    assert "cycles, orphans" in err and "hierarchy, dependency" in err
+    assert not (parquet_inputs / "out").exists()
+
+
+@pytest.mark.parametrize("steps", ["all", "ALL , cycles@Dependency,", "cycles@,metrics@all"])
+def test_analyze_accepts_valid_steps(parquet_inputs, monkeypatch, steps):
+    ran = []
+    monkeypatch.setattr(cli, "run_analyze", ran.append)
+    tool.main(_analyze(parquet_inputs, "--steps", steps))
+    assert len(ran) == 1
+
+
+@pytest.mark.parametrize(
+    ("which", "frame", "message"),
+    [
+        ("nodes", lambda: nodes().drop(columns="WI_ID"), "--nodes-file .* lacks .* WI_ID"),
+        (
+            "edges",
+            lambda: edges().drop(columns=["Target_ID", "Link_Type"]),
+            "--edges-file .* lacks .* Target_ID, Link_Type",
+        ),
+    ],
+)
+def test_analyze_rejects_inputs_missing_required_columns(
+    parquet_inputs, monkeypatch, capsys, which, frame, message
+):
+    frame().to_parquet(parquet_inputs / f"{which}.parquet")
+    monkeypatch.setattr(cli, "run_analyze", lambda _args: pytest.fail("analysis ran"))
+    assert re.search(message, _rejected(capsys, _analyze(parquet_inputs)))
+    assert not (parquet_inputs / "out").exists()
+
+
+@pytest.mark.parametrize("make", ["missing", "csv", "directory"])
+def test_analyze_rejects_unreadable_parquet(parquet_inputs, monkeypatch, capsys, make):
+    path = parquet_inputs / "edges.parquet"
+    path.unlink()
+    if make == "csv":
+        edges().to_csv(path, index=False)
+    elif make == "directory":
+        path.mkdir()
+    monkeypatch.setattr(cli, "run_analyze", lambda _args: pytest.fail("analysis ran"))
+    err = _rejected(capsys, _analyze(parquet_inputs))
+    assert f"--edges-file {path} is not a readable Parquet file" in err
+    assert not (parquet_inputs / "out").exists()
+
+
+def test_all_unknown_steps_no_longer_reach_an_empty_workbook(parquet_inputs, capsys):
+    err = _rejected(capsys, _analyze(parquet_inputs, "--steps", "bogus"))
+    assert "--steps: unknown bogus" in err
+    assert not (parquet_inputs / "out").exists()

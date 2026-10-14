@@ -15,6 +15,7 @@ from pathlib import Path
 from workflow_automations.ado_graph.analyze import (
     ALL_STEPS,
     DEFAULT_MAX_INDIRECT_EDGES,
+    SUBGRAPHS,
     run_analyze,
 )
 from workflow_automations.ado_graph.client import (
@@ -23,7 +24,7 @@ from workflow_automations.ado_graph.client import (
     ca_bundle_scope,
     import_network_modules,
 )
-from workflow_automations.ado_graph.report import export_paths
+from workflow_automations.ado_graph.report import EDGE_COLUMNS, EXPORT_FILES, NODE_KEY, export_paths
 
 log = logging.getLogger("ado_tool")
 
@@ -225,6 +226,63 @@ def _same_file(a: Path, b: Path) -> bool:
     return a.exists() and b.exists() and os.path.samefile(a, b)
 
 
+def _comma_list(raw: str) -> list[str]:
+    return [token.strip().lower() for token in raw.split(",") if token.strip()]
+
+
+def _step_errors(raw: str) -> tuple[list[str], int]:
+    """Return the --steps tokens `parse_steps` would skip, and how many it would run."""
+    bad, steps = [], 0
+    for token in raw.split(","):
+        step, at, subgraph = (part.strip() for part in token.strip().lower().partition("@"))
+        if not step and not at:
+            continue
+        if step == "all" and not subgraph:
+            steps += len(ALL_STEPS)
+        elif step not in ALL_STEPS or (subgraph and subgraph not in SUBGRAPHS):
+            bad.append(token.strip())
+        else:
+            steps += 1
+    return bad, steps
+
+
+def _check_parquet(
+    parser: argparse.ArgumentParser, option: str, name: str, required: tuple[str, ...]
+) -> None:
+    """Read only the Parquet footer and require the columns analysis indexes."""
+    import pyarrow
+    import pyarrow.parquet
+
+    try:
+        columns = set(pyarrow.parquet.read_schema(name).names)
+    except (OSError, pyarrow.ArrowException) as exc:
+        parser.error(f"{option} {name} is not a readable Parquet file ({exc})")
+    missing = [col for col in required if col not in columns]
+    if missing:
+        parser.error(f"{option} {name} lacks required column(s) {', '.join(missing)}")
+
+
+def check_inputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject unknown formats or steps and inputs lacking required columns, before any work."""
+    if args.mode in ("export", "replay"):
+        formats = _comma_list(args.formats)
+        unknown = [fmt for fmt in formats if fmt not in EXPORT_FILES]
+        if unknown or not formats:
+            given = f"unknown {', '.join(unknown)}" if unknown else "no format given"
+            parser.error(f"--formats: {given}; choose from {', '.join(EXPORT_FILES)}")
+        args.formats = ",".join(dict.fromkeys(formats))
+    elif args.mode == "analyze":
+        bad, steps = _step_errors(args.steps)
+        if bad or not steps:
+            given = f"unknown {', '.join(bad)}" if bad else "no step given"
+            parser.error(
+                f"--steps: {given}; choose 'all' or steps from {', '.join(ALL_STEPS)}, "
+                f"optionally as step@subgraph with a subgraph from {', '.join(SUBGRAPHS)}"
+            )
+        _check_parquet(parser, "--nodes-file", args.nodes_file, (NODE_KEY,))
+        _check_parquet(parser, "--edges-file", args.edges_file, EDGE_COLUMNS)
+
+
 def check_outputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Refuse existing outputs without --overwrite and inputs as outputs, before any work."""
     if args.mode in ("export", "replay"):
@@ -256,6 +314,7 @@ def check_outputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
+    check_inputs(parser, args)
     check_outputs(parser, args)
     configure_logging()
 
