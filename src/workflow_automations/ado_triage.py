@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unicodedata
 import zipfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,6 +26,8 @@ from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
+
+from workflow_automations.ado_common.query import chunks, query_result_ids
 
 logger = logging.getLogger("ado_triage")
 
@@ -209,11 +211,6 @@ def work_item_url(base_url: str, wi_id: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def chunker(seq: Sequence[int], size: int = 200) -> Iterator[list[int]]:
-    for i in range(0, len(seq), size):
-        yield list(seq[i : i + size])
-
-
 def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
     """Execute the saved query and fetch the data the report needs.
 
@@ -251,21 +248,14 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
 
         logger.info("Executing query %s", query_id)
         result = client.query_by_id(id=query_id)
-        all_ids: set[int] = set()
-        # Tree and one-hop queries return links; flat queries return items.
-        if result.work_item_relations:
-            for link in result.work_item_relations:
-                for end in (link.source, link.target):
-                    if end is not None:
-                        all_ids.add(end.id)
-        for item in result.work_items or []:
-            all_ids.add(item.id)
+        # Tree and one-hop queries return links; flat queries return items. Take both.
+        all_ids = set(query_result_ids(result))
         if not all_ids:
             raise EmptyQueryError(f"Query {query_id} returned no work items")
 
         items: list[dict[str, Any]] = []
         logger.info("Fetching %d work items", len(all_ids))
-        for chunk in chunker(sorted(all_ids)):
+        for chunk in chunks(sorted(all_ids)):
             for wi in client.get_work_items(ids=chunk, expand="Relations"):
                 items.append(
                     {
@@ -299,7 +289,7 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
 
         def fetch_fields(ids: list[int], fields: list[str], what: str) -> dict[int, dict]:
             out: dict[int, dict] = {}
-            for chunk in chunker(ids):
+            for chunk in chunks(ids):
                 try:
                     batch = client.get_work_items(ids=chunk, fields=fields, error_policy="omit")
                 except service_errors as exc:
@@ -439,7 +429,9 @@ def build_master(snapshot: Snapshot, capacity: dict[str, float], cfg: Settings) 
         row = dict(item["fields"])
         wi_id = item["id"]
         parent = safe_int(row.get(FIELD_PARENT))
-        level, cap = resolve_capacity(row.get(FIELD_AREA_PATH, ""), capacity)
+        # A missing or null AreaPath is the blank team: groupby would drop NaN keys.
+        row[FIELD_AREA_PATH] = row.get(FIELD_AREA_PATH) or ""
+        level, cap = resolve_capacity(row[FIELD_AREA_PATH], capacity)
         row.update(
             {
                 FIELD_ID: wi_id,
@@ -477,7 +469,7 @@ def build_relations(snapshot: Snapshot, cfg: Settings) -> pd.DataFrame:
         fields = own.get(wi_id) or snapshot.external.get(wi_id)
         if fields is None:
             return "UNKNOWN", "UNKNOWN"
-        return fields.get(FIELD_TITLE, ""), fields.get(FIELD_AREA_PATH, "")
+        return fields.get(FIELD_TITLE, ""), fields.get(FIELD_AREA_PATH) or ""
 
     rows = []
     for item in snapshot.items:

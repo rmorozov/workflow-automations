@@ -9,7 +9,7 @@ the backlog format is in [docs/backlog](backlog/README.md).
 
 | Role | Where it runs | Does | Does not |
 | --- | --- | --- | --- |
-| Owner (human) | Project chat, GitHub | Sets priorities, decides forks that change goals, approves and merges PRs, owns repository settings | Write task files by hand (optional) |
+| Owner (human) | Project chat, GitHub | Sets priorities, decides forks that change goals, reviews PRs and approves each merge batch, owns repository settings | Write task files by hand (optional) |
 | Coordinator | Project chat session | Triages asks, allocates backlog IDs, keeps the ledger of which thread works on which task, starts threads for the next wave | Edit code |
 | Thread lead | One thread session per task (or per lane bundle) | Owns one branch and its PR; runs the pipeline below with subagents; drives CI to green | Touch files outside its task's `touches:` |
 | `task-planner` | Subagent | Reads task + code, returns plan and the exact `touches:` | Edit files |
@@ -17,6 +17,7 @@ the backlog format is in [docs/backlog](backlog/README.md).
 | `checker` | Subagent | Runs ruff, backlog check, pytest, build; reports failures | Fix or diagnose |
 | `reviewer` | Subagent | Adversarial review against acceptance evidence and scope | Edit files |
 | `backlog-curator` | Subagent | Files follow-ups with coordinator-issued IDs; proposes waves | Edit code |
+| `merge-steward` | Subagent of the integration owner | Orders ready PRs into batches and trains, validates each batch tree, bisects a failing batch | Merge, push, comment or edit |
 
 ## Claude models and effort
 
@@ -28,6 +29,7 @@ Fable 5.1 $10/$50.
 | --- | --- | --- | --- |
 | `checker` | Haiku 5.5 | low | Runs fixed commands and copies failures; no judgment. 20× cheaper than Sonnet and the most frequently run role. |
 | `backlog-curator` | Sonnet 5.5 | low | Structured writing from existing findings; low effort keeps it terse. |
+| `merge-steward` | Sonnet 5.5 | medium | `merge_plan.py` and the checks carry the deterministic part; the judgment left is ordering and reading diffs where PRs share files. A wrong plan is caught by the batch checks before anything merges, so Opus buys little. |
 | `implementer` | Sonnet 5.5 | medium | Most tasks are local, well-specified changes with tests as the safety net. Medium is the recommended start for agentic coding on Sonnet 5.5. |
 | `implementer` on tasks marked `tier: complex` | Opus 5.5 | high | Graph semantics, completeness, schema contracts and algorithmic bounds (AG-003/004/006/007/012, SH-001/003/004/007): wrong results here pass tests that encode the same misunderstanding. |
 | `task-planner` | Opus 5.5 | high | One short, read-heavy call whose mistakes multiply: a wrong `touches:` list breaks parallel scheduling, a wrong plan wastes an implementer round. |
@@ -95,6 +97,75 @@ the module, not the scheduler, is the limit.
 4. Shared boundaries (SH-002, SH-005, then SH-001/003/004) one at a time, since
    they all create `ado_common/`; then AG-012 and TR-009 on the shared snapshot.
 
+### Merging: batches and trains
+
+Every merge moves `main`, and a moved `main` makes every other open PR's green CI
+evidence about a tree that no longer exists. Merging one PR at a time and
+re-running CI on each of the rest costs one CI round and one owner touch per PR.
+The merge steward instead tests the combined result once and only serialises
+PRs that really collide.
+
+- A **batch** is a set of ready PRs that git merges cleanly together. The steward
+  checks the batch's integration commit, which has exactly the tree `main` will
+  have after the whole batch merges with the modelled method, so the batch merges
+  back to back without re-running each PR's CI.
+- A **train** is a chain of PRs that cannot share a batch: a later car conflicts
+  with an earlier one, or is stacked on it (`--after`). Each car lands in the next
+  batch after the one it waits on, once its thread lead has merged `main` into its
+  branch, resolved the conflict and got CI green again.
+- A PR that conflicts with `main` alone is blocked until its branch is updated.
+
+PRs merge with merge commits by default. Each tool's change then stays a
+sequence of small commits on `main` that `git bisect` and `git log -- <path>` can
+pin down, instead of one large squash per task; a branch built on another PR also
+merges cleanly once its base has landed. `merge_plan.py` models this by default.
+When the owner chooses squash for a batch, pass `--method squash`: each PR then
+lands as one single-parent commit, and a PR stacked on another conflicts or
+duplicates in the plan exactly as on GitHub, becoming a train car without
+`--after`. Rebase merges are not modelled.
+
+```bash
+git fetch origin
+python scripts/merge_plan.py --base origin/main \
+    16=origin/<branch> 20=origin/<branch> 21=origin/<branch> \
+    --after 21:16       # 21 is stacked on 16
+```
+
+Who does what:
+
+1. The integration owner (the coordinator, or a steward thread it starts for a
+   wave, which counts against the thread cap) gives the `merge-steward` subagent
+   the open thread PRs with their CI and review state.
+2. The steward keeps those that are non-draft, green on their head and free of
+   unresolved review threads, orders them (PRs that unblock waiting tasks first,
+   then P1, then older) and runs `merge_plan.py`. It runs `scripts/check.sh` on
+   batch 1's test commit in a disposable worktree with its own fresh virtual
+   environment and an editable install of that worktree, so the tests import the
+   batch's `src/` and not another checkout's. It bisects a failing batch by
+   re-planning half of it at a time, and checks pairs across the halves when
+   neither half fails alone. It returns the plan with the base and head SHAs; it
+   never merges.
+3. The owner approves the batch as one decision: its PRs, their order and the
+   check result. Nothing merges without that approval.
+4. The integration owner fetches and confirms that `origin/main` is still the
+   planned base and each PR head is still the planned SHA; anything moved means
+   re-plan. It then merges the batch in the planned order with the planned method,
+   pinning each merge to its planned head SHA (GitHub refuses the merge if the
+   head moved), and confirms that `git rev-parse origin/main^{tree}` equals the
+   test commit's tree. A mismatch means something else merged meanwhile: stop and
+   re-plan. If CI on `main` then fails on a combination the local check did not
+   cover (another Python or pandas version), revert through a PR rather than
+   pushing to `main`.
+5. For each train car, the coordinator asks the owning thread lead to merge `main`
+   into its branch and resolve the conflict; the integration owner updates a
+   branch itself only when that thread has ended, with a merge commit, never a
+   rebase. The steward re-plans once those cars are green.
+
+Shared files that merge cleanly are listed, not serialised: the batch checks are
+the evidence that they still work together, and the steward's reading of both
+diffs is the warning. A GitHub merge queue would do steps 2 to 4 on the server,
+but it needs branch protection, which only the owner can change (RW-001).
+
 ### What comes next
 
 Splitting the backlog and `ado_graph.py` moves the bottleneck rather than removing
@@ -154,6 +225,7 @@ the old model label or token price establishes the best tier.
 | Independent reviewer | GPT-6.1 Sol / high | GPT-6 Astra / high |
 | Backlog curator | GPT-6 Luna / medium | Same for established findings; owner handles ambiguity |
 | Checker summary | GPT-6 Luna / low | Same; shell/CI execute checks |
+| Merge steward | GPT-6.1 Sol / medium | Same; the batch checks are the safety net |
 | Design arbiter (on demand) | GPT-6 Astra / xhigh | Only for a concrete unresolved disagreement |
 
 The root default is Sol/medium, and the session cap is three spawned threads
@@ -167,6 +239,7 @@ python scripts/backlog.py check
 python scripts/backlog.py plan --busy AG-018
 python scripts/agent_profiles.py check
 python scripts/agent_profiles.py route --role coordinator
+python scripts/agent_profiles.py route --role steward
 python scripts/agent_profiles.py route --task AG-004 --role reviewer
 ```
 

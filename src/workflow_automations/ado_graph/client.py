@@ -6,7 +6,6 @@ import logging
 import os
 import shutil
 import tempfile
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +18,10 @@ from azure.devops.v7_0.work_item_tracking.models import (
 )
 from msrest.authentication import KerberosAuthentication
 from requests_kerberos import OPTIONAL
+
+# ADO_BATCH_LIMIT is re-exported for the CLI and export modules.
+from workflow_automations.ado_common.query import ADO_BATCH_LIMIT as ADO_BATCH_LIMIT
+from workflow_automations.ado_common.query import chunks, flat_result_ids, link_result_ids
 
 log = logging.getLogger("ado_tool")
 
@@ -53,9 +56,6 @@ LINK_LABEL: dict[str, str] = {
     "Microsoft.VSTS.Common.Implements-Forward": "Implements",
     "Microsoft.VSTS.Common.Implements-Reverse": "Implemented By",
 }
-
-# ADO batch endpoint hard limit
-ADO_BATCH_LIMIT = 200
 
 # ADO WIQL query_by_wiql hard limit (server-side top)
 ADO_WIQL_PAGE = 20_000
@@ -172,17 +172,7 @@ class ADOClient:
         team_context = TeamContext(project=project) if project else None
         result = self.wit.query_by_id(id=query_id, team_context=team_context)
 
-        ids: list[int] = []
-        if result.work_items:
-            ids = [ref.id for ref in result.work_items]
-        elif result.work_item_relations:
-            seen: set[int] = set()
-            for link in result.work_item_relations:
-                for ref in (link.source, link.target):
-                    if ref and ref.id not in seen:
-                        seen.add(ref.id)
-                        ids.append(ref.id)
-        return ids
+        return flat_result_ids(result) or link_result_ids(result)
 
     def filter_ids_via_wiql(
         self,
@@ -200,7 +190,7 @@ class ADOClient:
         valid_ids = set()
 
         # Process in chunks of 1000 to avoid exceeding WIQL string length limits
-        for chunk in _iter_chunks(ids, WIQL_FILTER_CHUNK):
+        for chunk in chunks(ids, WIQL_FILTER_CHUNK):
             wiql = _wiql_ids(chunk)
 
             # System.TeamProject is the native, fully indexed way to filter projects
@@ -263,8 +253,3 @@ class ADOClient:
 def _wiql_ids(ids: list[int]) -> str:
     id_list = ",".join(map(str, ids))
     return f"SELECT [System.Id] FROM WorkItems WHERE [System.Id] IN ({id_list})"
-
-
-def _iter_chunks(lst: list, size: int) -> Iterator[list]:
-    for i in range(0, len(lst), size):
-        yield lst[i : i + size]

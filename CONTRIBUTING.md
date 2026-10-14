@@ -56,7 +56,7 @@ a scheduler or external integration until the tool actually needs one.
 
 ## ADO graph tool
 
-`src/workflow_automations/ado_graph.py` started as a verbatim import and is now under
+The `src/workflow_automations/ado_graph/` package started as a verbatim import and is now under
 normal lint, format and test checks. Its `ado-graph` extra builds `gssapi`, so run
 Linux Kerberos header installation before the development extras above
 (`sudo apt-get install libkrb5-dev`).

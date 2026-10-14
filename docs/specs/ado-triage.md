@@ -118,6 +118,12 @@ AMBER from 85, GREEN below, GREY when capacity is undefined. The summary is sort
 RED, AMBER, GREY, GREEN, then by team score; RAG cells are colored, and score and
 staleness columns use color scales.
 
+ADO gives every work item an AreaPath (the project root by default), so items left at
+the default area form a team named after the project. As a guard against incomplete
+input, an item whose AreaPath is missing or null gets a blank AreaPath and
+`Matched_Capacity_Level`; every view treats the blanks as one team with undefined
+capacity instead of failing the run.
+
 `--profile exec` writes only Config, Summary, Agenda, Master Data, Capacity Triage and
 Resolved. Master Data is kept so an exec report can be the next `--previous-file`.
 `--format csv` writes Master Data only and rejects `--previous-file` and
@@ -198,7 +204,10 @@ Tests use synthetic snapshots and generated workbooks to cover flag kinds, scori
 blocker direction, root detection, unknown linked items, hierarchical capacity,
 RAG, the top-20% rule, capacity header normalization and validation, a two-report
 delta cycle, legacy previous reports, workbook layout, profiles, CSV, overwrite
-protection, input-before-network validation and exit codes. `fetch_snapshot` is tested
+protection, input-before-network validation and exit codes. Per-team output
+(`--team-dir`) is covered for partitioning every sheet by team, resolved items,
+items without an AreaPath (in every view and as `NO_AREA`), safe and colliding file
+names, input guards, refusing existing files and all-or-nothing writes. `fetch_snapshot` is tested
 against a fake work item client: tree and flat queries, 200-item batches, unavailable
 linked items, Kerberos wiring, and mapping of connection, authentication and HTTP
 failures to exit 5. A real ADO server and Kerberos handshake are not exercised.

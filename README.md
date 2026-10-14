@@ -194,8 +194,11 @@ Authentication uses your Kerberos ticket. On Linux, install system Kerberos head
 **1. Executive Summary** (teams by RAG load), then **2. Triage Agenda** (items ranked
 by risk-flag weight, with recommended actions). Pass last week's report as
 `--previous-file` to see new, persisting and resolved risks. `--profile exec` writes
-only the leadership sheets plus Master Data, so it still works as `--previous-file`; `--as-of` makes date-based flags reproducible. Existing
-output requires `--overwrite`.
+only the leadership sheets plus Master Data, so it still works as `--previous-file`; `--as-of` makes date-based flags reproducible. Add
+`--team-dir work/teams` to also write one workbook per team, such as
+`work/teams/triage-2026-10-01.Proj_Dept_Team A.xlsx`, so each team lead gets only their
+own items. Existing output requires
+`--overwrite`.
 
 ## Development
 
@@ -234,8 +237,9 @@ them as bridge nodes (`In_Scope=False`); analysis then replaces each bridge with
 links can multiply edges; `--max-indirect-edges` caps that (exiting before writing),
 and `analyze --bridges drop` skips contraction. Export exits 4 when ADO did not return
 some linked work items (outputs are written but incomplete) and 5, writing nothing,
-when items from the saved query itself are missing. The tool still overwrites outputs and needs the Kerberos dependencies
-even for offline analysis. The default `--steps all` includes
+when items from the saved query itself are missing. Outputs are published atomically;
+replacing existing ones needs `--overwrite`, and analyze never writes over its inputs.
+The tool still needs the Kerberos dependencies even for offline analysis. The default `--steps all` includes
 unbounded cycle enumeration and exact centrality; choose steps deliberately on
 large graphs. Read the [specification](docs/specs/ado-graph.md) and
 [prioritized findings](docs/backlog/README.md#ado-graph-and-triage-sharing) before using the results.
@@ -244,13 +248,15 @@ The equivalent script invocation is `python scripts/ado_graph.py ...` after inst
 ## Agentic development
 
 The repository includes Claude and Codex role definitions, a per-task backlog,
-provider-neutral tiers and conflict-aware planning. See
+provider-neutral tiers, conflict-aware planning and a merge planner that batches
+ready PRs and turns conflicting ones into trains. See
 [agentic workflow](docs/agentic-workflow.md#codex-setup).
 
 ```bash
 python scripts/backlog.py plan --busy AG-018
 python scripts/agent_profiles.py check
 python scripts/agent_profiles.py route --task AG-004 --role reviewer
+python scripts/merge_plan.py --base origin/main 16=origin/<branch> 20=origin/<branch>
 ```
 
 Codex runtime activation depends on your client; profile parsing alone does not
