@@ -411,3 +411,13 @@ def test_large_report_benchmark(tmp_path):
         f"write {timings['write']:.2f}s, sizing {timings['sizing']:.2f}s"
     )
     assert timings["sizing"] < timings["write"]
+
+
+def test_repeated_column_names_are_checked_and_sized_by_position(tmp_path):
+    # cr_scope_impact without --effort-field repeats Impacted_WI_Count.
+    frame = pd.DataFrame([[1, "x" * 12, 3]], columns=["CR_ID", "Count", "Count"])
+    assert report.excel_overflow(frame) is None
+    assert report._column_widths("s", frame) == [7, 14, 7]
+    output = tmp_path / "report.xlsx"
+    report.write_analysis_report({"cr_scope_impact": frame}, output)
+    assert pd.read_excel(output).shape == (1, 3)

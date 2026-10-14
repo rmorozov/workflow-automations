@@ -188,8 +188,8 @@ def excel_overflow(frame: pd.DataFrame) -> str | None:
         return f"{rows:,} rows with the heading exceed Excel's {EXCEL_MAX_ROWS:,}"
     if columns > EXCEL_MAX_COLUMNS:
         return f"{columns:,} columns exceed Excel's {EXCEL_MAX_COLUMNS:,}"
-    for col in frame.columns:
-        values = frame[col]
+    for position, col in enumerate(frame.columns):
+        values = frame.iloc[:, position]  # by position: step results can repeat a name
         if isinstance(values.dtype, pd.StringDtype):
             lengths = values.str.len()
         elif pd.api.types.is_object_dtype(values):
