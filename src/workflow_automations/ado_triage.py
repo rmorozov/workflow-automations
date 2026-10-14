@@ -7,14 +7,15 @@ previous report, so the whole report pipeline is testable offline.
 """
 
 import argparse
+import json
 import logging
 import os
 import re
 import sys
 import unicodedata
 import zipfile
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,14 @@ class Settings:
     capacity_months: int = 2
     capacity_window: tuple[str, ...] = ()
     profile: str = "full"
+    # From --config: ADO field per canonical name, risk-flag weights, hour bands, RAG.
+    field_names: Mapping[str, str] = field(default_factory=dict)
+    weights: Mapping[str, int] = field(default_factory=dict)
+    quick_win_min_hours: float = 1.0
+    quick_win_max_hours: float = 20.0
+    minor_progress_hours: float = 16.0
+    rag_red_pct: float = RAG_RED_PCT
+    rag_amber_pct: float = RAG_AMBER_PCT
 
     @property
     def timebox_end(self) -> datetime:
@@ -524,7 +533,10 @@ def _display_name(value: Any) -> Any:
 def build_master(snapshot: Snapshot, capacity: dict[str, float], cfg: Settings) -> pd.DataFrame:
     rows = []
     for item in snapshot.items:
-        row = dict(item["fields"])
+        fields = item["fields"]
+        renamed = set(cfg.field_names.values())
+        row = {key: value for key, value in fields.items() if key not in renamed}
+        row.update({canonical: fields.get(name) for canonical, name in cfg.field_names.items()})
         wi_id = item["id"]
         parent = safe_int(row.get(FIELD_PARENT))
         # A missing or null AreaPath is the blank team: groupby would drop NaN keys.
@@ -751,11 +763,13 @@ def _defer_candidate(df: pd.DataFrame, cfg: Settings) -> pd.Series:
 
 
 def _quick_win(df: pd.DataFrame, cfg: Settings) -> pd.Series:
-    return (df[FIELD_COMPLETED_WORK] > 0) & df[FIELD_REMAINING_WORK].between(1, 20)
+    return (df[FIELD_COMPLETED_WORK] > 0) & df[FIELD_REMAINING_WORK].between(
+        cfg.quick_win_min_hours, cfg.quick_win_max_hours
+    )
 
 
 def _minor_progress(df: pd.DataFrame, cfg: Settings) -> pd.Series:
-    return (df[FIELD_COMPLETED_WORK] > 0) & (df[FIELD_COMPLETED_WORK] < 16.0)
+    return (df[FIELD_COMPLETED_WORK] > 0) & (df[FIELD_COMPLETED_WORK] < cfg.minor_progress_hours)
 
 
 HEURISTICS: tuple[Heuristic, ...] = (
@@ -774,6 +788,11 @@ HEURISTICS: tuple[Heuristic, ...] = (
 )
 
 
+def heuristics(cfg: Settings) -> tuple[Heuristic, ...]:
+    """``HEURISTICS`` with the configured weights."""
+    return tuple(replace(h, weight=cfg.weights.get(h.flag, h.weight)) for h in HEURISTICS)
+
+
 def annotate(df: pd.DataFrame, rel: pd.DataFrame, cfg: Settings) -> pd.DataFrame:
     """Add blocks count, risk/opportunity flags, attention score and actions."""
     df = df.copy()
@@ -789,7 +808,7 @@ def annotate(df: pd.DataFrame, rel: pd.DataFrame, cfg: Settings) -> pd.DataFrame
     opportunity = pd.Series("", index=df.index, dtype=object)
     actions = pd.Series("", index=df.index, dtype=object)
     score = np.zeros(len(df), dtype=int)
-    for h in HEURISTICS:
+    for h in heuristics(cfg):
         hit = h.mask(df, cfg).fillna(False).to_numpy(dtype=bool)
         actions = actions + np.where(hit, h.action + "; ", "")
         if h.kind == "risk":
@@ -905,7 +924,7 @@ def view_summary(df, rel, capacity, cfg) -> pd.DataFrame:
     load = (out["Total_Remaining_Work"] / cap.where(cap > 0) * 100).round(1)
     out[COL_LOAD_PCT] = load
     out[COL_RAG] = np.select(
-        [load.isna(), load > RAG_RED_PCT, load >= RAG_AMBER_PCT],
+        [load.isna(), load > cfg.rag_red_pct, load >= cfg.rag_amber_pct],
         ["GREY", "RED", "AMBER"],
         default="GREEN",
     )
@@ -1141,8 +1160,8 @@ SHEETS: tuple[SheetSpec, ...] = (
         view_over_estimate,
     ),
     SheetSpec(
-        "8. Minor Progress (<16h)",
-        "Token progress (<16h logged): possibly stalled or trivially started.",
+        "8. Minor Progress",
+        "Token progress (below the minor-progress hours): possibly stalled or barely started.",
         view_minor_progress,
     ),
     SheetSpec(
@@ -1167,7 +1186,7 @@ SHEETS: tuple[SheetSpec, ...] = (
     ),
     SheetSpec(
         "13. Sunk Cost Quick Wins",
-        "Work invested and 1-20h left. Pull into the sprint and finish.",
+        "Work invested and few hours left (quick-win band). Pull into the sprint and finish.",
         view_quick_wins,
     ),
     SheetSpec(
@@ -1220,6 +1239,7 @@ class Report:
     notes: list[str]
     resolved: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(columns=RESOLVED_COLUMNS))
     team: str | None = None  # set on a per-team report
+    legend: tuple[Heuristic, ...] = HEURISTICS  # flags with the weights that scored them
 
 
 def _assemble(
@@ -1238,7 +1258,7 @@ def _assemble(
         if frame.empty and not spec.always:
             omitted.append(spec.name)
             continue
-        sheets[spec.name] = frame
+        sheets[spec.name] = frame.rename(columns=output_labels(cfg))
     return sheets, omitted
 
 
@@ -1254,7 +1274,8 @@ def build_report(
     master = annotate(build_master(snapshot, capacity, cfg), relations, cfg)
     master, resolved, notes = apply_deltas(master, previous)
     sheets, omitted = _assemble(master, relations, resolved, capacity, cfg)
-    return Report(master, relations, sheets, omitted, [*snapshot.warnings, *notes], resolved)
+    notes = [*snapshot.warnings, *notes]
+    return Report(master, relations, sheets, omitted, notes, resolved, legend=heuristics(cfg))
 
 
 def build_team_reports(
@@ -1294,7 +1315,9 @@ def build_team_reports(
         relations = report.relations[report.relations[REL_COL_SOURCE_ID].isin(rows[FIELD_ID])]
         resolved = report.resolved[resolved_team == team]
         sheets, omitted = _assemble(rows, relations, resolved, capacity, cfg)
-        teams[team] = Report(rows, relations, sheets, omitted, list(report.notes), resolved, team)
+        teams[team] = Report(
+            rows, relations, sheets, omitted, list(report.notes), resolved, team, report.legend
+        )
     return teams, notes
 
 
@@ -1363,7 +1386,7 @@ def _write_config(writer: pd.ExcelWriter, report: Report, meta: dict[str, str]) 
     rows += [("Warning", note) for note in report.notes]
     settings = pd.DataFrame(rows, columns=["Setting", "Value"])
     legend = pd.DataFrame(
-        [(h.flag, h.kind, h.weight, h.action) for h in HEURISTICS],
+        [(h.flag, h.kind, h.weight, h.action) for h in report.legend],
         columns=["Flag", "Kind", "Weight", "Recommended Action"],
     )
     purpose = "How this report was produced: inputs, thresholds, omissions, warnings, legend."
@@ -1417,6 +1440,114 @@ def publish_all(targets: Sequence[tuple[Path, Callable[[Path], None]]], overwrit
 
 
 # ---------------------------------------------------------------------------
+# JSON configuration (--config)
+# ---------------------------------------------------------------------------
+
+CONFIG_FIELDS = {
+    "estimation_expected_date": FIELD_EST_EXPECTED,
+    "estimation_ready_date": FIELD_EST_READY,
+    "uat_expected_date": FIELD_UAT_EXPECTED,
+    "uat_ready_date": FIELD_UAT_READY,
+    "original_estimate": FIELD_ORIGINAL_ESTIMATE,
+    "completed_work": FIELD_COMPLETED_WORK,
+    "remaining_work": FIELD_REMAINING_WORK,
+}
+FIXED_FIELDS = (
+    FIELD_ID,
+    FIELD_PARENT,
+    FIELD_WI_TYPE,
+    FIELD_AREA_PATH,
+    FIELD_STATE,
+    FIELD_TITLE,
+    FIELD_ASSIGNED_TO,
+    FIELD_CHANGED_DATE,
+)
+CONFIG_HOURS = {
+    "quick_win_min": "quick_win_min_hours",
+    "quick_win_max": "quick_win_max_hours",
+    "minor_progress_below": "minor_progress_hours",
+}
+CONFIG_RAG = {"red_above_pct": "rag_red_pct", "amber_from_pct": "rag_amber_pct"}
+
+
+def _config_section(config: dict[str, Any], key: str, allowed: Sequence[str]) -> dict[str, Any]:
+    section = config.get(key, {})
+    if not isinstance(section, dict):
+        raise TriageError(f"config '{key}' must be an object")
+    unknown = sorted(set(section) - set(allowed))
+    if unknown:
+        raise TriageError(f"config '{key}' has unknown keys {unknown}; known: {sorted(allowed)}")
+    return section
+
+
+def _config_number(section: str, key: str, value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float) or not np.isfinite(value):
+        raise TriageError(f"config '{section}.{key}' must be a finite number, got {value!r}")
+    if value < 0:
+        raise TriageError(f"config '{section}.{key}' must not be negative, got {value!r}")
+    return float(value)
+
+
+def load_config(path: Path) -> dict[str, Any]:
+    """Read ``--config`` into ``Settings`` keyword arguments, validating everything."""
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise TriageError(f"--config {path}: cannot read ({exc})") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TriageError(f"--config {path}: not valid JSON ({exc})") from exc
+    if not isinstance(config, dict):
+        raise TriageError(f"--config {path}: top level must be a JSON object")
+    unknown = sorted(set(config) - {"fields", "hours", "weights", "rag"})
+    if unknown:
+        raise TriageError(f"--config {path}: unknown keys {unknown}")
+
+    out: dict[str, Any] = {}
+    fields = _config_section(config, "fields", list(CONFIG_FIELDS))
+    names = {}
+    for key, name in fields.items():
+        if not isinstance(name, str) or not name.strip():
+            raise TriageError(f"config 'fields.{key}' must be a non-empty field reference name")
+        names[CONFIG_FIELDS[key]] = name.strip()
+    effective = [names.get(canonical, canonical) for canonical in CONFIG_FIELDS.values()]
+    clashes = sorted(
+        {n for n in effective if effective.count(n) > 1 or n in FIXED_FIELDS} & set(names.values())
+    )
+    if clashes:
+        raise TriageError(f"config 'fields' maps several fields to {clashes}")
+    out["field_names"] = {c: n for c, n in names.items() if n != c}
+
+    hours = _config_section(config, "hours", list(CONFIG_HOURS))
+    for key, value in hours.items():
+        out[CONFIG_HOURS[key]] = _config_number("hours", key, value)
+    low = out.get("quick_win_min_hours", Settings.quick_win_min_hours)
+    high = out.get("quick_win_max_hours", Settings.quick_win_max_hours)
+    if low > high:
+        raise TriageError(f"config 'hours': quick_win_min {low:g} exceeds quick_win_max {high:g}")
+
+    risk_flags = [h.flag for h in HEURISTICS if h.kind == "risk"]
+    weights = _config_section(config, "weights", risk_flags)
+    for flag, weight in weights.items():
+        if isinstance(weight, bool) or not isinstance(weight, int) or weight < 0:
+            raise TriageError(f"config 'weights.{flag}' must be a non-negative integer")
+    out["weights"] = dict(weights)
+
+    rag = _config_section(config, "rag", list(CONFIG_RAG))
+    for key, value in rag.items():
+        out[CONFIG_RAG[key]] = _config_number("rag", key, value)
+    amber = out.get("rag_amber_pct", RAG_AMBER_PCT)
+    red = out.get("rag_red_pct", RAG_RED_PCT)
+    if amber > red:
+        raise TriageError(f"config 'rag': amber_from_pct {amber:g} exceeds red_above_pct {red:g}")
+    return out
+
+
+def output_labels(cfg: Settings) -> dict[str, str]:
+    """Column renames that show configured ADO field names in the written report."""
+    return dict(cfg.field_names)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1449,6 +1580,9 @@ def parser() -> argparse.ArgumentParser:
     ex.add_argument("--timebox-days", type=int, default=60)
     ex.add_argument("--as-of", help="Report date YYYY-MM-DD (default: today)")
     ex.add_argument(
+        "--config", type=Path, help="JSON file: field names, hour bands, flag weights, RAG bands"
+    )
+    ex.add_argument(
         "--team-dir",
         type=Path,
         help="Also write one report per team into this directory (<output stem>.<team>.<ext>)",
@@ -1467,6 +1601,7 @@ def _settings(args: argparse.Namespace) -> Settings:
             raise TriageError(f"--as-of must be YYYY-MM-DD, got {args.as_of!r}") from exc
     else:
         as_of = datetime.now().replace(microsecond=0)
+    configured = load_config(args.config) if args.config else {}
     window = (
         target_months(args.capacity_start_month, args.capacity_months, as_of)
         if args.capacity_file
@@ -1481,6 +1616,7 @@ def _settings(args: argparse.Namespace) -> Settings:
         capacity_months=args.capacity_months,
         capacity_window=window,
         profile=args.profile,
+        **configured,
     )
 
 
@@ -1512,7 +1648,7 @@ def run_export(args: argparse.Namespace) -> Report:
     replay = _replay_source(args)
     cfg = _settings(args)
     output = args.output.resolve()
-    for name in ("capacity_file", "previous_file", "from_snapshot"):
+    for name in ("capacity_file", "previous_file", "from_snapshot", "config"):
         source = getattr(args, name)
         if source is not None and source.resolve() == output:
             raise TriageError(f"--output must differ from --{name.replace('_', '-')}")
@@ -1569,12 +1705,19 @@ def run_export(args: argparse.Namespace) -> Report:
         "Agenda size": str(cfg.agenda_size),
         "Stale threshold (days)": str(cfg.stale_days),
         "Timebox (days)": str(cfg.timebox_days),
-        "RAG (Load_Pct)": f"RED > {RAG_RED_PCT:g}, AMBER >= {RAG_AMBER_PCT:g}, else GREEN",
+        "Config file": str(args.config or "(none)"),
+        "Quick win (remaining hours)": (f"{cfg.quick_win_min_hours:g}-{cfg.quick_win_max_hours:g}"),
+        "Minor progress (completed hours)": f"< {cfg.minor_progress_hours:g}",
+        "RAG (Load_Pct)": (
+            f"RED > {cfg.rag_red_pct:g}, AMBER >= {cfg.rag_amber_pct:g}, else GREEN"
+        ),
     }
+    for canonical, name in cfg.field_names.items():
+        meta[f"Field {canonical}"] = name
 
     def writer(part: Report) -> Callable[[Path], None]:
         if args.format == "csv":
-            return lambda p: part.master.to_csv(p, index=False)
+            return lambda p: part.master.rename(columns=output_labels(cfg)).to_csv(p, index=False)
         return lambda p: write_excel(p, part, meta)
 
     parts = [(args.output, report), *((targets[t], r) for t, r in teams.items())]
