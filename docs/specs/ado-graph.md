@@ -6,9 +6,9 @@ limitations not yet addressed stay listed here and in the backlog.
 
 Entry points after installation: `ado-graph`, `python scripts/ado_graph.py`, and
 `python -m workflow_automations.ado_graph`. Argument help retains `prog=ado_tool`.
-Install the `ado-graph` extra. All dependencies, including Kerberos, are imported
-at module startup, even for `--help` and offline `analyze`. Linux installations may
-need system Kerberos headers (`libkrb5-dev`) to build dependencies.
+Install the `ado-graph` extra for export, or only `ado-graph-analyze` for offline
+analysis (see below). Linux installations of `ado-graph` may need system Kerberos
+headers (`libkrb5-dev`) to build dependencies.
 
 ## Purpose and boundaries
 
@@ -18,6 +18,14 @@ query, traverses selected work-item relations, and writes node/edge tables.
 analysis sheets. Neither mode modifies ADO. Analysis makes no service calls.
 The tool is independent of `ado-triage`; it does not compute capacity, attention
 scores, RAG bands, or triage decisions.
+
+Analysis and `--help` need only the `ado-graph-analyze` extra (pandas, openpyxl,
+NetworkX, PyArrow). The ADO SDK, msrest, Kerberos, certifi and tqdm are in the
+`ado-graph` extra and load only when `export` runs; without them `export` exits 2
+before any work, naming the extra. Importing the package configures neither root
+logging nor certificates. Export sets `REQUESTS_CA_BUNDLE` to a merged temporary
+bundle while it runs, then deletes the bundle and restores the previous setting,
+also when export fails.
 
 ## Export CLI
 
@@ -74,6 +82,14 @@ missing rather than filtered. Rejected IDs are sent to one more WIQL query witho
 filters; only those it returns are pruned. The rest are fetched, so the batch fetch
 reports them as omitted. If that existence query fails, all rejected IDs of the chunk
 are fetched and filtered after fetch.
+
+Project and type names enter WIQL only as string literals with each `'` doubled, so
+apostrophes, `ORDER BY` or brackets in a name cannot change the query. Every WIQL ID
+query is paged by ascending ID (`[System.Id] > <last> ORDER BY [System.Id] ASC`, up to
+20,000 rows per page) until a page comes back short, so no result is cut at the
+server limit. A page that returns an ID at or below the previous page's highest
+raises instead of looping; for a filter query this is a failed chunk, handled as
+above.
 
 IDs requested but not returned by ADO (deleted or inaccessible) are counted as
 omitted and are not retried. They are split the way `ado-triage` separates core items
@@ -285,9 +301,8 @@ step, so nothing is written.
 
 Analysis writes requested sheets, no index, with widths capped at 50. `all` runs
 every step within the budgets above.
-Width sizing walks every written cell in Python. Unpacked/cycle outputs have no
-preflight check against Excel's 1,048,576-row limit (including the header), so a
-large result may fail after all graph computation and leave a partial workbook.
+Excel limits and column sizing are described under
+[Files, errors and current limitations](#files-errors-and-current-limitations).
 
 ## Files, errors and current limitations
 
@@ -312,12 +327,34 @@ and input collisions). Text beginning with `=` can be
 written as an Excel formula by pandas/openpyxl; arbitrary identity/datetime field
 objects may fail serialization.
 
+Excel limits are checked before anything is written: at most 1,048,576 rows
+including the heading, 16,384 columns and 32,767 characters of text in a cell.
+An export that requests `excel` with a Nodes or Edges sheet over a limit raises
+`ExcelLimitError` (a `ValueError`) naming the sheet and limit, and writes none of
+the requested formats; Parquet and CSV have no such limit. Analyze instead writes
+each oversized sheet (typically `cr_impact_unpacked`, `cr_prereqs_unpacked` or
+`cycles` on large graphs) to `<report stem>.<sheet>.csv` next to the workbook, in
+the same atomic bundle, and that sheet holds one pointer row (`Spilled_To`,
+`Rows`, `Columns`, `Reason`). `--overwrite` names only the report, so a spill
+file is replaced only together with an existing report; a spill path that exists
+without its report fails with `FileExistsError` before anything is written. A spill
+file from an earlier run that this run does not spill is left as is. Step names longer than 31 characters are truncated to Excel's sheet-name
+limit. Column widths come from the heading and at most 1,000 evenly spaced rows
+(first and last included), capped at 50 characters, so sizing cost does not grow
+with sheet length; a column whose values cannot be rendered as text keeps the
+default width and is logged as a warning. The final log line reports the seconds
+spent writing (including the workbook save) and sizing; `ADO_GRAPH_BENCH=1 pytest -s -k benchmark
+tests/ado_graph/test_report.py` prints graph compute, write and sizing time for a
+synthetic chain (`ADO_GRAPH_BENCH_NODES`, default 5,000).
+
 ## Verification and next steps
 
 Tests use synthetic SDK-like objects and Parquet/XLSX files: CLI help and argument
 validation, saved-query result shapes, edge normalization, scope/prerequisite
 orientation, report publication, traversal through filtered bridges in both
-relation modes, once-per-ID WIQL classification, omitted-ID reporting, bridge
-contraction, and export normalization (literal Excel text, identities, zoned dates,
-empty exports and schema errors) across all formats. No actual ADO server was used. Remaining fixes and shared-code
-opportunities with ADO scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).
+relation modes, once-per-ID WIQL classification, omitted-ID reporting with
+export's exit codes 4 and 5, bridge contraction, export normalization (literal
+Excel text, identities, zoned dates, empty exports and schema errors) across all
+formats, offline analysis without the network extras, and CA-bundle cleanup. No
+actual ADO server was used. Remaining fixes and shared-code opportunities with ADO
+scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).

@@ -1,4 +1,9 @@
-"""ADO access: CA bundle, Kerberos-authenticated SDK client and WIQL builders."""
+"""ADO access: CA bundle, Kerberos-authenticated SDK client and WIQL builders.
+
+The constants are importable without the network extras. The SDK, Kerberos and
+certifi are imported only when a bundle or client is built, so `analyze` and
+`--help` run with the offline `ado-graph-analyze` extra alone.
+"""
 
 from __future__ import annotations
 
@@ -6,18 +11,11 @@ import logging
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
+from importlib import import_module
 from pathlib import Path
 from typing import Any
-
-import certifi
-from azure.devops.connection import Connection
-from azure.devops.v7_0.work_item_tracking.models import (
-    TeamContext,
-    Wiql,
-    WorkItemBatchGetRequest,
-)
-from msrest.authentication import KerberosAuthentication
-from requests_kerberos import OPTIONAL
 
 # ADO_BATCH_LIMIT is re-exported for the CLI and export modules.
 from workflow_automations.ado_common.query import ADO_BATCH_LIMIT as ADO_BATCH_LIMIT
@@ -84,6 +82,22 @@ DEFAULT_SKIP_TYPES: tuple[str, ...] = (
 )
 
 
+# Modules of the network extra that this module imports lazily.
+NETWORK_MODULES: tuple[str, ...] = (
+    "certifi",
+    "azure.devops.connection",
+    "azure.devops.v7_0.work_item_tracking.models",
+    "msrest.authentication",
+    "requests_kerberos",
+)
+
+
+def import_network_modules() -> None:
+    """Import the network dependencies now, so a missing extra fails before any work."""
+    for name in NETWORK_MODULES:
+        import_module(name)
+
+
 # ---------------------------------------------------------------------------
 # Certificate helpers
 # ---------------------------------------------------------------------------
@@ -95,37 +109,73 @@ def build_merged_ca_bundle(cert_dir: str | None) -> str:
       1. All certificates from certifi's default bundle.
       2. Every *.pem / *.crt file found (recursively) under *cert_dir*.
 
-    Returns the path to the merged temp file (lives for the process lifetime).
+    Returns the path to the merged temp file; the caller deletes it.  A failed
+    build deletes its partial file.
     """
+    import certifi
+
     tmp = tempfile.NamedTemporaryFile(prefix="ado_ca_bundle_", suffix=".pem", delete=False)
-    shutil.copyfile(certifi.where(), tmp.name)
-    log.info("Merged CA bundle initialised from certifi (%s).", certifi.where())
-
-    if cert_dir:
-        cert_path = Path(cert_dir)
-        if not cert_path.is_dir():
-            log.warning("--cert-dir '%s' is not a directory – skipping custom certs.", cert_dir)
-        else:
-            added = 0
-            for pattern in ("**/*.pem", "**/*.crt"):
-                for cert_file in sorted(cert_path.glob(pattern)):
-                    with open(tmp.name, "ab") as fh:
-                        fh.write(b"\n")
-                        fh.write(cert_file.read_bytes())
-                    log.debug("  + appended cert: %s", cert_file)
-                    added += 1
-            log.info("Appended %d custom certificate file(s) from '%s'.", added, cert_dir)
-
     tmp.close()
+    try:
+        shutil.copyfile(certifi.where(), tmp.name)
+        log.info("Merged CA bundle initialised from certifi (%s).", certifi.where())
+
+        if cert_dir:
+            cert_path = Path(cert_dir)
+            if not cert_path.is_dir():
+                log.warning("--cert-dir '%s' is not a directory – skipping custom certs.", cert_dir)
+            else:
+                added = 0
+                for pattern in ("**/*.pem", "**/*.crt"):
+                    for cert_file in sorted(cert_path.glob(pattern)):
+                        with open(tmp.name, "ab") as fh:
+                            fh.write(b"\n")
+                            fh.write(cert_file.read_bytes())
+                        log.debug("  + appended cert: %s", cert_file)
+                        added += 1
+                log.info("Appended %d custom certificate file(s) from '%s'.", added, cert_dir)
+    except BaseException:
+        Path(tmp.name).unlink(missing_ok=True)
+        raise
     return tmp.name
 
 
+# Bundles built by configure_ca_bundle that ca_bundle_scope has not cleaned up yet.
+_built_bundles: list[str] = []
+
+
 def configure_ca_bundle(cert_dir: str | None) -> str:
-    """Build the merged bundle, point REQUESTS_CA_BUNDLE at it, return path."""
+    """Build the merged bundle, point REQUESTS_CA_BUNDLE at it, return path.
+
+    Call it inside ca_bundle_scope(), which deletes the bundle and restores the
+    previous REQUESTS_CA_BUNDLE afterwards.
+    """
     bundle_path = build_merged_ca_bundle(cert_dir)
+    _built_bundles.append(bundle_path)
     os.environ["REQUESTS_CA_BUNDLE"] = bundle_path
     log.info("REQUESTS_CA_BUNDLE → %s", bundle_path)
     return bundle_path
+
+
+@contextmanager
+def ca_bundle_scope() -> Iterator[None]:
+    """Undo configure_ca_bundle calls made inside the block, also on failure.
+
+    Restores REQUESTS_CA_BUNDLE to its previous value (or unsets it) and deletes
+    the merged bundles built inside the block.
+    """
+    previous = os.environ.get("REQUESTS_CA_BUNDLE")
+    start = len(_built_bundles)
+    try:
+        yield
+    finally:
+        for path in _built_bundles[start:]:
+            Path(path).unlink(missing_ok=True)
+        del _built_bundles[start:]
+        if previous is None:
+            os.environ.pop("REQUESTS_CA_BUNDLE", None)
+        else:
+            os.environ["REQUESTS_CA_BUNDLE"] = previous
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +196,10 @@ class ADOClient:
     """
 
     def __init__(self, base_url: str) -> None:
+        from azure.devops.connection import Connection
+        from msrest.authentication import KerberosAuthentication
+        from requests_kerberos import OPTIONAL
+
         self.base_url = base_url.rstrip("/")
         credentials = KerberosAuthentication(mutual_authentication=OPTIONAL)
         self._connection = Connection(base_url=self.base_url, creds=credentials)
@@ -169,6 +223,8 @@ class ADOClient:
         Handles both flat-list results (.work_items) and tree/link results
         (.work_item_relations) transparently.
         """
+        from azure.devops.v7_0.work_item_tracking.models import TeamContext
+
         team_context = TeamContext(project=project) if project else None
         result = self.wit.query_by_id(id=query_id, team_context=team_context)
 
@@ -191,20 +247,19 @@ class ADOClient:
 
         # Process in chunks of 1000 to avoid exceeding WIQL string length limits
         for chunk in chunks(ids, WIQL_FILTER_CHUNK):
-            wiql = _wiql_ids(chunk)
+            where = _wiql_ids(chunk)
 
             # System.TeamProject is the native, fully indexed way to filter projects
-            # Note: WIQL escapes single quotes by doubling them ('')
             if include_projects:
-                projs = ", ".join("'{}'".format(p.replace("'", "''")) for p in include_projects)
-                wiql += f" AND [System.TeamProject] IN ({projs})"
+                projs = ", ".join(map(wiql_string, sorted(include_projects)))
+                where += f" AND [System.TeamProject] IN ({projs})"
 
             if skip_types:
-                types = ", ".join("'{}'".format(t.replace("'", "''")) for t in skip_types)
-                wiql += f" AND [System.WorkItemType] NOT IN ({types})"
+                types = ", ".join(map(wiql_string, sorted(skip_types)))
+                where += f" AND [System.WorkItemType] NOT IN ({types})"
 
             try:
-                accepted = self._query_ids(wiql)
+                accepted = self._query_ids(where)
             except Exception as e:
                 log.warning("WIQL filter chunk failed (skipping filter for chunk): %s", e)
                 # Fallback: assume all are valid if query fails, BFS will handle them natively
@@ -226,9 +281,32 @@ class ADOClient:
 
         return valid_ids
 
-    def _query_ids(self, wiql: str) -> set[int]:
-        res = self.wit.query_by_wiql(wiql=Wiql(query=wiql), top=ADO_WIQL_PAGE)
-        return {ref.id for ref in res.work_items or []}
+    def _query_ids(self, where: str) -> set[int]:
+        """IDs of the work items matching the WIQL condition *where*.
+
+        query_by_wiql returns at most ADO_WIQL_PAGE rows, so the query is paged
+        by ascending ID: each page asks for IDs above the last page's highest.
+        The query text is built here, so the keyset clause never has to be
+        spliced into caller WIQL.  A page that does not advance past the
+        previous one raises instead of looping or returning a truncated set.
+        """
+        from azure.devops.v7_0.work_item_tracking.models import Wiql
+
+        ids: set[int] = set()
+        last = 0
+        while True:
+            wiql = (
+                f"SELECT [System.Id] FROM WorkItems WHERE ({where})"
+                f" AND [System.Id] > {last} ORDER BY [System.Id] ASC"
+            )
+            res = self.wit.query_by_wiql(wiql=Wiql(query=wiql), top=ADO_WIQL_PAGE)
+            page = [ref.id for ref in res.work_items or []]
+            if any(wi_id <= last for wi_id in page):
+                raise RuntimeError(f"WIQL page after ID {last} did not advance")
+            ids.update(page)
+            if len(page) < ADO_WIQL_PAGE:
+                return ids
+            last = max(page)
 
     # ------------------------------------------------------------------
     # Batch work-item fetch (fields + relations)
@@ -241,6 +319,8 @@ class ADOClient:
         """
         if not ids:
             return []
+        from azure.devops.v7_0.work_item_tracking.models import WorkItemBatchGetRequest
+
         request = WorkItemBatchGetRequest(ids=ids, expand="Relations", error_policy="Omit")
         return self.wit.get_work_items_batch(request) or []
 
@@ -250,6 +330,11 @@ class ADOClient:
         return [f.reference_name for f in (fields or [])]
 
 
+def wiql_string(value: str) -> str:
+    """Quote *value* as a WIQL string literal; WIQL escapes ' by doubling it."""
+    return "'{}'".format(value.replace("'", "''"))
+
+
 def _wiql_ids(ids: list[int]) -> str:
     id_list = ",".join(map(str, ids))
-    return f"SELECT [System.Id] FROM WorkItems WHERE [System.Id] IN ({id_list})"
+    return f"[System.Id] IN ({id_list})"
