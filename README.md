@@ -226,3 +226,18 @@ unbounded cycle enumeration and exact centrality; choose steps deliberately on
 large graphs. Read the [specification](docs/specs/ado-graph.md) and
 [prioritized findings](docs/backlog/README.md#ado-graph-and-triage-sharing) before using the results.
 The equivalent script invocation is `python scripts/ado_graph.py ...` after installation.
+
+## Agentic development
+
+The repository includes Claude and Codex role definitions, a per-task backlog,
+provider-neutral tiers and conflict-aware planning. See
+[agentic workflow](docs/agentic-workflow.md#codex-setup).
+
+```bash
+python scripts/backlog.py plan --busy AG-018
+python scripts/agent_profiles.py check
+python scripts/agent_profiles.py route --task AG-004 --role reviewer
+```
+
+Codex runtime activation depends on your client; profile parsing alone does not
+verify model routing. RW-003 tracks real-client probes and the initial pilots.

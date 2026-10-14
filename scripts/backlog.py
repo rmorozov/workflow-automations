@@ -23,10 +23,9 @@ from pathlib import Path
 
 BACKLOG = Path(__file__).resolve().parent.parent / "docs" / "backlog"
 ID_RE = re.compile(r"^[A-Z]{2}-\d{3}$")
-REQUIRED = ("id", "title", "tool", "priority", "depends_on", "touches", "model", "effort")
+REQUIRED = ("id", "title", "tool", "priority", "depends_on", "touches", "tier")
 PRIORITIES = ("P1", "P2", "P3")
-MODELS = ("haiku", "sonnet", "opus", "fable")
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
+TIERS = ("mechanical", "routine", "complex", "deep")
 
 
 @dataclass(frozen=True)
@@ -45,8 +44,7 @@ class Task:
     priority: str
     depends_on: tuple[str, ...]
     touches: tuple[str, ...]
-    model: str
-    effort: str
+    tier: str
     path: Path
     spans: tuple[Touch, ...] = ()
 
@@ -133,8 +131,7 @@ def load_task(path: Path, root: Path | None = None) -> Task:
         priority=str(fields["priority"]),
         depends_on=tuple(fields["depends_on"]),
         touches=tuple(fields["touches"]),
-        model=str(fields["model"]),
-        effort=str(fields["effort"]),
+        tier=str(fields["tier"]),
         path=path,
     )
     problems = []
@@ -142,10 +139,8 @@ def load_task(path: Path, root: Path | None = None) -> Task:
         problems.append(f"id {task.id!r} must look like AG-001 and match the file name")
     if task.priority not in PRIORITIES:
         problems.append(f"priority must be one of {PRIORITIES}")
-    if task.model not in MODELS:
-        problems.append(f"model must be one of {MODELS}")
-    if task.effort not in EFFORTS:
-        problems.append(f"effort must be one of {EFFORTS}")
+    if task.tier not in TIERS:
+        problems.append(f"tier must be one of {TIERS}")
     if not task.touches:
         problems.append("touches must name at least one path")
     if task.id in task.depends_on or any(not ID_RE.match(d) for d in task.depends_on):
@@ -265,7 +260,7 @@ def plan(tasks: dict[str, Task], busy: set[str]) -> list[list[Task]]:
 
 def _row(task: Task) -> str:
     deps = ",".join(task.depends_on) or "-"
-    tier = f"{task.model}/{task.effort}"
+    tier = task.tier
     return f"{task.id}  {task.priority}  {tier:<13}  deps={deps:<16} {task.title}"
 
 

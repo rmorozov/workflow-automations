@@ -1,6 +1,6 @@
 ---
 name: task-planner
-description: Turns one docs/backlog task file into an implementation plan with the exact files it will touch. Use before implementing a P1 task, any task whose model is opus, or when two ready tasks might conflict. Read-only.
+description: Turns one docs/backlog task file into an implementation plan with the exact files it will touch. Use before implementing a P1 task, any task whose tier is complex or deep, or when two ready tasks might conflict. Read-only.
 tools: Read, Grep, Glob, Bash
 model: opus
 effort: high
