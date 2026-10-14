@@ -13,13 +13,13 @@ from typing import Any
 import pandas as pd
 
 from workflow_automations.ado_common.relations import GRAPH
+from workflow_automations.ado_common.session import ca_bundle
 from workflow_automations.ado_common.snapshot import SnapshotError, save_snapshot, utc_timestamp
 from workflow_automations.ado_graph.client import (
     ADO_BATCH_LIMIT,
     FIELD_RENAME,
     WIQL_FILTER_CHUNK,
     ADOClient,
-    configure_ca_bundle,
 )
 from workflow_automations.ado_graph.report import _export_dataframes
 
@@ -344,13 +344,20 @@ def _prune_queue_via_wiql(
 
 
 def run_export(args: argparse.Namespace) -> None:
-    """Entry point for `export` mode."""
-    # tqdm is in the ado-graph extra only; replay imports this module offline.
-    from tqdm import tqdm
+    """Entry point for `export` mode.
 
+    The merged CA bundle exists only while the export runs and is given to the
+    client alone; the process environment is not changed.
+    """
     # 1. Certificate setup
     cert_dir = getattr(args, "cert_dir", None) or os.environ.get("ADO_CERT_DIR")
-    configure_ca_bundle(cert_dir)
+    with ca_bundle(cert_dir) as bundle:
+        _run_export(args, bundle)
+
+
+def _run_export(args: argparse.Namespace, bundle: str | None) -> None:
+    # tqdm is in the ado-graph extra only; replay imports this module offline.
+    from tqdm import tqdm
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -366,7 +373,7 @@ def run_export(args: argparse.Namespace) -> None:
     if include_projects:
         log.info("Project filter active – including only: %s", ", ".join(sorted(include_projects)))
 
-    client = ADOClient(args.ado_url)
+    client = ADOClient(args.ado_url, ca_bundle=bundle)
     project = args.project or ""
     batch_size = min(args.batch_size, ADO_BATCH_LIMIT)
 

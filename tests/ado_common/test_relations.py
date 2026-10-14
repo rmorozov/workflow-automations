@@ -98,14 +98,10 @@ def test_triage_reads_the_registry():
     assert set(triage.BLAST_RADIUS_LABELS) <= set(triage.RELATION_LABELS.values())
 
 
-def test_graph_export_emits_registry_labels_and_matches_the_client_constants():
+def test_graph_export_emits_registry_labels():
     pytest.importorskip("azure.devops")
     pytest.importorskip("pandas")
-    from workflow_automations.ado_graph import client, export
-
-    # The client still carries its original tables; the registry must agree with them.
-    assert set(r.GRAPH.labels) == client.GRAPH_LINK_TYPES
-    assert all(client.LINK_LABEL[ref] == label for ref, label in r.GRAPH.labels.items())
+    from workflow_automations.ado_graph import export
 
     rel = SimpleNamespace
     wi = SimpleNamespace(

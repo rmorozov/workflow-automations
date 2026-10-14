@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from contextlib import nullcontext
 from datetime import datetime
 from importlib.metadata import version
 from types import SimpleNamespace
@@ -77,7 +78,7 @@ def run(argv, expected_exit=None):
 def use_client(monkeypatch, items=GRAPH, seeds=SEEDS, rejected=()):
     fake, log = fake_client(items, seeds, rejected)
     monkeypatch.setattr(export, "ADOClient", fake)
-    monkeypatch.setattr(export, "configure_ca_bundle", lambda _path: None)
+    monkeypatch.setattr(export, "ca_bundle", lambda _dir: nullcontext())
     return log
 
 
@@ -207,7 +208,7 @@ def test_snapshot_created_during_the_export_is_replaced(monkeypatch, tmp_path):
             return super().run_query_by_id(project, query)
 
     monkeypatch.setattr(export, "ADOClient", Racing)
-    monkeypatch.setattr(export, "configure_ca_bundle", lambda _path: None)
+    monkeypatch.setattr(export, "ca_bundle", lambda _dir: nullcontext())
     run(export_argv(tmp_path / "out", "--save-snapshot", str(path)), export.EXIT_INCOMPLETE)
     assert load_snapshot(path).roots == SEEDS
 
