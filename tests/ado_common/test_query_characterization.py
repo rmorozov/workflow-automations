@@ -11,10 +11,12 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from workflow_automations import ado_triage as triage
-from workflow_automations.ado_graph import client as graph
-
 azure_connection = pytest.importorskip("azure.devops.connection")
+pytest.importorskip("pandas")
+pytest.importorskip("openpyxl")
+
+from workflow_automations import ado_triage as triage  # noqa: E402
+from workflow_automations.ado_graph import client as graph  # noqa: E402
 
 
 def ref(wi_id):

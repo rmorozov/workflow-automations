@@ -248,7 +248,7 @@ def fetch_snapshot(base_url: str, query_id: str) -> Snapshot:
 
         logger.info("Executing query %s", query_id)
         result = client.query_by_id(id=query_id)
-        # Tree and one-hop queries return links; flat queries return items.
+        # Tree and one-hop queries return links; flat queries return items. Take both.
         all_ids = set(query_result_ids(result))
         if not all_ids:
             raise EmptyQueryError(f"Query {query_id} returned no work items")
