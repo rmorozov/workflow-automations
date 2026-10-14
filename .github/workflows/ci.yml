@@ -69,3 +69,34 @@ jobs:
           python -m workflow_automations.ado_graph --help
           ado-triage --help
           python -m workflow_automations.ado_triage --help
+
+  offline-analysis:
+    # ado-graph analyze must install and run without the ADO SDK or Kerberos headers.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install '.[ado-graph-analyze]'
+      - name: Analyze synthetic tables with no network extras installed
+        run: |
+          cd "$(mktemp -d)"
+          if python -c 'import azure.devops' 2>/dev/null; then exit 1; fi
+          if python -c 'import requests_kerberos' 2>/dev/null; then exit 1; fi
+          ado-graph --help
+          ado-graph analyze --help
+          python -c '
+          import pandas as pd
+          pd.DataFrame({"WI_ID": [1, 2], "Title": ["A", "B"], "WorkItemType": ["Feature"] * 2}).to_parquet("nodes.parquet")
+          pd.DataFrame({"Source_ID": [1], "Target_ID": [2], "Link_Type": ["Parent->Child"]}).to_parquet("edges.parquet")
+          '
+          ado-graph analyze --nodes-file nodes.parquet --edges-file edges.parquet --output-file report.xlsx
+          test -s report.xlsx
+          set +e
+          ado-graph export --ado-url https://ado.example --query-id synthetic 2> export.err
+          status=$?
+          set -e
+          cat export.err
+          test "$status" -eq 2 && grep -q "needs the 'ado-graph' extra" export.err
