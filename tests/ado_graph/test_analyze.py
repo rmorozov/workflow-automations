@@ -258,24 +258,26 @@ def test_steps_name_their_subgraph_and_sheet(tmp_path, caplog):
     analyzer.df_nodes.to_parquet(node_file, index=False)
     analyzer.df_edges.to_parquet(edge_file, index=False)
     output = tmp_path / "report.xlsx"
-    with caplog.at_level("WARNING", logger="ado_tool"):
-        tool.main(
-            [
-                "analyze",
-                "--nodes-file",
-                str(node_file),
-                "--edges-file",
-                str(edge_file),
-                "--output-file",
-                str(output),
-                "--steps",
-                "cr_prereqs, CR_Prereqs@All,cr_prereqs_unpacked@dependency,scc@typo,nope",
-            ]
-        )
+    tool.main(
+        [
+            "analyze",
+            "--nodes-file",
+            str(node_file),
+            "--edges-file",
+            str(edge_file),
+            "--output-file",
+            str(output),
+            "--steps",
+            "cr_prereqs, CR_Prereqs@All,cr_prereqs_unpacked@dependency",
+        ]
+    )
     sheets = pd.read_excel(output, sheet_name=None)
     assert list(sheets) == ["cr_prereqs", "cr_prereqs@all", "cr_prereqs_unpacked@dependency"]
     assert ids(sheets["cr_prereqs"].iloc[0]["Prerequisite_WI_IDs"]) == {4}
     assert ids(sheets["cr_prereqs@all"].iloc[0]["Prerequisite_WI_IDs"]) == {3, 4}
+    # The command line rejects these first (test_cli); the parser alone skips them.
+    with caplog.at_level("WARNING", logger="ado_tool"):
+        assert analyze.parse_steps("scc@typo,nope") == []
     assert "Unknown subgraph in 'scc@typo'" in caplog.text
     assert "Unknown analysis step 'nope'" in caplog.text
 

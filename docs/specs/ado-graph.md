@@ -37,7 +37,7 @@ also when export fails.
 | `--batch-size` | Default 200; upper-clamped to 200; values below 1 are rejected before any service call |
 | `--cert-dir` | Corporate certificate directory; falls back to `ADO_CERT_DIR` |
 | `--output-dir` | Default `./output`; directory created |
-| `--formats` | Comma-separated `parquet,excel,csv` by default; unknown names logged/skipped |
+| `--formats` | Comma-separated `parquet,excel,csv` by default; case-insensitive, repeats and empty entries ignored; an unknown name, or none, exits 2 before any service call or file creation (also for `replay`) |
 | `--skip-types` | Case-insensitive comma list of types marked out of scope; empty string disables |
 | `--include-projects` | Case-insensitive comma list of projects kept in scope; empty means all |
 | `--filtered-relations` | `stop` (default) or `follow`; whether relations of filtered items are traversed |
@@ -201,14 +201,16 @@ comma-separated list). A step may name its subgraph as `step@subgraph`, for exam
 `cycles@dependency`; its sheet is then named `step@subgraph`, lowercased with
 spaces removed, so one run can compare subgraphs. `all` in the list adds every
 step on its default subgraph (`all,cycles@dependency`). Empty entries are ignored;
-unknown steps and unknown subgraphs warn and are skipped. `--bridges` (`contract`
-by default, or `drop`) and `--max-indirect-edges` (default 1,000,000) control bridge
-nodes, below.
+an unknown step or subgraph, or a list with no step, exits 2 before any input is
+read. `--bridges` (`contract` by default, or `drop`) and `--max-indirect-edges`
+(default 1,000,000) control bridge nodes, below.
 
 Minimum input columns: nodes `WI_ID`; edges `Source_ID`, `Target_ID`, `Link_Type`.
 Optional node metadata: Title, WorkItemType, State, `KL.Roadmap_State`,
-`System.AreaPath`, `System.IterationPath`, configured effort field. Schema/ID
-validation is not performed; missing required columns raise exceptions.
+`System.AreaPath`, `System.IterationPath`, configured effort field. A missing
+required column exits 2 before analysis (see
+[Files, errors and current limitations](#files-errors-and-current-limitations));
+column types and ID values are not validated.
 
 Edges are normalized first. Reverse labels flip direction and normalize to their
 forward label; forward directions are parent→child, affects→affected,
@@ -321,9 +323,10 @@ Exact betweenness runs one breadth-first search per node, O(nodes × links): a
 that, `metrics` estimates it from 500 source nodes sampled with a fixed seed (so
 repeat runs on the same graph agree) and logs a warning. `Betweenness_Sources` on
 every row (and the attr `betweenness_sources`) is the number of sources used, which
-equals the node count when the value is exact. These budgets have no command-line
-options yet; `GraphAnalyzer` takes them as `max_cycles`, `max_cycle_rows` and
-`centrality_sources`. With them, synthetic graphs of 10,000 and 50,000 items run
+equals the node count when the value is exact. The options
+`--max-cycles`, `--max-cycle-rows` and `--centrality-sources` (each at least 1)
+change these budgets; `GraphAnalyzer` takes them as `max_cycles`, `max_cycle_rows`
+and `centrality_sources`. With the defaults, synthetic graphs of 10,000 and 50,000 items run
 every step in about 10 seconds and 60 to 90 seconds respectively on a development
 container, of which sampled betweenness takes about 40 seconds at 50,000 items.
 
@@ -344,19 +347,25 @@ Both modes publish atomically. Export writes every file of the requested formats
 hidden sibling temp files and renames the whole bundle into place only after every
 write succeeded; analyze does the same for its single workbook. A failed write
 (permissions, full disk, serialization error) leaves every existing output
-unchanged and removes the temp files. Unknown and repeated formats are skipped.
+unchanged and removes the temp files. Repeated formats are written once.
 
 An existing output needs `--overwrite`. Without it the run exits with code 2 and
 names the files before export calls ADO or analyze reads its inputs. Analyze
 refuses an `--output-file` that is the `--nodes-file` or `--edges-file` (also
 through a link) with exit 2, even with `--overwrite`. Consent is checked when the
 run starts: a file created at an output path during a long export is replaced.
-Export still creates `--output-dir` before fetching. Empty exports do not preserve a stable node schema; all-unknown steps can fail
-when saving a workbook with no sheets. Exceptions normally propagate. A complete
-run exits 0; export can also exit with the partial-result statuses described under
+Inputs are checked when the run starts too, with exit 2 and no service call, input
+read or output created: export and replay `--formats` must name only known formats,
+and analyze `--steps` only known steps and subgraphs (at least one). Analyze reads
+only the Parquet footer of each input first and refuses a missing or non-Parquet
+file, nodes without `WI_ID`, and edges without `Source_ID`, `Target_ID` or
+`Link_Type`. Column types and ID values are not checked there.
+Export still creates `--output-dir` before fetching. Empty exports do not preserve
+a stable node schema. Exceptions normally propagate. A complete run exits 0;
+export can also exit with the partial-result statuses described under
 [Traversal, filtering and completeness](#traversal-filtering-and-completeness).
-Argparse errors/help use its usual exits (2 for invalid options, existing outputs
-and input collisions). Text beginning with `=` can be
+Argparse errors/help use its usual exits (2 for invalid options and inputs,
+existing outputs and input collisions). Text beginning with `=` can be
 written as an Excel formula by pandas/openpyxl; arbitrary identity/datetime field
 objects may fail serialization.
 
