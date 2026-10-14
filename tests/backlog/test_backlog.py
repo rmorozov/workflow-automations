@@ -21,8 +21,7 @@ def write_task(directory: Path, id_: str, touches: str, deps: str = "", **extra:
         "priority": "P2",
         "depends_on": f"[{deps}]",
         "touches": f"[{touches}]",
-        "model": "sonnet",
-        "effort": "medium",
+        "tier": "routine",
     }
     fields.update(extra)
     front = "\n".join(f"{key}: {value}" for key, value in fields.items())
@@ -48,8 +47,8 @@ def backlog_dir(tmp_path):
 
 
 def test_invalid_task_is_rejected(backlog_dir):
-    write_task(backlog_dir, "AG-001", "a.py", model="gpt")
-    with pytest.raises(ValueError, match="model must be one of"):
+    write_task(backlog_dir, "AG-001", "a.py", tier="unknown")
+    with pytest.raises(ValueError, match="tier must be one of"):
         backlog.load_tasks(backlog_dir)
     assert backlog.main(["check", "--dir", str(backlog_dir)]) == 1
 

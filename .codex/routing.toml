@@ -1,0 +1,27 @@
+# Repository policy consumed by scripts/agent_profiles.py, not a Codex config layer.
+[mechanical]
+implementer = "mechanical_implementer"
+planner = "task_planner"
+reviewer = "reviewer"
+
+[routine]
+implementer = "implementer"
+planner = "task_planner"
+reviewer = "reviewer"
+
+[complex]
+implementer = "complex_implementer"
+planner = "complex_planner"
+reviewer = "complex_reviewer"
+
+[deep]
+# Implementation is still owned by the complex worker; arbiter resolves a dispute.
+implementer = "complex_implementer"
+planner = "complex_planner"
+reviewer = "complex_reviewer"
+
+[fixed]
+coordinator = "coordinator"
+curator = "backlog_curator"
+checker = "checker"
+arbiter = "design_arbiter"

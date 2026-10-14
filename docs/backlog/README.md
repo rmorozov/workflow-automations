@@ -22,8 +22,7 @@ tool: ado-graph
 priority: P2
 depends_on: [AG-018]
 touches: [src/workflow_automations/ado_graph/client.py, docs/specs/ado-graph.md#purpose-and-boundaries]
-model: sonnet
-effort: medium
+tier: routine
 ---
 
 # AG-010 Offline analysis without Azure SDK or Kerberos
@@ -46,8 +45,9 @@ What a test or measurement must show for the task to be done.
   A section includes its subsections: sibling sections are disjoint, a parent and a
   section nested in it are not. An anchor must exist in the file; a file that does
   not exist yet is reserved whole.
-- `model` and `effort` say which tier should implement it; see
-  [agentic workflow](../agentic-workflow.md#models-and-effort).
+- `tier` is provider-neutral: `mechanical`, `routine`, `complex`, or `deep`.
+  Roles map it to model/effort profiles; it does not choose the coordinator model. See
+  [agentic workflow](../agentic-workflow.md#task-tiers-and-resolved-roles).
 - Titles avoid `: ` so the front matter stays one `key: value` per line.
 
 ## Lifecycle

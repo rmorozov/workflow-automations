@@ -60,3 +60,11 @@ a scheduler or external integration until the tool actually needs one.
 normal lint, format and test checks. Its `ado-graph` extra builds `gssapi`, so run
 Linux Kerberos header installation before the development extras above
 (`sudo apt-get install libkrb5-dev`).
+
+## Agent configuration
+
+Claude and Codex share task tiers, scope reservations and acceptance evidence.
+See [the workflow](docs/agentic-workflow.md#codex-setup) for role routing and runtime
+probe instructions. Run `python scripts/agent_profiles.py check` alongside backlog
+validation; `scripts/check.sh` runs the common suite. Static checks require Python
+3.11+ but no Codex CLI/API keys. Runtime probes and pilots remain explicit in RW-003.
