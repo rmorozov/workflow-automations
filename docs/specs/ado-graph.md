@@ -111,6 +111,22 @@ analysis. Three names are changed:
 `State`. All other ADO field reference names remain unchanged. No source snapshot,
 root marker, completeness manifest or export-schema version is added.
 
+Before any file is written, the frames are validated and normalized so every format
+stores the same values:
+
+- Nodes need a unique, non-null integer `WI_ID` and unique column names; edges need
+  exactly `Source_ID`, `Target_ID`, `Link_Type` with non-null integer IDs. A
+  violation raises an error and leaves existing files unchanged.
+- An empty export still has typed columns: nodes `WI_ID` (int64) and `In_Scope`
+  (bool), edges `Source_ID`, `Target_ID` (int64) and `Link_Type` (text).
+- Identity objects (`System.AssignedTo` and other fields with `displayName` or
+  `uniqueName`) become `Display Name <unique name>`, or whichever part is present.
+  Other objects and lists become JSON text with sorted keys.
+- Timezone-aware datetimes, and columns whose values are all ISO-8601 timestamps
+  with an offset (as the ADO REST API returns dates), become naive UTC datetimes,
+  because Excel cannot store an offset.
+- A column that mixes text with other values is written as text.
+
 Edges contain `Source_ID`, `Target_ID`, `Link_Type`; direction is the emitting
 item to its relation target. Rows are deduplicated by all three columns. Every
 exported node contributes its edges; targets may be absent from the node file (not
@@ -120,7 +136,7 @@ fetched, pruned, or omitted).
 | --- | --- |
 | Parquet | `nodes.parquet`, `edges.parquet` |
 | CSV | `nodes.csv`, `edges.csv`; pandas defaults, header and no index |
-| Excel | `work_items.xlsx`, sheets `Nodes`, `Edges`; pandas/openpyxl defaults |
+| Excel | `work_items.xlsx`, sheets `Nodes`, `Edges`; text starting with `=` stays a literal string cell, never a formula |
 
 Batch progress and per-type/project statistics are printed, followed by the pruned
 (WIQL-rejected, not fetched) and omitted (not returned by ADO) totals. Per-type and
@@ -262,6 +278,7 @@ objects may fail serialization.
 Tests use synthetic SDK-like objects and Parquet/XLSX files: CLI help and argument
 validation, saved-query result shapes, edge normalization, scope/prerequisite
 orientation, report publication, traversal through filtered bridges in both
-relation modes, once-per-ID WIQL classification, omitted-ID reporting, and bridge
-contraction. No actual ADO server was used. Remaining fixes and shared-code
+relation modes, once-per-ID WIQL classification, omitted-ID reporting, bridge
+contraction, and export normalization (literal Excel text, identities, zoned dates,
+empty exports and schema errors) across all formats. No actual ADO server was used. Remaining fixes and shared-code
 opportunities with ADO scope triage are in [the backlog](../backlog/README.md#ado-graph-and-triage-sharing) (AG and SH tasks).

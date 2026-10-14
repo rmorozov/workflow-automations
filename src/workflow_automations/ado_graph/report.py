@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -69,6 +73,100 @@ def publish_all(targets: Sequence[tuple[Path, Callable[[Path], None]]], overwrit
                 tmp.unlink()
 
 
+NODE_KEY = "WI_ID"
+EDGE_COLUMNS = ("Source_ID", "Target_ID", "Link_Type")
+
+# An ISO-8601 timestamp that names its offset, as the ADO REST API returns dates.
+_ZONED_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})")
+
+
+def _identity_text(value: dict) -> str | None:
+    """``Display Name <unique name>`` for an ADO identity reference, else None."""
+    name, unique = value.get("displayName"), value.get("uniqueName")
+    if not isinstance(name, str) and not isinstance(unique, str):
+        return None
+    if isinstance(name, str) and isinstance(unique, str) and name != unique:
+        return f"{name} <{unique}>"
+    return name if isinstance(name, str) else unique
+
+
+def _scalar(value: Any) -> Any:
+    """Identities become text; other dicts and lists become sorted JSON."""
+    if isinstance(value, dict):
+        identity = _identity_text(value)
+        if identity is not None:
+            return identity
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, sort_keys=True, default=str)
+    return value
+
+
+def _is_zoned_date(value: Any) -> bool:
+    if isinstance(value, dt.datetime):
+        return value.tzinfo is not None
+    return isinstance(value, str) and _ZONED_TIMESTAMP.fullmatch(value) is not None
+
+
+def _normalize_column(column: pd.Series) -> pd.Series:
+    if isinstance(column.dtype, pd.DatetimeTZDtype):
+        return column.dt.tz_convert("UTC").dt.tz_localize(None)
+    if not (pd.api.types.is_object_dtype(column) or pd.api.types.is_string_dtype(column)):
+        return column
+    present = column.dropna()
+    if present.empty:
+        return column
+    if all(_is_zoned_date(v) for v in present):
+        return pd.to_datetime(column, utc=True, format="ISO8601").dt.tz_localize(None)
+    column = column.map(_scalar, na_action="ignore")
+    present = column.dropna()
+    if any(isinstance(v, str) for v in present) and not all(isinstance(v, str) for v in present):
+        # Mixed text and numbers cannot share a Parquet column; keep them as text.
+        column = column.map(str, na_action="ignore")
+    return column
+
+
+def _require_ids(frame: pd.DataFrame, name: str, columns: Sequence[str]) -> pd.DataFrame:
+    for col in columns:
+        if frame.empty:
+            frame[col] = frame[col].astype("int64")
+        elif not pd.api.types.is_integer_dtype(frame[col]) or frame[col].isna().any():
+            raise ValueError(f"{name}: column {col} must hold integer work-item IDs")
+    return frame
+
+
+def prepare_export_frames(
+    df_nodes: pd.DataFrame, df_edges: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Validate the export schema and normalize values every format can store.
+
+    Raises ValueError before anything is written when a frame breaks the schema.
+    """
+    nodes = df_nodes.copy()
+    if nodes.empty and NODE_KEY not in nodes.columns:
+        nodes = pd.DataFrame(
+            {NODE_KEY: pd.Series(dtype="int64"), "In_Scope": pd.Series(dtype=bool)}
+        )
+    if nodes.columns.duplicated().any():
+        dupes = sorted(set(nodes.columns[nodes.columns.duplicated()]))
+        raise ValueError(f"nodes: duplicate columns {dupes}")
+    if NODE_KEY not in nodes.columns:
+        raise ValueError(f"nodes: missing column {NODE_KEY}")
+    nodes = _require_ids(nodes, "nodes", [NODE_KEY])
+    if nodes[NODE_KEY].duplicated().any():
+        dupes = sorted(nodes.loc[nodes[NODE_KEY].duplicated(), NODE_KEY].unique().tolist())
+        raise ValueError(f"nodes: duplicate {NODE_KEY} values {dupes[:20]}")
+    for col in nodes.columns:
+        nodes[col] = _normalize_column(nodes[col])
+
+    if tuple(df_edges.columns) != EDGE_COLUMNS:
+        raise ValueError(
+            f"edges: columns must be {list(EDGE_COLUMNS)}, got {list(df_edges.columns)}"
+        )
+    edges = _require_ids(df_edges.copy(), "edges", EDGE_COLUMNS[:2])
+    edges["Link_Type"] = edges["Link_Type"].astype(str)
+    return nodes, edges
+
+
 def _export_dataframes(
     df_nodes: pd.DataFrame,
     df_edges: pd.DataFrame,
@@ -76,10 +174,11 @@ def _export_dataframes(
     formats: list[str],
     overwrite: bool = True,
 ) -> None:
-    """Publish every requested format as one staged bundle.
+    """Validate, normalize and publish every requested format as one staged bundle.
 
     ``overwrite`` defaults to True because the CLI asks for consent before the run.
     """
+    df_nodes, df_edges = prepare_export_frames(df_nodes, df_edges)
     writers = {
         "nodes.parquet": lambda p: df_nodes.to_parquet(p, index=False),
         "edges.parquet": lambda p: df_edges.to_parquet(p, index=False),
@@ -96,8 +195,18 @@ def _export_dataframes(
 
 def _write_excel(df_nodes: pd.DataFrame, df_edges: pd.DataFrame, path: Path) -> None:
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        df_nodes.to_excel(writer, sheet_name="Nodes", index=False)
-        df_edges.to_excel(writer, sheet_name="Edges", index=False)
+        for sheet, frame in (("Nodes", df_nodes), ("Edges", df_edges)):
+            frame.to_excel(writer, sheet_name=sheet, index=False)
+            _keep_text_literal(writer.sheets[sheet])
+
+
+def _keep_text_literal(worksheet: Any) -> None:
+    """Store text that openpyxl would read as a formula (``=...``) as a string cell."""
+    for row in worksheet.iter_rows(min_row=2):
+        for cell in row:
+            if cell.data_type == "f":
+                cell.data_type = "s"
+                cell.quotePrefix = True
 
 
 def write_analysis_report(
