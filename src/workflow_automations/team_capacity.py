@@ -697,14 +697,18 @@ def _require(
     return True
 
 
-def read_settings(frame: pd.DataFrame | None, errors: Errors) -> dict[str, Any]:
+def read_settings(
+    frame: pd.DataFrame | None, errors: Errors, overrides: Sequence[tuple[str, str]] = ()
+) -> dict[str, Any]:
+    """The settings sheet's values, then ``--set`` overrides, over the defaults."""
     settings = dict(DEFAULT_SETTINGS)
-    if frame is None or not _require(frame, "settings", ["key", "value"], errors):
-        return settings
-    for row, values in _rows(frame):
-        key = _text(values["key"]).lower()
-        value = values["value"]
-        where = f"settings row {row} ({key})"
+    entries: list[tuple[str, Any, str]] = []
+    if frame is not None and _require(frame, "settings", ["key", "value"], errors):
+        for row, values in _rows(frame):
+            key = _text(values["key"]).lower()
+            entries.append((key, values["value"], f"settings row {row} ({key})"))
+    entries.extend((key.strip().lower(), value, f"--set {key}") for key, value in overrides)
+    for key, value, where in entries:
         if key not in DEFAULT_SETTINGS:
             errors.add(f"{where}: unknown setting; known: {sorted(DEFAULT_SETTINGS)}")
         elif _blank(value):
@@ -995,11 +999,18 @@ def _overlap(a: dt.date | None, b: dt.date | None, c: dt.date | None, d: dt.date
     return (a or dt.date.min) <= (d or dt.date.max) and (c or dt.date.min) <= (b or dt.date.max)
 
 
-def read_config(book: dict[str, pd.DataFrame], roster_emails: set[str]) -> Config:
-    """Validate every config sheet; raise one CapacityError listing every error."""
+def read_config(
+    book: dict[str, pd.DataFrame],
+    roster_emails: set[str],
+    overrides: Sequence[tuple[str, str]] = (),
+) -> Config:
+    """Validate every config sheet; raise one CapacityError listing every error.
+
+    ``overrides`` are ``--set`` (key, value) pairs applied over the settings sheet.
+    """
     errors = Errors()
     sheets = {str(name).strip().lower(): frame for name, frame in book.items()}
-    settings = read_settings(sheets.get("settings"), errors)
+    settings = read_settings(sheets.get("settings"), errors, overrides)
     countries = read_countries(sheets.get("countries"), settings, errors)
     groups, titles = read_role_groups(sheets.get("role_groups"), errors)
     iterations = read_iterations(sheets.get("iterations"), errors)
@@ -1424,6 +1435,127 @@ def read_book(path: Path, what: str) -> dict[str, pd.DataFrame]:
         raise CapacityError(f"Cannot read {what} {path}: {exc}") from exc
 
 
+CONFIG_SHEETS = (
+    "settings",
+    "countries",
+    "area_countries",
+    "calendar",
+    "absences",
+    "iterations",
+    "role_groups",
+    "rituals",
+    "rates",
+)
+
+
+def read_table(path: Path, sheet: str) -> pd.DataFrame:
+    """One config sheet from a CSV file, or from a workbook's sheet of that name (or
+    its only sheet). CSV cells are read as text, with ``,``, ``;`` or tab separators."""
+    if not path.exists():
+        raise CapacityError(f"{sheet} file does not exist: {path}")
+    try:
+        if path.suffix.lower() in (".csv", ".txt"):
+            return pd.read_csv(
+                path,
+                sep=None,
+                engine="python",
+                dtype=str,
+                keep_default_na=False,
+                encoding="utf-8-sig",
+            )
+        book = pd.read_excel(path, sheet_name=None, engine="openpyxl")
+    except Exception as exc:  # pandas and openpyxl raise many types for unreadable files
+        raise CapacityError(f"Cannot read {sheet} file {path}: {exc}") from exc
+    named = {str(name).strip().lower(): frame for name, frame in book.items()}
+    if sheet in named:
+        return named[sheet]
+    if len(book) == 1:
+        return next(iter(book.values()))
+    raise CapacityError(f"{path} has several sheets and none is named {sheet}")
+
+
+def parse_assignment(text: str, flag: str) -> tuple[str, str]:
+    key, sep, value = text.partition("=")
+    if not sep or not key.strip():
+        raise CapacityError(f"{flag} '{text}' is not KEY=VALUE")
+    return key.strip(), value.strip()
+
+
+def external_sheets(
+    calendars: Sequence[Path], sheets: Sequence[str]
+) -> dict[str, tuple[pd.DataFrame, list[Path]]]:
+    """Config sheets given as files: ``--calendar FILE`` and ``--sheet NAME=FILE``.
+
+    Several files for one sheet are stacked (a calendar per year, say); together they
+    replace that sheet of the config workbook. Returns each sheet with its files.
+    """
+    files: dict[str, list[Path]] = defaultdict(list)
+    for path in calendars:
+        files["calendar"].append(path)
+    for text in sheets:
+        name, value = parse_assignment(text, "--sheet")
+        name = name.lower()
+        if name not in CONFIG_SHEETS:
+            raise CapacityError(f"--sheet {name}: unknown sheet; known: {list(CONFIG_SHEETS)}")
+        if not value:
+            raise CapacityError(f"--sheet {name}: no file given")
+        files[name].append(Path(value))
+    return {
+        name: (pd.concat([read_table(p, name) for p in paths], ignore_index=True), paths)
+        for name, paths in files.items()
+    }
+
+
+def load_config(args: argparse.Namespace, roster_emails: set[str]) -> tuple[Config, list[Path]]:
+    """The config workbook with the command line's sheet files and ``--set`` applied."""
+    book = read_book(args.config, "config")
+    lower = {str(name).strip().lower(): name for name in book}
+    files: list[Path] = []
+    for name, (frame, paths) in external_sheets(args.calendar, args.sheet).items():
+        book.pop(lower.get(name, name), None)
+        book[name] = frame
+        files.extend(paths)
+        logger.info("Sheet %s from %s", name, ", ".join(str(p) for p in paths))
+    overrides = [parse_assignment(text, "--set") for text in args.set]
+    return read_config(book, roster_emails, overrides), files
+
+
+def add_config_arguments(
+    root: argparse.ArgumentParser, required: bool = False, config_help: str = ""
+) -> None:
+    """``--config`` and the flags that replace its sheets or override its settings."""
+    root.add_argument(
+        "--config",
+        type=Path,
+        required=required,
+        help=config_help or "config workbook (see --template)",
+    )
+    root.add_argument(
+        "--calendar",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="calendar sheet as .xlsx or .csv (country, date, hours); repeat for one "
+        "file per year; replaces the config's calendar sheet",
+    )
+    root.add_argument(
+        "--sheet",
+        action="append",
+        default=[],
+        metavar="NAME=FILE",
+        help=f"replace a config sheet with a .xlsx or .csv file; NAME is one of "
+        f"{', '.join(CONFIG_SHEETS)}; repeat a NAME to stack files",
+    )
+    root.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="override a setting of the settings sheet, e.g. --set bug_fix_quota=0.4",
+    )
+
+
 def write_book(book: dict[str, pd.DataFrame], path: Path) -> None:
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, frame in book.items():
@@ -1474,7 +1606,31 @@ def excel_dates(frame: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def write_calendar(path: Path, overwrite: bool) -> None:
+    """The UAE reference calendar alone, as .csv or .xlsx, to edit and pass as --calendar."""
+    frame = pd.DataFrame(
+        uae_calendar_rows(), columns=["country", "date", "hours", "name", "status"]
+    )
+    if path.suffix.lower() == ".csv":
+        frame["date"] = frame["date"].map(lambda d: d.isoformat())
+
+        def write(tmp: Path) -> None:
+            frame.to_csv(tmp, index=False, encoding="utf-8")
+
+    else:
+
+        def write(tmp: Path) -> None:
+            write_book({"calendar": excel_dates(frame)}, tmp)
+
+    publish_all([(path, write)], overwrite=overwrite, exists_error=CapacityError, exclusive=True)
+    logger.info("Wrote the UAE reference calendar to %s", path)
+
+
 def run(args: argparse.Namespace) -> int:
+    if args.template_calendar:
+        write_calendar(args.template_calendar, args.overwrite)
+        if not args.template:
+            return 0
     if args.template:
         output = args.template
         publish_all(
@@ -1504,16 +1660,16 @@ def run(args: argparse.Namespace) -> int:
     ]
     if missing:
         raise CapacityError(f"Missing {', '.join(missing)} (or use --template)")
-    inputs = {args.roster.resolve(), args.config.resolve()}
-    if args.output.resolve() in inputs:
-        raise CapacityError("--output may not be the roster or config file")
     if args.output.exists() and not args.overwrite:
         raise CapacityError(f"{args.output} exists; pass --overwrite to replace it")
 
     first, last, months = window(args.start_month, args.months)
     roster_book = read_book(args.roster, "roster")
     roster = roster_book[find_roster_sheet(roster_book)]
-    config = read_config(read_book(args.config, "config"), roster_emails(roster))
+    config, files = load_config(args, roster_emails(roster))
+    inputs = {path.resolve() for path in (args.roster, args.config, *files)}
+    if args.output.resolve() in inputs:
+        raise CapacityError("--output may not be an input file")
     result = compute(roster, config, first, last)
     outputs = build_outputs(result, config, first, last, months)
     publish_all(
@@ -1572,10 +1728,13 @@ Examples:
   %(prog)s --template capacity-config.xlsx
   %(prog)s --roster roster.xlsx --config capacity-config.xlsx --start-month 2026-11 \\
       --months 3 --output capacity.xlsx
+  %(prog)s --roster roster.xlsx --config capacity-config.xlsx --start-month 2026-11 \\
+      --calendar holidays-2026.csv --calendar holidays-2027.xlsx \\
+      --set bug_fix_quota=0.4 --sheet absences=leave.csv --output capacity.xlsx
 """,
     )
     root.add_argument("--roster", type=Path, help="team-roster output (one row per person)")
-    root.add_argument("--config", type=Path, help="config workbook (see --template)")
+    add_config_arguments(root)
     root.add_argument("--start-month", help="first month of the window, YYYY-MM")
     root.add_argument(
         "--months", type=_positive, default=3, help="months in the window (default 3)"
@@ -1592,6 +1751,12 @@ Examples:
         type=Path,
         metavar="CONFIG",
         help="write a starter config with UAE 2026-2027 calendar and exit",
+    )
+    root.add_argument(
+        "--template-calendar",
+        type=Path,
+        metavar="FILE",
+        help="write the UAE 2026-2027 calendar alone as .csv or .xlsx and exit",
     )
     root.add_argument("-v", "--verbose", action="store_true", help="DEBUG logging")
     return root

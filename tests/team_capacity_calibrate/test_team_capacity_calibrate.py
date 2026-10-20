@@ -181,6 +181,15 @@ def test_cli_writes_the_workbook(tmp_path):
     ]
     assert cal.main(args) == 1  # exists
     assert cal.main([*args, "--overwrite"]) == 0
+    # The config flags of team-capacity apply here too.
+    calendar = tmp_path / "cal.csv"
+    calendar.write_text("country,date,hours\nX,2026-01-05,0\n", encoding="utf-8")
+    extra = ["--overwrite", "--set", "focus_loss=0", "--calendar", str(calendar)]
+    assert cal.main([*args, *extra]) == 0
+    rows = pd.read_excel(output, sheet_name="calibration")
+    s1 = rows[(rows["area_path"] == "Proj\\A") & (rows["iteration"] == "S1")].iloc[0]
+    assert s1["predicted_base"] == pytest.approx(72)
+    assert s1["suggested_bug_fix_quota"] == pytest.approx(0.4)
 
 
 def test_config_without_iterations_is_refused():

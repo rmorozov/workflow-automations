@@ -217,6 +217,13 @@ rates to `rates`. The output's `dev_per_area_capacity` sheet is what
 where every hour went, and `problems` lists people who could not be counted (the run
 then exits 3 unless `--allow-problems`).
 
+To keep the calendar or other sheets outside the config, pass them per run:
+`--calendar FILE` (an `.xlsx` or `.csv`, repeated for one file per year) replaces the
+`calendar` sheet, `--sheet NAME=FILE` replaces any config sheet (for example
+`--sheet absences=leave.csv`), and `--set KEY=VALUE` overrides a setting such as
+`--set bug_fix_quota=0.4`. `--template-calendar uae.csv` writes the UAE reference
+calendar alone to start from. The config workbook itself is never changed.
+
 `team-capacity-calibrate --snapshot work/triage.json --roster work/roster.xlsx --config
 capacity-config.xlsx --output work/calibration.xlsx` compares past iterations' completed
 work with the model and suggests `rates` rows.
