@@ -124,6 +124,7 @@ def test_input_mapping_sheet_wins_over_mapping_file(inputs, tmp_path):
     assert list(book) == [
         "staff",
         "dev_per_area",
+        "problems",
         "person_to_area",
         "department_to_area",
         "fullpath_to_area",
@@ -186,7 +187,12 @@ def test_missing_mapping_sheets_are_created_and_widths_stay_valid(tmp_path):
     output = tmp_path / "out.xlsx"
     assert run(staff, output) == 0
     wb = load_workbook(output)  # a NaN width made the original script's files unreadable
-    assert wb.sheetnames == ["s", "dev_per_area", *(m.sheet for m in team_roster.MAPPINGS)]
+    assert wb.sheetnames == [
+        "s",
+        "dev_per_area",
+        "problems",
+        *(m.sheet for m in team_roster.MAPPINGS),
+    ]
     assert wb["fullpath_to_area"].column_dimensions["A"].width == len("full_path") + 2
     assert wb["s"].column_dimensions["B"].width == len("corporatetitle") + 2
     assert wb["dev_per_area"].max_row == 1  # nobody has an area: empty pivot
@@ -214,7 +220,7 @@ def test_formula_like_titles_stay_text_in_cells_and_pivot_headings(tmp_path):
     assert out["dev_per_area"]["B2"].value == 1
 
 
-@pytest.mark.parametrize("name", ["dev_per_area", "person_to_area"])
+@pytest.mark.parametrize("name", ["dev_per_area", "problems", "person_to_area"])
 def test_main_sheet_with_an_output_sheet_name_fails(tmp_path, name):
     staff = workbook(tmp_path / "staff.xlsx", {name: {"email": ["a"], "corporatetitle": ["Dev"]}})
     output = tmp_path / "out.xlsx"
@@ -317,3 +323,47 @@ def test_input_is_not_modified(inputs, tmp_path):
     before = (staff.read_bytes(), mapping.read_bytes())
     assert run(staff, tmp_path / "out.xlsx", "-m", mapping) == 0
     assert (staff.read_bytes(), mapping.read_bytes()) == before
+
+
+def test_problems_list_approved_people_without_area_email_or_class(tmp_path):
+    staff = workbook(
+        tmp_path / "staff.xlsx",
+        {
+            "staff": {
+                "email": ["ok@x", "noarea@x", None, "intern@x", "gone@x"],
+                "corporatetitle": ["Developer", "Developer", "Developer", "Intern", "Intern"],
+                "department_name": ["Core", "Lost", "Core", "Core", None],
+                "approved": [True, True, True, True, False],
+            },
+            "department_to_area": {"department_name": ["Core"], "area_path": ["P\\Core"]},
+        },
+    )
+    output = tmp_path / "out.xlsx"
+    assert run(staff, output) == 0
+    book = sheets(output)
+    problems = book["problems"]
+    assert problems.columns.tolist() == team_roster.PROBLEM_COLUMNS
+    assert problems[["row", "email", "problem"]].fillna("").values.tolist() == [
+        [3, "noarea@x", "no AreaPath"],
+        [4, "", "no email"],
+        [5, "intern@x", "unclassified title"],
+    ]
+    # The other sheets do not change.
+    assert book["dev_per_area"].to_dict("records") == [
+        {"area_path": "P\\Core", "Intern": 1, "developer": 1}
+    ]
+
+
+def test_problems_sheet_is_empty_when_everyone_counts(tmp_path):
+    staff = workbook(
+        tmp_path / "staff.xlsx",
+        {
+            "staff": {"email": ["ok@x"], "corporatetitle": ["Developer"], "department_name": ["C"]},
+            "department_to_area": {"department_name": ["C"], "area_path": ["P"]},
+        },
+    )
+    output = tmp_path / "out.xlsx"
+    assert run(staff, output) == 0
+    problems = sheets(output)["problems"]
+    assert problems.empty
+    assert problems.columns.tolist() == team_roster.PROBLEM_COLUMNS
