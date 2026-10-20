@@ -303,3 +303,77 @@ def test_analyze_rejects_bad_meta_fields_before_analysis(
     monkeypatch.setattr(cli, "run_analyze", lambda _args: pytest.fail("analysis ran"))
     assert message in _rejected(capsys, _analyze(parquet_inputs, *extra))
     assert not (parquet_inputs / "out").exists()
+
+
+def test_options_file_runs_analyze_and_command_line_wins(parquet_inputs):
+    options = parquet_inputs / "analyze.ini"
+    options.write_text(
+        "steps = cycles\nmeta-field = [Team=Custom.Team, Sprint=Org.Sprint]\n"
+        "missing-meta = blank\nmax-cycles = 7\n",
+        encoding="utf-8",
+    )
+    tool.main(_analyze(parquet_inputs, "--options", str(options), "--steps", "metrics"))
+    sheets = pd.read_excel(parquet_inputs / "out" / "report.xlsx", sheet_name=None)
+    config = sheets["Config"].set_index("Setting")["Value"]
+    assert config["steps"] == "metrics"
+    assert config["max_cycles"] == 7
+    assert config["meta_fields"] == "Team=Custom.Team, Sprint=Org.Sprint"
+    assert config["options_file"] == "analyze.ini"
+    assert "metrics" in sheets and "cycles" not in sheets
+
+
+def test_written_options_reproduce_the_run(parquet_inputs, capsys):
+    written = parquet_inputs / "analyze.ini"
+    argv = ["--steps", "orphans", "--meta-field", "Team=Custom.Team", "--max-cycles", "3"]
+    tool.main(_analyze(parquet_inputs, *argv, "--write-options", str(written)))
+    assert "Wrote" in capsys.readouterr().out
+    assert not (parquet_inputs / "out" / "report.xlsx").exists()
+    text = written.read_text(encoding="utf-8")
+    assert "steps = orphans\n" in text
+    assert "meta-field = [Team=Custom.Team]\n" in text
+    assert "# meta-preset =\n" in text
+    assert "overwrite =" not in text
+    args, _ = cli.options.parse(cli.build_parser(), ["analyze", "--options", str(written)])
+    assert (args.steps, args.meta_field, args.max_cycles) == ("orphans", ["Team=Custom.Team"], 3)
+
+
+def test_write_options_needs_no_required_options_and_refuses_existing(tmp_path, capsys):
+    written = tmp_path / "export.ini"
+    tool.main(["export", "--write-options", str(written)])
+    text = written.read_text(encoding="utf-8")
+    assert "# ado-url =\n" in text
+    assert "filtered-relations = stop\n" in text
+    assert "skip-types = Task,Bug," in text
+    assert "%(default)s" not in text
+    message = _rejected(capsys, ["export", "--write-options", str(written)])
+    assert "exists; pass --overwrite" in message
+    tool.main(["export", "--write-options", str(written), "--batch-size", "50", "--overwrite"])
+    assert "batch-size = 50\n" in written.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("bogus = 1\n", "unknown option bogus"),
+        ("steps = cycles\noverwrite = true\n", "overwrite must be given on the command line"),
+        ("max-cycles = 0\n", "must be at least 1"),
+    ],
+)
+def test_options_file_rejects_bad_keys(parquet_inputs, capsys, content, message):
+    options = parquet_inputs / "bad.ini"
+    options.write_text(content, encoding="utf-8")
+    assert message in _rejected(capsys, _analyze(parquet_inputs, "--options", str(options)))
+
+
+def test_required_options_may_come_from_the_options_file(parquet_inputs, capsys):
+    options = parquet_inputs / "inputs.ini"
+    options.write_text(
+        f"nodes-file = {parquet_inputs / 'nodes.parquet'}\n"
+        f"edges-file = {parquet_inputs / 'edges.parquet'}\nsteps = orphans\n",
+        encoding="utf-8",
+    )
+    output = parquet_inputs / "report.xlsx"
+    tool.main(["analyze", "--options", str(options), "--output-file", str(output)])
+    assert output.exists()
+    message = _rejected(capsys, ["analyze", "--steps", "orphans"])
+    assert "required: --nodes-file, --edges-file" in message
