@@ -12,6 +12,7 @@ import os
 import sys
 from pathlib import Path
 
+from workflow_automations.ado_common import options
 from workflow_automations.ado_graph.analyze import (
     ALL_STEPS,
     DEFAULT_CENTRALITY_SOURCES,
@@ -61,7 +62,7 @@ def _positive_int(raw: str) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = options.new_parser(
         prog="ado_tool",
         description="ADO Graph & Export CLI Tool",
     )
@@ -71,13 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
     ep = subparsers.add_parser("export", help="Fetch ADO work items and export data files.")
     ep.add_argument(
         "--ado-url",
-        required=True,
-        help="Base URL of the ADO instance, e.g. https://ado.corp.local/DefaultCollection",
+        help="Required.  Base URL of the ADO instance, e.g. https://ado.corp.local/DefaultCollection",
     )
     ep.add_argument(
         "--query-id",
-        required=True,
-        help="GUID of the stored WIQL query to start from.",
+        help="Required.  GUID of the stored WIQL query to start from.",
     )
     ep.add_argument(
         "--project",
@@ -163,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp = subparsers.add_parser(
         "replay", help="Write export data files from a saved snapshot, without ADO."
     )
-    rp.add_argument("--snapshot", required=True, help="Snapshot saved by export --save-snapshot.")
+    rp.add_argument("--snapshot", help="Required.  Snapshot saved by export --save-snapshot.")
     rp.add_argument(
         "--output-dir",
         default="./output",
@@ -182,8 +181,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── analyze ───────────────────────────────────────────────────────────
     ap = subparsers.add_parser("analyze", help="Run graph analysis on exported parquet files.")
-    ap.add_argument("--nodes-file", required=True, help="Path to nodes.parquet.")
-    ap.add_argument("--edges-file", required=True, help="Path to edges.parquet.")
+    ap.add_argument("--nodes-file", help="Required.  Path to nodes.parquet.")
+    ap.add_argument("--edges-file", help="Required.  Path to edges.parquet.")
     ap.add_argument("--ado-url", default="", help="Base URL of the ADO instance.")
     ap.add_argument(
         "--effort-field",
@@ -282,7 +281,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    for sub in (ep, rp, ap):
+        options.add_options_file(sub)
     return parser
+
+
+REQUIRED = {
+    "export": ("--ado-url", "--query-id"),
+    "replay": ("--snapshot",),
+    "analyze": ("--nodes-file", "--edges-file"),
+}
 
 
 def _same_file(a: Path, b: Path) -> bool:
@@ -384,7 +392,12 @@ def check_outputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args, command = options.parse(parser, argv)
+    written = options.write_options(command, parser, args, f"ado-graph {args.mode} options")
+    if written is not None:
+        print(f"Wrote {written}")
+        return
+    options.require(parser, args, REQUIRED[args.mode])
     check_inputs(parser, args)
     check_outputs(parser, args)
     configure_logging()

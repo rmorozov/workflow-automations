@@ -1011,6 +1011,7 @@ def config_frame(
         ("nodes_file", Path(args.nodes_file).name),
         ("edges_file", Path(args.edges_file).name),
         ("output_file", Path(args.output_file).name),
+        ("options_file", Path(args.options).name if getattr(args, "options", None) else ""),
         ("ado_url", args.ado_url),
         ("effort_field", args.effort_field),
         (

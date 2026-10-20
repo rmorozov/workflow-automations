@@ -27,6 +27,39 @@ logging nor certificates. Export builds a merged temporary CA bundle, gives it t
 its own ADO connection only, and deletes it when export ends, also on failure;
 `REQUESTS_CA_BUNDLE` and the rest of the environment are never changed.
 
+## Options files
+
+Every mode (`export`, `replay`, `analyze`) takes `--options FILE` and
+`--write-options FILE`, through the shared `ado_common/options.py` (ConfigArgParse).
+An options file holds `key = value` lines whose keys are the mode's long options
+without dashes; `#` starts a comment, a list is `[a, b]`, a switch is `true` or
+`false`:
+
+```ini
+# ado-graph analyze options
+steps = orphans,scc,longest_chain
+meta-field = [Team=Custom.Team, Roadmap_State=KL.Roadmap_State]
+max-cycles = 500
+```
+
+- Precedence is command line, then options file, then the built-in default. An option
+  given on the command line replaces the file's value entirely, a list included.
+  Paths in the file are relative to the working directory, as on the command line.
+  Environment variables are never read.
+- `--write-options FILE` writes every option of the mode with its effective value
+  (each preceded by its help text; unset ones commented out) and exits 0 without
+  running or contacting ADO. It works without the required options, so it can start
+  from the defaults or record one run. It refuses an existing FILE without
+  `--overwrite`.
+- `--overwrite`, `--options` and `--write-options` are never read from a file:
+  replacing outputs stays a command-line choice. Such a key, an unknown key or an
+  invalid value exits 2 before any work, naming the file.
+- Required options (`--ado-url` and `--query-id` for export, `--snapshot` for replay,
+  `--nodes-file` and `--edges-file` for analyze) may come from the file; when missing
+  from both, the mode exits 2 as before.
+- The analyze `Config` sheet names the options file (`options_file`) beside the
+  effective values it already lists.
+
 ## Export CLI
 
 | Option | Current behavior/default |
@@ -413,7 +446,7 @@ before the results:
 | Sheet | Content |
 | --- | --- |
 | `About` | `Item`/`Value` rows: purpose, how to read the report, tool version, the input file names, work items and links loaded, relations after normalization, links skipped for an absent endpoint or an unknown type, bridge items contracted or dropped, work items analyzed, metadata fields not in the nodes file (or `none`), result-sheet count, and `Complete` (`yes`, or `no:` with the partial sheets) |
-| `Config` | `Setting`/`Value` rows: input and output file names (without their folder), `ado_url`, `effort_field`, `meta_fields` (`LABEL=FIELD` pairs, presets expanded), `missing_meta`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
+| `Config` | `Setting`/`Value` rows: input, output and options file names (without their folder), `ado_url`, `effort_field`, `meta_fields` (`LABEL=FIELD` pairs, presets expanded), `missing_meta`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
 | `Summary` | One row per result sheet: `Sheet` (a link to it), `Step`, `Subgraph`, `Rows`, a headline `Count` and what it `Counted`, `Complete` and `Note` |
 
 The headline count is cycles for `cycles`, components for `scc` (the note adds how
