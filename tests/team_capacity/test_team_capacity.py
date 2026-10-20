@@ -810,3 +810,114 @@ def test_dates_are_written_without_a_time(files):
 
     sheet = openpyxl.load_workbook(files[1])["calendar"]
     assert sheet["B2"].number_format == "YYYY-MM-DD"
+
+
+# ---------------------------------------------------------------------------
+# Config from the command line (CP-015, CP-016)
+# ---------------------------------------------------------------------------
+
+
+def person_hours(output, email, period):
+    person = pd.read_excel(output, sheet_name="capacity_by_person")
+    rows = person[(person["email"] == email) & (person["period"] == period)]
+    return rows.iloc[0]
+
+
+def test_calendar_files_per_year_replace_the_config_calendar(files, tmp_path):
+    # One CSV for 2026 (semicolons, as some Excel locales save it) and a workbook for 2027.
+    (tmp_path / "cal-2026.csv").write_text(
+        "country;date;hours;name\nUAE;2026-11-02;0;company day\n", encoding="utf-8-sig"
+    )
+    write(
+        tmp_path / "cal-2027.xlsx",
+        {"holidays": {"country": ["UAE"], "date": [D(2027, 1, 1)], "hours": [0]}},
+    )
+    args = ["--calendar", str(tmp_path / "cal-2026.csv"), "--calendar"]
+    assert cli(files, *args, str(tmp_path / "cal-2027.xlsx")) == 0
+    november = person_hours(files[2], "a@x", "2026-11")
+    december = person_hours(files[2], "a@x", "2026-12")
+    # 21 weekdays in November less the company day; National Day no longer applies.
+    assert november["gross"] == pytest.approx(20 * 8)
+    assert december["gross"] == pytest.approx(23 * 8)
+
+
+def test_calendar_file_with_a_missing_year_is_a_problem(files, tmp_path):
+    path = tmp_path / "cal.csv"
+    path.write_text("country,date,hours\nUAE,2026-12-02,0\n", encoding="utf-8")
+    assert cli(files, "--calendar", str(path)) == 3
+    problems = pd.read_excel(files[2], sheet_name="problems")
+    assert problems["detail"].tolist() == ["UAE has no calendar rows for 2027"]
+
+
+def test_calendar_file_rows_are_validated(files, tmp_path):
+    path = tmp_path / "cal.csv"
+    path.write_text("country,date,hours\nUAE,2026-12-02,0\nXX,2027-01-01,0\n", encoding="utf-8")
+    other = tmp_path / "cal2.csv"
+    other.write_text("country,date,hours\nUAE,2026-12-02,0\n", encoding="utf-8")
+    assert cli(files, "--calendar", str(path), "--calendar", str(other)) == 1
+    assert not files[2].exists()
+
+
+def test_template_calendar_round_trips_as_csv_and_xlsx(files, tmp_path):
+    template = pd.read_excel(files[1], sheet_name=None)
+    for name in ("uae.csv", "uae.xlsx"):
+        path = tmp_path / name
+        assert tc.main(["--template-calendar", str(path)]) == 0
+        frame = tc.read_table(path, "calendar")
+        config = tc.read_config({**template, "calendar": frame}, set())
+        assert config.calendar == tc.read_config(template, set()).calendar
+    assert tc.main(["--template-calendar", str(tmp_path / "uae.csv")]) == 1  # exists
+
+
+def test_set_overrides_the_settings_sheet(files):
+    assert cli(files, "--set", "bug_fix_quota=0", "--set", "FOCUS_LOSS=0") == 0
+    row = person_hours(files[2], "a@x", "2026-11")
+    assert row["bug_fix"] == 0 and row["focus"] == 0 and row["net"] > 0
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--set", "bug_fix_quota"], "is not KEY=VALUE"),
+        (["--set", "colour=red"], "--set colour: unknown setting"),
+        (["--set", "focus_loss=0.9"], "bug_fix_quota + focus_loss is more than 1"),
+        (["--set", "iteration_start=2026-01-06"], "is not a Monday"),
+        (["--sheet", "holidays=x.csv"], "--sheet holidays: unknown sheet"),
+        (["--sheet", "absences=missing.csv"], "absences file does not exist"),
+    ],
+)
+def test_bad_overrides_fail_with_their_flag(files, args, message, caplog):
+    assert cli(files, *args) == 1
+    assert message in caplog.text
+    assert not files[2].exists()
+
+
+def test_sheet_file_replaces_a_config_sheet(files, tmp_path):
+    path = tmp_path / "leave.csv"
+    path.write_text("email,from,to,type\na@x,2026-11-02,2026-11-06,vacation\n", encoding="utf-8")
+    assert cli(files, "--sheet", f"absences={path}") == 0
+    row = person_hours(files[2], "a@x", "2026-11")
+    assert row["absence"] == pytest.approx(5 * 8)
+
+
+def test_workbook_with_several_sheets_needs_one_named_for_the_sheet(files, tmp_path):
+    path = write(
+        tmp_path / "two.xlsx",
+        {
+            "a": {"country": ["UAE"], "date": [D(2027, 1, 1)], "hours": [0]},
+            "b": {"country": ["UAE"], "date": [D(2027, 1, 2)], "hours": [0]},
+        },
+    )
+    assert cli(files, "--calendar", str(path)) == 1
+    with pytest.raises(tc.CapacityError, match="none is named calendar"):
+        tc.read_table(path, "calendar")
+
+
+def test_output_may_not_replace_a_calendar_file(files, tmp_path):
+    path = tmp_path / "cal.csv"
+    path.write_text("country,date,hours\nUAE,2026-12-02,0\nUAE,2027-01-01,0\n", encoding="utf-8")
+    before = path.read_bytes()
+    roster_path, config_path, _ = files
+    args = ["--calendar", str(path), "--overwrite"]
+    assert cli((roster_path, config_path, path), *args) == 1
+    assert path.read_bytes() == before

@@ -303,9 +303,6 @@ def _rate_rows(area: str, run: list[pd.Series], config: tc.Config) -> list[dict[
 
 
 def run(args: argparse.Namespace) -> None:
-    inputs = {path.resolve() for path in (args.snapshot, args.roster, args.config)}
-    if args.output.resolve() in inputs:
-        raise tc.CapacityError("--output may not be an input file")
     if args.output.exists() and not args.overwrite:
         raise tc.CapacityError(f"{args.output} exists; pass --overwrite to replace it")
     try:
@@ -314,7 +311,10 @@ def run(args: argparse.Namespace) -> None:
         raise tc.CapacityError(f"Cannot read snapshot {args.snapshot}: {exc}") from exc
     roster_book = tc.read_book(args.roster, "roster")
     roster = roster_book[tc.find_roster_sheet(roster_book)]
-    config = tc.read_config(tc.read_book(args.config, "config"), tc.roster_emails(roster))
+    config, files = tc.load_config(args, tc.roster_emails(roster))
+    inputs = {path.resolve() for path in (args.snapshot, args.roster, args.config, *files)}
+    if args.output.resolve() in inputs:
+        raise tc.CapacityError("--output may not be an input file")
     bug_types = {t.strip().lower() for t in args.bug_types.split(",") if t.strip()}
     outputs = calibrate(snapshot, roster, config, bug_types)
     publish_all(
@@ -340,8 +340,8 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     root.add_argument("--snapshot", type=Path, required=True, help="saved ADO snapshot (JSON)")
     root.add_argument("--roster", type=Path, required=True, help="team-roster output")
-    root.add_argument(
-        "--config", type=Path, required=True, help="team-capacity config with an iterations sheet"
+    tc.add_config_arguments(
+        root, required=True, config_help="team-capacity config with an iterations sheet"
     )
     root.add_argument("--output", type=Path, required=True, help="output workbook")
     root.add_argument(

@@ -33,8 +33,10 @@ sensitivity (CP-013), plus demand quality in triage (CP-014), in `docs/backlog/`
 
 ```bash
 team-capacity --template CONFIG.xlsx [--overwrite]
+team-capacity --template-calendar CALENDAR.csv|CALENDAR.xlsx [--overwrite]
 team-capacity --roster ROSTER.xlsx --config CONFIG.xlsx --start-month YYYY-MM \
-  [--months 3] --output OUTPUT.xlsx [--overwrite] [--allow-problems] [-v]
+  [--months 3] --output OUTPUT.xlsx [--overwrite] [--allow-problems] [-v] \
+  [--calendar FILE]... [--sheet NAME=FILE]... [--set KEY=VALUE]...
 ```
 
 ## Roster
@@ -101,6 +103,30 @@ security analyst) are reported but not in the pool; `management` (manager, head)
 allocation 0. Its rituals: daily scrum 0.5 h and code review 1 h per day; pre-planning,
 demo and retro 1 h and 1 on 1 0.5 h per iteration, each for the groups listed in the
 sheet.
+
+## Config from the command line
+
+Every run reads `--config`; three flags change what it holds for that run only, and
+the workbook is never modified. `team-capacity-calibrate` takes the same flags.
+
+- `--calendar FILE` replaces the `calendar` sheet with a `.xlsx` or `.csv` file of the
+  same columns. Repeat it for one file per year (or pass one file holding both); the
+  files are stacked, and a date listed twice for a country is an input error. A year
+  of the window with no rows for a country is a `problems` row, so a forgotten year
+  is not silently a year without holidays. `--template-calendar FILE` writes the UAE
+  reference calendar alone, as `.csv` or `.xlsx` by its extension, to start from.
+- `--sheet NAME=FILE` does the same for any config sheet: `settings`, `countries`,
+  `area_countries`, `calendar`, `absences`, `iterations`, `role_groups`, `rituals` or
+  `rates`; for example an HR leave export as `absences`. Repeating a NAME stacks its
+  files. `--calendar FILE` is `--sheet calendar=FILE`.
+- `--set KEY=VALUE` overrides one setting after the `settings` sheet, with the same
+  keys, validation and defaults; errors name the flag, as in `--set focus_loss: 1.5
+  is outside 0..1`. A blank value keeps the sheet's value.
+
+A workbook file is read from the sheet with the target's name, or its only sheet; a
+workbook with several sheets and none of that name is an input error. A CSV file is
+read as UTF-8 text (with or without a byte-order mark) with `,`, `;` or tab
+separators; dates are `YYYY-MM-DD`. No file read may also be `--output`.
 
 ## Calendar
 
@@ -201,7 +227,7 @@ exit code is 3, unless `--allow-problems`.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Output or template written |
+| 0 | Output, template or template calendar written |
 | 1 | Missing or unreadable input, invalid config or roster value, existing output without `--overwrite`, or an output that is an input; nothing written. Input errors are listed together, each with its sheet and row. |
 | 2 | Invalid command line |
 | 3 | Output written, but the `problems` sheet is not empty |
@@ -305,6 +331,12 @@ title classes, unapproved people, `rates` subtrees and depth, the bug-fix flag,
 ramp-up, over-allocation, the output sheets with per-role sums equal to per-person
 sums, `ado-triage`'s own `load_capacity` reading the output, overwrite and
 input-protection rules, problem exit codes, and the template's UAE calendar.
+They also cover a calendar given as one CSV and one workbook per year, a calendar
+file missing a year, duplicate and unknown-country rows across calendar files, the
+template calendar round-tripping as CSV and workbook, `--set` overrides and their
+errors, `--sheet` replacing `absences`, a workbook with several sheets, and a calendar
+file that is also the output.
 `tests/team_capacity_calibrate/` covers bug shares and logged-to-predicted ratios for two teams over
 three iterations, tasks under bugs, iterations without logged work, uncounted work,
-phase-split suggestions that load as a valid `rates` sheet, and the CLI.
+phase-split suggestions that load as a valid `rates` sheet, and the CLI with
+`--set` and `--calendar`.
