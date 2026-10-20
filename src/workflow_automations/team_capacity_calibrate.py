@@ -73,7 +73,9 @@ class Logged:
 def assignee_email(value: Any) -> str:
     """The email in ``System.AssignedTo``: an identity object or ``Name <email>`` text."""
     if isinstance(value, dict):
-        value = value.get("uniqueName") or value.get("mailAddress") or ""
+        # On-premise servers often give a DOMAIN\\user uniqueName and the email elsewhere.
+        candidates = [value.get(key) for key in ("uniqueName", "mailAddress")]
+        value = next((c for c in candidates if c and "@" in str(c)), "")
     text = str(value or "").strip()
     match = _EMAIL_IN_TEXT.search(text)
     return (match.group(1) if match else text).lower() if "@" in text else ""
@@ -171,9 +173,11 @@ def calibrate(
         match_iteration(item["fields"].get(FIELD_ITERATION), config.iterations)
         for item in snapshot.items
     }
-    iterations = [it for it in config.iterations if it in seen]
-    if not iterations:
+    named = [it for it in config.iterations if it in seen]
+    if not named:
         raise tc.CapacityError("No snapshot item is in an iteration of the config")
+    # Every configured iteration in the snapshot's span is reported, with or without work.
+    iterations = [it for it in config.iterations if named[0].start <= it.start <= named[-1].start]
     first = min(it.start for it in iterations)
     last = max(it.end for it in iterations)
     result = tc.compute(roster, config, first, last)

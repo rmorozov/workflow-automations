@@ -523,7 +523,8 @@ def compute_days(
             if day.year not in shares:
                 shares[day.year] = budget_shares(person, config, day.year, first, problems)
             sick_share, vacation_share = shares[day.year]
-            scale = person.allocation * person.ramp(day)
+            employed = person.employed(day)
+            scale = person.allocation * person.ramp(day) if employed else 0.0
             available = hours - sum(taken.values())
             row: dict[str, Any] = {
                 "email": person.email,
@@ -535,13 +536,18 @@ def compute_days(
                 "month": f"{day.year:04d}-{day.month:02d}",
                 "iteration": iteration.name if iteration else "",
                 "scale": scale,
-                "working_day": 1 if scheduled_hours(person, config, day) > 0 else 0,
+                "working_day": 1 if employed and scheduled_hours(person, config, day) > 0 else 0,
                 "gross": hours * scale,
                 "absence": (hours - available) * scale,
             }
             if available > 0:
                 bug_fix = config.rate(person.area_path, day, "bug_fix_quota")
                 focus = config.rate(person.area_path, day, "focus_loss")
+                if person.group.bug_fix and bug_fix + focus > 1 + 1e-9:
+                    raise CapacityError(
+                        f"rates for {person.area_path} on {day}: bug_fix_quota {bug_fix:g} + "
+                        f"focus_loss {focus:g} is more than 1 (a blank cell inherits)"
+                    )
                 parts = net_hours(
                     available,
                     rituals_daily,
@@ -940,7 +946,11 @@ def read_rituals(
         unknown = [n for n in names if n != "all" and n not in groups]
         if unknown:
             errors.add(f"{where}: unknown groups {unknown}")
+        if not names:
+            errors.add(f"{where}: groups is blank (use 'all' for every group)")
         if hours is None:
+            if _blank(values["hours"]):
+                errors.add(f"{where}: hours is blank")
             continue
         rituals.append(
             Ritual(_text(values["name"]), per, hours, None if "all" in names else frozenset(names))
@@ -1036,6 +1046,8 @@ def read_people(frame: pd.DataFrame, config: Config, problems: list[Problem]) ->
     errors = Errors()
     people: list[Person] = []
     seen: set[tuple[str, str]] = set()
+    # ado-triage matches AreaPaths case-sensitively: one spelling per AreaPath.
+    spellings: dict[tuple[str, ...], str] = {}
     has_approved = APPROVED in frame.columns
     for row, values in _rows(frame):
         if has_approved and not is_approved(values.get(APPROVED)):
@@ -1058,6 +1070,7 @@ def read_people(frame: pd.DataFrame, config: Config, problems: list[Problem]) ->
                 detail = f"{where}; title '{title}'" if reason == "no role group" else where
                 problems.append(Problem(email, area, reason, detail))
             continue
+        area = spellings.setdefault(area_parts(area), area)
         if (email, area.lower()) in seen:
             errors.add(f"{where}: {email} is listed twice for {area}")
             continue
@@ -1155,6 +1168,12 @@ def window(start_month: str, months: int) -> tuple[dt.date, dt.date, list[str]]:
 
 
 def compute(roster: pd.DataFrame, config: Config, first: dt.date, last: dt.date) -> Result:
+    recorded = config.settings["absences_from"]
+    if recorded is not None and recorded > first:
+        raise CapacityError(
+            f"settings: absences_from {recorded} is after the window start {first}; "
+            "absences inside the window must be recorded"
+        )
     problems: list[Problem] = []
     people = read_people(roster, config, problems)
     problems.extend(calendar_problems(people, config, first, last))
@@ -1229,7 +1248,8 @@ def build_outputs(
     partial = {
         iteration.name
         for iteration in (config.iteration_of(first), config.iteration_of(last))
-        if iteration is not None and (iteration.start < first or iteration.end > last)
+        if iteration is not None
+        and (iteration.start < first or config.iteration_end(iteration) > last)
     }
     by_person["partial"] = (by_person["period_type"] == "iteration") & by_person["period"].isin(
         partial
@@ -1237,9 +1257,10 @@ def build_outputs(
 
     role_keys = ["area_path", "group", "period_type", "period"]
     by_role = (
-        by_person.groupby(role_keys, sort=True)
+        by_person.assign(present=by_person["gross"] > 0)
+        .groupby(role_keys, sort=True)
         .agg(
-            people=("email", "nunique"),
+            people=("present", "sum"),
             fte=("fte", "sum"),
             partial=("partial", "max"),
             **{c: (c, "sum") for c in COMPONENTS},
@@ -1257,6 +1278,15 @@ def build_outputs(
     )
     capacity = pivot.reset_index().rename(columns={"area_path": CAPACITY_AREA_COL})
     capacity.columns.name = None
+    if capacity.empty:
+        result.problems.append(
+            Problem(
+                "",
+                "",
+                "no triage-pool people",
+                f"'{CAPACITY_SHEET}' is empty; ado-triage cannot read it",
+            )
+        )
 
     problems = pd.DataFrame(
         [vars(p) for p in result.problems], columns=["email", "area_path", "problem", "detail"]
@@ -1381,6 +1411,7 @@ def template_book() -> dict[str, pd.DataFrame]:
 # ---------------------------------------------------------------------------
 
 MAX_COLUMN_WIDTH = 50
+DATE_FORMAT = "YYYY-MM-DD"
 HOUR_COLUMNS = {*COMPONENTS, "fte", "scale"}
 
 
@@ -1394,7 +1425,7 @@ def read_book(path: Path, what: str) -> dict[str, pd.DataFrame]:
 
 
 def write_book(book: dict[str, pd.DataFrame], path: Path) -> None:
-    with pd.ExcelWriter(path, engine="openpyxl", date_format="YYYY-MM-DD") as writer:
+    with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, frame in book.items():
             frame = excel_safe(frame)
             frame.to_excel(writer, sheet_name=name, index=False)
@@ -1406,9 +1437,12 @@ def write_book(book: dict[str, pd.DataFrame], path: Path) -> None:
                 width = min(max([*lengths, len(str(heading))]) + 2, MAX_COLUMN_WIDTH)
                 letter = get_column_letter(position)
                 sheet.column_dimensions[letter].width = width
-                if heading in HOUR_COLUMNS or (name == CAPACITY_SHEET and position > 1):
-                    for cell in sheet[letter][1:]:
+                hours = heading in HOUR_COLUMNS or (name == CAPACITY_SHEET and position > 1)
+                for cell in sheet[letter][1:]:
+                    if hours:
                         cell.number_format = "0.00"
+                    elif isinstance(cell.value, dt.datetime):
+                        cell.number_format = DATE_FORMAT  # dates carry no time of day
 
 
 def _display(value: Any) -> str:
@@ -1519,6 +1553,16 @@ def run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _positive(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"'{text}' is not a whole number of at least 1")
+    return value
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         description=__doc__.splitlines()[0],
@@ -1533,7 +1577,9 @@ Examples:
     root.add_argument("--roster", type=Path, help="team-roster output (one row per person)")
     root.add_argument("--config", type=Path, help="config workbook (see --template)")
     root.add_argument("--start-month", help="first month of the window, YYYY-MM")
-    root.add_argument("--months", type=int, default=3, help="months in the window (default 3)")
+    root.add_argument(
+        "--months", type=_positive, default=3, help="months in the window (default 3)"
+    )
     root.add_argument("--output", type=Path, help="output workbook")
     root.add_argument("--overwrite", action="store_true", help="replace an existing output")
     root.add_argument(
