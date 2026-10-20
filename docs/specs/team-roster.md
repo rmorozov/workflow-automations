@@ -23,7 +23,9 @@ team-roster INPUT.xlsx OUTPUT.xlsx [--mapping MAPPING.xlsx] [--dry-run] [--force
 
 `INPUT.xlsx` is read in full and never modified. The **main sheet** is the first
 sheet with a `corporatetitle` column; without one the run fails, and it may not be
-named like a sheet the output writes (`dev_per_area`, `problems` or a mapping sheet). Its other columns
+named like a sheet the output writes (`dev_per_area`, `problems` or a mapping sheet).
+Because Excel sheet names are case-insensitive, no input sheet may differ from those
+names only in case (such as `Problems`); the run fails and asks to rename it. The main sheet's other columns
 used by the tool, all optional, are `email`, `department_name`, `fullpath` and
 `approved`. Column names are exact and case-sensitive.
 
@@ -90,7 +92,8 @@ The `problems` sheet lists each approved person the headcount cannot count
 correctly, so the mapping can be fixed before a `team-capacity` run: one row per
 person with `row` (their row in the main sheet), `email`, `corporatetitle`,
 `classified_title`, `area_path` and `problem`, the reasons joined by `; `. The
-reasons are `no AreaPath` (left out of the pivot), `no email` (counted as zero) and
+reasons are `no AreaPath` (left out of the pivot), `no email` (blank or only spaces;
+the capacity tool cannot count the person) and
 `unclassified title` (a class outside the table above, including `Unknown` and a
 manually entered one). With no problems the sheet has only its headings; like the
 pivot, it is always recomputed, and the run still exits 0.

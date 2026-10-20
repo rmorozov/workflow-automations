@@ -220,7 +220,7 @@ def test_formula_like_titles_stay_text_in_cells_and_pivot_headings(tmp_path):
     assert out["dev_per_area"]["B2"].value == 1
 
 
-@pytest.mark.parametrize("name", ["dev_per_area", "problems", "person_to_area"])
+@pytest.mark.parametrize("name", ["dev_per_area", "problems", "Problems", "person_to_area"])
 def test_main_sheet_with_an_output_sheet_name_fails(tmp_path, name):
     staff = workbook(tmp_path / "staff.xlsx", {name: {"email": ["a"], "corporatetitle": ["Dev"]}})
     output = tmp_path / "out.xlsx"
@@ -367,3 +367,27 @@ def test_problems_sheet_is_empty_when_everyone_counts(tmp_path):
     problems = sheets(output)["problems"]
     assert problems.empty
     assert problems.columns.tolist() == team_roster.PROBLEM_COLUMNS
+
+
+def test_whitespace_email_is_a_problem(tmp_path):
+    staff = workbook(
+        tmp_path / "staff.xlsx",
+        {
+            "staff": {"email": ["   "], "corporatetitle": ["Developer"], "department_name": ["C"]},
+            "department_to_area": {"department_name": ["C"], "area_path": ["P\\A"]},
+        },
+    )
+    output = tmp_path / "out.xlsx"
+    assert run(staff, output) == 0
+    assert sheets(output)["problems"]["problem"].tolist() == ["no email"]
+
+
+@pytest.mark.parametrize("name", ["Problems", "DEV_PER_AREA", "Person_To_Area"])
+def test_sheet_differing_only_in_case_from_an_output_sheet_fails(tmp_path, name):
+    staff = workbook(
+        tmp_path / "staff.xlsx",
+        {"Staff": {"email": ["a@x"], "corporatetitle": ["Developer"]}, name: {"x": [1]}},
+    )
+    output = tmp_path / "out.xlsx"
+    assert run(staff, output) == 1
+    assert not output.exists()
