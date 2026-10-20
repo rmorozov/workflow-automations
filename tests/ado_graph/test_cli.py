@@ -11,7 +11,7 @@ import pytest
 from ado_graph_data import edges, fake_client, nodes, run_export, wi
 
 from workflow_automations import ado_graph as tool
-from workflow_automations.ado_graph import cli, client, export
+from workflow_automations.ado_graph import cli, client, export, report
 
 
 def test_batch_size_must_be_positive(tmp_path, monkeypatch):
@@ -330,7 +330,7 @@ def test_written_options_reproduce_the_run(parquet_inputs, capsys):
     assert not (parquet_inputs / "out" / "report.xlsx").exists()
     text = written.read_text(encoding="utf-8")
     assert "steps = orphans\n" in text
-    assert "meta-field = [Team=Custom.Team]\n" in text
+    assert 'meta-field = ["Team=Custom.Team"]\n' in text
     assert "# meta-preset =\n" in text
     assert "overwrite =" not in text
     args, _ = cli.options.parse(cli.build_parser(), ["analyze", "--options", str(written)])
@@ -377,3 +377,29 @@ def test_required_options_may_come_from_the_options_file(parquet_inputs, capsys)
     assert output.exists()
     message = _rejected(capsys, ["analyze", "--steps", "orphans"])
     assert "required: --nodes-file, --edges-file" in message
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        ["analyze", "--nodes-file", "n.parquet", "--edges-file", "e.parquet"],
+        ["export", "--ado-url", "https://ado.example", "--query-id", "q", "--formats", "csv"],
+        ["replay", "--snapshot", "s.json", "--formats", "csv"],
+    ],
+)
+def test_outputs_may_not_replace_the_options_file(parquet_inputs, monkeypatch, capsys, mode):
+    monkeypatch.chdir(parquet_inputs)
+    if mode[0] == "analyze":
+        options = parquet_inputs / "run.xlsx"
+        target = ["--nodes-file", "nodes.parquet", "--edges-file", "edges.parquet"]
+        argv = [*mode[:1], *target, "--output-file", str(options)]
+    elif mode[0] == "export":
+        options = parquet_inputs / "run.json"
+        argv = [*mode, "--save-snapshot", str(options)]
+    else:
+        options = report.export_paths(parquet_inputs, ["csv"])[0]
+        argv = [*mode, "--output-dir", str(parquet_inputs)]
+    options.write_text("# keep me\n", encoding="utf-8")
+    message = _rejected(capsys, [*argv, "--options", str(options), "--overwrite"])
+    assert "is the --options input" in message
+    assert options.read_text(encoding="utf-8") == "# keep me\n"

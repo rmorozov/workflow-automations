@@ -385,6 +385,11 @@ def check_outputs(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             if _same_file(output, Path(name)):
                 parser.error(f"--output-file {output} is the {option} input")
         outputs = [output]
+    if args.options:
+        options = Path(args.options)
+        for path in outputs:
+            if path.resolve() == options.resolve() or _same_file(path, options):
+                parser.error(f"{path} is the --options input")
     existing = [str(path) for path in outputs if path.exists()]
     if existing and not args.overwrite:
         parser.error(f"{', '.join(existing)} exists; pass --overwrite to replace it")

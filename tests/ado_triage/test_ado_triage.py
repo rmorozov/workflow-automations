@@ -1101,4 +1101,6 @@ def test_output_is_required_and_may_not_be_the_options_file(tmp_path, no_network
     options.write_text("stale-days = 5\n", encoding="utf-8")
     same = cli(tmp_path, "--options", str(options), "--output", str(options), "--overwrite")
     assert tool.main(same) == tool.EXIT_VALIDATION
+    snap = [*cli(tmp_path, "--output", str(tmp_path / "r.xlsx")), "--save-snapshot", str(options)]
+    assert tool.main([*snap, "--options", str(options), "--overwrite"]) == tool.EXIT_VALIDATION
     assert options.read_text(encoding="utf-8") == "stale-days = 5\n"
