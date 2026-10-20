@@ -1626,29 +1626,30 @@ def excel_dates(frame: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def write_calendar(path: Path, overwrite: bool) -> None:
-    """The UAE reference calendar alone, as .csv or .xlsx, to edit and pass as --calendar."""
-    frame = pd.DataFrame(
-        uae_calendar_rows(), columns=["country", "date", "hours", "name", "status"]
-    )
-    if path.suffix.lower() == ".csv":
-        frame["date"] = frame["date"].map(lambda d: d.isoformat())
+def write_sheets(directory: Path, overwrite: bool) -> list[Path]:
+    """Every sheet of the starter config as ``<sheet>.csv`` in ``directory``, to edit
+    and pass with ``--sheet NAME=FILE`` (``--calendar`` for the calendar)."""
 
-        def write(tmp: Path) -> None:
+    def text(value: Any) -> Any:
+        return value.isoformat() if isinstance(value, dt.date) else value
+
+    targets = []
+    for name, frame in template_book().items():
+        frame = frame.apply(lambda column: column.map(text)) if len(frame) else frame
+
+        def write(tmp: Path, frame: pd.DataFrame = frame) -> None:
             frame.to_csv(tmp, index=False, encoding="utf-8")
 
-    else:
-
-        def write(tmp: Path) -> None:
-            write_book({"calendar": excel_dates(frame)}, tmp)
-
-    publish_all([(path, write)], overwrite=overwrite, exists_error=CapacityError, exclusive=True)
-    logger.info("Wrote the UAE reference calendar to %s", path)
+        targets.append((directory / f"{name}.csv", write))
+    directory.mkdir(parents=True, exist_ok=True)
+    publish_all(targets, overwrite=overwrite, exists_error=CapacityError, exclusive=True)
+    return [path for path, _ in targets]
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.template_calendar:
-        write_calendar(args.template_calendar, args.overwrite)
+    if args.template_sheets:
+        paths = write_sheets(args.template_sheets, args.overwrite)
+        logger.info("Wrote %s", ", ".join(str(p) for p in paths))
         if not args.template:
             return 0
     if args.template:
@@ -1773,10 +1774,11 @@ Examples:
         help="write a starter config with UAE 2026-2027 calendar and exit",
     )
     root.add_argument(
-        "--template-calendar",
+        "--template-sheets",
         type=Path,
-        metavar="FILE",
-        help="write the UAE 2026-2027 calendar alone as .csv or .xlsx and exit",
+        metavar="DIR",
+        help="write every sheet of the starter config as DIR/<sheet>.csv (the names "
+        "--sheet takes) and exit",
     )
     root.add_argument("-v", "--verbose", action="store_true", help="DEBUG logging")
     return root

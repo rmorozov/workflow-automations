@@ -858,15 +858,18 @@ def test_calendar_file_rows_are_validated(files, tmp_path):
     assert not files[2].exists()
 
 
-def test_template_calendar_round_trips_as_csv_and_xlsx(files, tmp_path):
-    template = pd.read_excel(files[1], sheet_name=None)
-    for name in ("uae.csv", "uae.xlsx"):
-        path = tmp_path / name
-        assert tc.main(["--template-calendar", str(path)]) == 0
-        frame = tc.read_table(path, "calendar")
-        config = tc.read_config({**template, "calendar": frame}, set())
-        assert config.calendar == tc.read_config(template, set()).calendar
-    assert tc.main(["--template-calendar", str(tmp_path / "uae.csv")]) == 1  # exists
+def test_template_sheets_are_one_csv_per_sheet_and_load_as_the_template(files, tmp_path):
+    folder = tmp_path / "sheets"
+    assert tc.main(["--template-sheets", str(folder)]) == 0
+    assert sorted(p.name for p in folder.iterdir()) == sorted(f"{n}.csv" for n in tc.CONFIG_SHEETS)
+    assert cli(files) == 0
+    expected = pd.read_excel(files[2], sheet_name=None)
+    sheets = [arg for n in tc.CONFIG_SHEETS for arg in ("--sheet", f"{n}={folder / n}.csv")]
+    assert cli(files, "--overwrite", *sheets) == 0
+    actual = pd.read_excel(files[2], sheet_name=None)
+    for name, frame in expected.items():
+        pd.testing.assert_frame_equal(actual[name], frame, check_dtype=False)
+    assert tc.main(["--template-sheets", str(folder)]) == 1  # exists
 
 
 def test_set_overrides_the_settings_sheet(files):

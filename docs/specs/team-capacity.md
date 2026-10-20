@@ -33,7 +33,7 @@ sensitivity (CP-013), plus demand quality in triage (CP-014), in `docs/backlog/`
 
 ```bash
 team-capacity --template CONFIG.xlsx [--overwrite]
-team-capacity --template-calendar CALENDAR.csv|CALENDAR.xlsx [--overwrite]
+team-capacity --template-sheets DIR [--overwrite]
 team-capacity --roster ROSTER.xlsx --config CONFIG.xlsx --start-month YYYY-MM \
   [--months 3] --output OUTPUT.xlsx [--overwrite] [--allow-problems] [-v] \
   [--calendar FILE]... [--sheet NAME=FILE]... [--set KEY=VALUE]...
@@ -113,12 +113,14 @@ the workbook is never modified. `team-capacity-calibrate` takes the same flags.
   same columns. Repeat it for one file per year (or pass one file holding both); the
   files are stacked, and a date listed twice for a country is an input error. A year
   of the window with no rows for a country is a `problems` row, so a forgotten year
-  is not silently a year without holidays. `--template-calendar FILE` writes the UAE
-  reference calendar alone, as `.csv` or `.xlsx` by its extension, to start from.
+  is not silently a year without holidays.
 - `--sheet NAME=FILE` does the same for any config sheet: `settings`, `countries`,
   `area_countries`, `calendar`, `absences`, `iterations`, `role_groups`, `rituals` or
   `rates`; for example an HR leave export as `absences`. Repeating a NAME stacks its
-  files. `--calendar FILE` is `--sheet calendar=FILE`.
+  files. `--calendar FILE` is `--sheet calendar=FILE`. `--template-sheets DIR` writes
+  every sheet of the starter config as `DIR/<sheet>.csv`, so the file names are the
+  names `--sheet` takes and each file holds that sheet's columns and template rows
+  (the UAE calendar among them).
 - `--set KEY=VALUE` overrides one setting after the `settings` sheet, with the same
   keys, validation and defaults; errors name the flag, as in `--set focus_loss: 1.5
   is outside 0..1`. A blank value keeps the sheet's value.
@@ -229,7 +231,7 @@ exit code is 3, unless `--allow-problems`.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Output, template or template calendar written |
+| 0 | Output, template or template sheets written |
 | 1 | Missing or unreadable input, invalid config or roster value, existing output without `--overwrite`, or an output that is an input; nothing written. Input errors are listed together, each with its sheet and row. |
 | 2 | Invalid command line |
 | 3 | Output written, but the `problems` sheet is not empty |
@@ -335,7 +337,7 @@ sums, `ado-triage`'s own `load_capacity` reading the output, overwrite and
 input-protection rules, problem exit codes, and the template's UAE calendar.
 They also cover a calendar given as one CSV and one workbook per year, a calendar
 file missing a year, duplicate and unknown-country rows across calendar files, the
-template calendar round-tripping as CSV and workbook, `--set` overrides and their
+template sheets loading as the template config, `--set` overrides and their
 errors, `--sheet` replacing `absences`, a workbook with several sheets, stacked files
 whose headers differ in case, a repeated column, one-column and tab-separated CSV,
 and a calendar file that is also the output.
