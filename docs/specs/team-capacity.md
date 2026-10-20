@@ -17,6 +17,20 @@ deductions; expected illness, unbooked leave, bug fixing and interrupts are
 percentages of what is left. The net is the time that can buy planned work. The tool
 is local and deterministic.
 
+### Limits
+
+The output estimates developer-effort availability per AreaPath. It is a capacity
+triage worksheet under validation, not a delivery commitment: it does not show that
+testing, architecture, integration or acceptance capacity exists, or that work is
+ready and unblocked. The defaults (rituals, 7 sick days, 50% bug-fix quota, 12% focus
+loss) are starting hypotheses, not measured constants, and the bug-fix quota and
+focus loss dominate the result. Net hours compare with change-request estimates
+only if those estimates exclude what the model deducts (see [What change-request
+estimates contain](#what-change-request-estimates-contain)). Open work on these
+limits: the measurement contract (CP-008), availability versus productivity
+(CP-009), calibration evidence (CP-010, CP-011), leave balances (CP-012) and
+sensitivity (CP-013), in `docs/backlog/`.
+
 ```bash
 team-capacity --template CONFIG.xlsx [--overwrite]
 team-capacity --roster ROSTER.xlsx --config CONFIG.xlsx --start-month YYYY-MM \
@@ -211,9 +225,13 @@ announced.
 
 ## Calibration
 
-`team-capacity-calibrate` measures the two rates that dominate the forecast: the
-bug-fix quota and focus loss take 62% of the base, and ±10 points of bug-fix quota
-move net hours by about ±26%, while the whole calendar moves them by a few percent.
+`team-capacity-calibrate` checks the rate that dominates the forecast against logged
+work: the bug-fix quota and focus loss take 62% of the base, and ±10 points of bug-fix
+quota move net hours by about ±26%, while the whole calendar moves them by a few
+percent. It measures only the bug share of logged work. Focus loss cannot be
+identified from logged hours and is taken from the config. Its suggestions are
+exploratory: they rest on a snapshot's cumulative `CompletedWork` and today's roster
+(see the limits below, CP-010 and CP-011).
 
 ```bash
 team-capacity-calibrate --snapshot SNAPSHOT.json --roster ROSTER.xlsx --config CONFIG.xlsx \
@@ -238,11 +256,15 @@ often give `DOMAIN\user` as `uniqueName`), or the address in `Name <email>` text
 
 The `calibration` sheet has one row per AreaPath and iteration: predicted base,
 bug-fix and net hours; completed bug, other and total hours; the configured and
-observed bug share; the suggested quota; and the estimate accuracy, completed other
-hours ÷ predicted net hours. The observed share is bug hours ÷ logged hours. Nobody
-logs focus loss, so logged time is the base less focus loss, and the suggested quota
+observed bug share; the suggested quota; and `logged_to_predicted`, completed other
+hours ÷ predicted net hours. That ratio relates logged effort to predicted capacity;
+it is not estimate accuracy, which would need each item's estimate and actual effort,
+and a low value can mean under-logging, blocked work, no ready work or duties the
+model omits. The observed share is bug hours ÷ logged hours. Assuming nobody logs
+focus loss, logged time is the base less focus loss, and the suggested quota
 is the observed share × (1 − focus loss). Focus loss here is the iteration's predicted
-focus hours ÷ predicted base, so a rate changing inside the iteration counts by day. An iteration without logged work has
+focus hours ÷ predicted base, so a rate changing inside the iteration counts by day.
+An iteration without logged work has
 status `no logged work`, blank ratios and a `problems` row; it is never counted as
 zero.
 
@@ -279,6 +301,6 @@ title classes, unapproved people, `rates` subtrees and depth, the bug-fix flag,
 ramp-up, over-allocation, the output sheets with per-role sums equal to per-person
 sums, `ado-triage`'s own `load_capacity` reading the output, overwrite and
 input-protection rules, problem exit codes, and the template's UAE calendar.
-`tests/team_capacity_calibrate/` covers bug shares and accuracy for two teams over
+`tests/team_capacity_calibrate/` covers bug shares and logged-to-predicted ratios for two teams over
 three iterations, tasks under bugs, iterations without logged work, uncounted work,
 phase-split suggestions that load as a valid `rates` sheet, and the CLI.

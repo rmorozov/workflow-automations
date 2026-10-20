@@ -1,4 +1,4 @@
-"""Measure the capacity model's bug-fix quota and estimate accuracy from ADO history.
+"""Measure the observed bug share of logged work per AreaPath and iteration from ADO history.
 
 The input is a saved ADO snapshot (``ado-graph`` or ``ado-triage``) of work in
 past iterations, the roster and the ``team-capacity`` config with an
@@ -52,7 +52,7 @@ CALIBRATION_COLUMNS = [
     "configured_bug_fix_quota",
     "observed_bug_share",
     "suggested_bug_fix_quota",
-    "estimate_accuracy",
+    "logged_to_predicted",
 ]
 RATES_COLUMNS = ["area_path", "from", "to", "phase", "bug_fix_quota", "focus_loss", "note"]
 
@@ -219,7 +219,7 @@ def calibrate(
                 "configured_bug_fix_quota": bug / base if base else None,
                 "observed_bug_share": None,
                 "suggested_bug_fix_quota": None,
-                "estimate_accuracy": None,
+                "logged_to_predicted": None,
                 "focus_loss": focus_loss,
             }
             if work.total <= 0:
@@ -236,7 +236,7 @@ def calibrate(
                     observed_bug_share=share,
                     # Logged time is the base without its focus loss, which nobody logs.
                     suggested_bug_fix_quota=share * (1 - focus_loss),
-                    estimate_accuracy=work.other / net if net else None,
+                    logged_to_predicted=work.other / net if net else None,
                 )
             rows.append(row)
     calibration = pd.DataFrame(rows, columns=[*CALIBRATION_COLUMNS, "focus_loss"])
@@ -280,7 +280,7 @@ def _rate_row(area: str, run: list[pd.Series]) -> dict[str, Any]:
         "phase": run[0]["phase"],
         "bug_fix_quota": round(quota, 3),
         "focus_loss": None,
-        "note": f"{len(run)} iterations, {logged:g} logged hours",
+        "note": f"exploratory: {len(run)} iterations, {logged:g} logged hours",
     }
 
 

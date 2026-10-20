@@ -12,7 +12,7 @@ upload workbook data. `ado-triage` reads (never writes) an on-premise Azure DevO
 | `gerrit-parents` | Match repositories listed in a sheet to their closest parent in a Gerrit tree outline | [Gerrit parents](docs/specs/gerrit-parents.md) |
 | `team-roster` | Classify job titles, map people to ADO AreaPaths and count headcount per area | [Team roster](docs/specs/team-roster.md) |
 | `team-capacity` | Turn the roster and a working calendar into net capacity hours per AreaPath for `ado-triage` | [Team capacity](docs/specs/team-capacity.md) |
-| `team-capacity-calibrate` | Measure bug-fix share and estimate accuracy from a saved ADO snapshot | [Team capacity](docs/specs/team-capacity.md#calibration) |
+| `team-capacity-calibrate` | Measure the bug-fix share of logged work from a saved ADO snapshot (exploratory) | [Team capacity](docs/specs/team-capacity.md#calibration) |
 | `ado-graph` | Export ADO work-item graphs and analyze saved Parquet data | [ADO graph/export](docs/specs/ado-graph.md) |
 | `ado-triage` | Rank ADO change-request scope into a triage agenda and team summary | [ADO scope triage](docs/specs/ado-triage.md) |
 
