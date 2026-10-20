@@ -81,7 +81,7 @@ warnings.
 ## Headcount pivot
 
 `dev_per_area` has one row per AreaPath and one column per class, with the count of
-non-blank `email` values. Only approved rows count when the main sheet has an
+`email` values that are not blank or only spaces. Only approved rows count when the main sheet has an
 `approved` column: `TRUE`, `1` (as a boolean, number or the text `TRUE`, `True`,
 `true`, `1`); without the column every row counts. Rows without an AreaPath are not
 counted, and a person without an email is not counted although their AreaPath
@@ -93,7 +93,7 @@ correctly, so the mapping can be fixed before a `team-capacity` run: one row per
 person with `row` (their row in the main sheet), `email`, `corporatetitle`,
 `classified_title`, `area_path` and `problem`, the reasons joined by `; `. The
 reasons are `no AreaPath` (left out of the pivot), `no email` (blank or only spaces;
-the capacity tool cannot count the person) and
+counted as zero) and
 `unclassified title` (a class outside the table above, including `Unknown` and a
 manually entered one). With no problems the sheet has only its headings; like the
 pivot, it is always recomputed, and the run still exits 0.
@@ -143,6 +143,7 @@ errors only (`-v` wins when both are given).
 - An input sheet named `dev_per_area` was overwritten by the pivot, and an old
   pivot was kept when this run could not compute one; the first now fails, the second
   writes an empty pivot.
+- An email of only spaces counted as a person in the pivot; it now counts as no email.
 - Text cells openpyxl cannot store (control characters) are cleaned rather than
   failing the write.
 

@@ -244,7 +244,7 @@ def validation_warnings(book: dict[str, pd.DataFrame]) -> list[str]:
 
 
 def headcount_pivot(df: pd.DataFrame) -> pd.DataFrame:
-    """Approved people (non-blank email) per AreaPath and classified title.
+    """Approved people (an email that is not blank or only spaces) per AreaPath and title.
 
     Rows without an AreaPath are not counted. Without an ``approved`` column every
     row counts.
@@ -256,6 +256,8 @@ def headcount_pivot(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or df[AREA_PATH].isna().all():
         logger.warning("No approved rows with an area_path; '%s' is empty", SHEET_DEV_PER_AREA)
         return pd.DataFrame()
+    # An email of only spaces is no email, as the problems sheet reports it.
+    df = df.assign(**{EMAIL: df[EMAIL].map(lambda v: None if _missing(v) else v)})
     pivot = pd.pivot_table(
         df, values=EMAIL, index=AREA_PATH, columns=CLASSIFIED_TITLE, aggfunc="count", fill_value=0
     ).reset_index()
