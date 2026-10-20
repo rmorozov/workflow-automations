@@ -41,7 +41,9 @@ optional:
 | `ramp_up_share`, `ramp_up_months` | A joiner's reduced speed after `start_date` | settings |
 
 A person split across AreaPaths has one row per AreaPath; their allocations should
-add up to at most 1. Emails are compared lower-cased.
+add up to at most 1. Emails are compared lower-cased. AreaPaths are compared
+case-insensitively, and the first spelling in the roster is used in the output,
+because `ado-triage` matches them case-sensitively.
 
 ## Config workbook
 
@@ -66,7 +68,7 @@ Settings and their defaults:
 | --- | --- | --- |
 | `iteration_start` | none | a Monday; required without an `iterations` sheet |
 | `iteration_weeks` | 2 | iteration length in whole weeks |
-| `absences_from` | the window start | absences are recorded from this date (see [Leave budgets](#leave-budgets)) |
+| `absences_from` | the window start | absences are recorded from this date (see [Leave budgets](#leave-budgets)); it may not be after the window start |
 | `default_country` | none | country of people without one |
 | `workdays` | `Mon-Fri` | default week (`Sun-Thu` and `Mon,Tue,Thu` also work) |
 | `hours_per_day` | 8 | default working day |
@@ -151,7 +153,9 @@ A `rates` row sets `bug_fix_quota` and `focus_loss` for its AreaPath and every
 AreaPath below it, from `from` to `to` (blank is open). For a day, the matching
 rows are ordered by depth (deepest first), then by start (latest first); each rate
 takes the first non-blank value, else the setting. Two rows with the same AreaPath
-and start and overlapping dates are an error. `phase` is a label, for example
+and start and overlapping dates are an error, and so is a bug-fix quota and focus
+loss that add up to more than 1 on any day of a bug-fixing group, inherited values
+included. `phase` is a label, for example
 `stabilization`, and does not change the arithmetic.
 
 ## Output
@@ -166,14 +170,17 @@ One workbook, written to a temporary sibling and renamed into place:
 | `calendar_weeks` | working days and hours per country and week, to check against official weekly norms |
 | `problems` | `email`, `area_path`, `problem`, `detail` |
 
-Iteration rows hold only days inside the window; `partial` marks an iteration cut by
-the window's edge. FTE is allocation × ramp-up averaged over the country's working
-days in the period. Hours are full precision, shown with two decimals.
+Iteration rows hold only days inside the window; `partial` marks an iteration whose
+start or last Friday is outside the window. `people` counts those with hours in the
+period; FTE is allocation × ramp-up averaged over the country's working days in the
+period, counting only days the person is employed. Hours are full precision, shown with two decimals.
 
 Problems are approved people with no email, no AreaPath or a title class without a
 role group (they are not counted), allocations over 1 for one email, leave over the
-full-year budget, a budget larger than the days left, and a country year inside the
-window with no calendar rows. With any problem the output is still written and the
+full-year budget, a budget larger than the days left, a country year inside the
+window with no calendar rows, and no triage-pool people at all (`ado-triage` cannot
+read an empty capacity sheet). A ritual with blank `hours` or `groups` is an input
+error. With any problem the output is still written and the
 exit code is 3, unless `--allow-problems`.
 
 ## Exit codes
@@ -217,14 +224,17 @@ The snapshot is a saved [ADO snapshot](ado-snapshot.md) of past work (from
 `ado-triage --save-snapshot` or `ado-graph export --save-snapshot`); nothing contacts
 ADO. The config needs an `iterations` sheet: an item belongs to the iteration whose
 `name` equals its `System.IterationPath` or that path's last segment. The model runs
-over those iterations.
+over every configured iteration from the first to the last one an item is in, so an
+iteration nobody logged work in is still reported.
 
 Completed work is `Microsoft.VSTS.Scheduling.CompletedWork` of each snapshot item,
 counted for the triage pool only: its AreaPath maps to the deepest AreaPath of a
 triage-pool person, and its `System.AssignedTo` is a triage-pool person. An item is
 bug work when its type is in `--bug-types` or its parent's type is (a task under a
 bug). Work outside a configured iteration, outside the pool's AreaPaths, or assigned
-to someone else is not counted; its hours per reason go to `problems`.
+to someone else is not counted; its hours per reason go to `problems`. The assignee's
+email is the `uniqueName` or `mailAddress` that contains `@` (on-premise servers
+often give `DOMAIN\user` as `uniqueName`), or the address in `Name <email>` text.
 
 The `calibration` sheet has one row per AreaPath and iteration: predicted base,
 bug-fix and net hours; completed bug, other and total hours; the configured and
@@ -237,8 +247,9 @@ zero.
 
 `suggested_rates` has one `rates` row per AreaPath and run of consecutive iterations
 with the same `phase`, its quota weighted by logged hours, `focus_loss` blank (so it
-inherits) and a `note`. It can be pasted into the config's `rates` sheet as is;
-nothing changes the config automatically.
+inherits) and a `note`. It loads as a valid `rates` sheet, but its dates are the past
+iterations': to forecast with it, change `from` and `to` to the coming phases.
+Nothing changes the config automatically.
 
 Limits: `CompletedWork` is cumulative per item, so an item worked over several
 iterations counts in the one it is in now; parents are looked up one level up.

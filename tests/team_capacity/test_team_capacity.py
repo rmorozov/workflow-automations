@@ -620,10 +620,16 @@ def test_output_sheets_and_sums(files):
 def test_ado_triage_reads_the_capacity_sheet(files):
     triage = pytest.importorskip("workflow_automations.ado_triage")
     assert cli(files) == 0
-    book = pd.read_excel(files[2], sheet_name=None)
-    expected = book["dev_per_area_capacity"].set_index("AreaPath")[["2026-11", "2026-12"]]
+    person = pd.read_excel(files[2], sheet_name="capacity_by_person")
+    pool = person[
+        (person["period_type"] == "month")
+        & person["group"].isin(["developer", "team lead"])
+        & person["period"].isin(["2026-11", "2026-12"])
+    ]
+    expected = pool.groupby("area_path")["net"].sum().to_dict()
+    assert expected["P\\A"] > 0 and expected["P\\B\\C"] > 0
     loaded = triage.load_capacity(files[2], ["2026-11", "2026-12"])
-    assert loaded == pytest.approx(expected.sum(axis=1).to_dict())
+    assert loaded == pytest.approx(expected)
 
 
 def test_existing_output_needs_overwrite(files):
@@ -666,6 +672,9 @@ def test_input_error_writes_nothing(files):
 
 def test_missing_arguments_fail(files, capsys):
     assert tc.main(["--roster", str(files[0])]) == 1
+    with pytest.raises(SystemExit) as exit_info:
+        cli(files, "--months", "0")
+    assert exit_info.value.code == 2
 
 
 def test_template_is_a_valid_config_with_the_uae_calendar(files):
@@ -723,3 +732,81 @@ def test_december_leave_beyond_the_prorated_budget_is_not_a_problem():
     assert result.problems == []
     assert result.days["vacation"].sum() == 0
     assert result.days["absence"].sum() == 13 * 8  # Dec 25 is a holiday
+
+
+def test_people_and_fte_count_only_employed_days(files):
+    roster_path, config_path, output = files
+    staff = roster(
+        {"email": "a@x", "end_date": "2026-11-02"},
+        {"email": "b@x", "start_date": "2026-12-30", "ramp_up_months": 0},
+    )
+    write(roster_path, {"people": staff})
+    assert cli(files) == 0
+    role = pd.read_excel(output, sheet_name="capacity_by_role").set_index(["period_type", "period"])
+    november, december = role.loc[("month", "2026-11")], role.loc[("month", "2026-12")]
+    assert (november["people"], december["people"]) == (1, 1)
+    # UAE November and December 2026 both have 21 working days (National Day Dec 2-3).
+    assert november["fte"] == pytest.approx(1 / 21)
+    assert december["fte"] == pytest.approx(2 / 21)
+
+
+def test_inherited_rates_over_one_fail():
+    with pytest.raises(tc.CapacityError, match="bug_fix_quota 0.95 \\+ focus_loss 0.12"):
+        run(
+            [{"email": "a@x"}],
+            D(2026, 11, 2),
+            D(2026, 11, 6),
+            rates={"area_path": ["P"], "from": [None], "to": [None], "bug_fix_quota": [0.95]},
+        )
+
+
+def test_area_paths_differing_in_case_share_one_spelling():
+    result, config = run(
+        [{"email": "a@x", "area_path": "P\\A"}, {"email": "b@x", "area_path": "p\\a"}],
+        D(2026, 11, 2),
+        D(2026, 11, 6),
+    )
+    outputs = tc.build_outputs(result, config, D(2026, 11, 2), D(2026, 11, 6), ["2026-11"])
+    assert outputs["dev_per_area_capacity"]["AreaPath"].tolist() == ["P\\A"]
+
+
+def test_absences_from_after_the_window_start_fails():
+    with pytest.raises(tc.CapacityError, match="absences_from 2026-12-01 is after"):
+        run(
+            [{"email": "a@x"}],
+            D(2026, 11, 1),
+            D(2026, 12, 31),
+            settings={"absences_from": D(2026, 12, 1)},
+        )
+
+
+def test_ritual_with_blank_hours_or_groups_fails():
+    with pytest.raises(tc.CapacityError) as error:
+        run(
+            [{"email": "a@x"}],
+            D(2026, 11, 2),
+            D(2026, 11, 6),
+            rituals={
+                "name": ["a", "b"],
+                "per": ["day", "day"],
+                "hours": [None, 1],
+                "groups": ["all", None],
+            },
+        )
+    assert "rituals row 2: hours is blank" in str(error.value)
+    assert "rituals row 3: groups is blank" in str(error.value)
+
+
+def test_no_triage_pool_is_a_problem():
+    result, config = run(
+        [{"email": "t@x", "classified_title": "testing engineer"}], D(2026, 11, 2), D(2026, 11, 6)
+    )
+    tc.build_outputs(result, config, D(2026, 11, 2), D(2026, 11, 6), ["2026-11"])
+    assert [p.problem for p in result.problems] == ["no triage-pool people"]
+
+
+def test_dates_are_written_without_a_time(files):
+    import openpyxl
+
+    sheet = openpyxl.load_workbook(files[1])["calendar"]
+    assert sheet["B2"].number_format == "YYYY-MM-DD"

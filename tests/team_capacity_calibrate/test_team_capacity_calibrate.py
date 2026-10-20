@@ -206,3 +206,14 @@ def test_config_without_iterations_is_refused():
 )
 def test_assignee_email(value, email):
     assert cal.assignee_email(value) == email
+
+
+def test_configured_iteration_without_any_item_is_reported():
+    items = [i for i in ITEMS if i["fields"]["System.IterationPath"] != "Proj\\S2"]
+    snap = RawSnapshot(
+        producer="ado-triage", source={}, roots=[i["id"] for i in items], items=items
+    )
+    config = tc.read_config(config_book(), tc.roster_emails(ROSTER))
+    result = cal.calibrate(snap, ROSTER, config, {"bug"})["calibration"]
+    s2 = result[result["iteration"] == "S2"]
+    assert s2["status"].tolist() == ["no logged work", "no logged work"]
