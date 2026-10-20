@@ -40,6 +40,8 @@ SHEET_PERSON_TO_AREA = "person_to_area"
 SHEET_DEPARTMENT_TO_AREA = "department_to_area"
 SHEET_FULLPATH_TO_AREA = "fullpath_to_area"
 SHEET_DEV_PER_AREA = "dev_per_area"
+SHEET_PROBLEMS = "problems"
+PROBLEM_COLUMNS = ["row", EMAIL, CORPORATE_TITLE, CLASSIFIED_TITLE, AREA_PATH, "problem"]
 
 # (substring of the lower-cased title, class); the first match wins, so more
 # specific patterns come before general ones.
@@ -76,7 +78,8 @@ MAPPINGS: tuple[Mapping, ...] = (
 )
 
 # Sheets the output writes; the main sheet may not have one of these names.
-RESERVED_SHEETS = frozenset({SHEET_DEV_PER_AREA, *(m.sheet for m in MAPPINGS)})
+RESERVED_SHEETS = frozenset({SHEET_DEV_PER_AREA, SHEET_PROBLEMS, *(m.sheet for m in MAPPINGS)})
+KNOWN_CLASSES = frozenset(cls for _, cls in CLASSIFICATION_RULES)
 APPROVED_TEXT = frozenset({"TRUE", "True", "true", "1"})
 MAX_COLUMN_WIDTH = 50
 
@@ -255,9 +258,41 @@ def headcount_pivot(df: pd.DataFrame) -> pd.DataFrame:
     return pivot
 
 
+def problem_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Approved people the headcount cannot count correctly, one row each, with reasons.
+
+    A person without an AreaPath is left out of the pivot, one without an email counts
+    as zero, and a title outside the known classes needs a role group before capacity
+    planning can use it. ``row`` is the person's row in the main sheet.
+    """
+    rows = []
+    for position, (_, values) in enumerate(df.iterrows(), start=2):
+        if APPROVED in df.columns and not is_approved(values.get(APPROVED)):
+            continue
+        title = values.get(CLASSIFIED_TITLE)
+        reasons = [
+            reason
+            for reason, missing in (
+                ("no AreaPath", _blank(values.get(AREA_PATH))),
+                ("no email", _blank(values.get(EMAIL))),
+                ("unclassified title", _blank(title) or str(title) not in KNOWN_CLASSES),
+            )
+            if missing
+        ]
+        if reasons:
+            rows.append(
+                {
+                    "row": position,
+                    **{c: values.get(c) for c in PROBLEM_COLUMNS[1:-1]},
+                    "problem": "; ".join(reasons),
+                }
+            )
+    return pd.DataFrame(rows, columns=PROBLEM_COLUMNS)
+
+
 def sheet_order(book: dict[str, pd.DataFrame], main: str) -> list[str]:
-    """Main sheet, pivot, mapping sheets in priority order, then the rest as read."""
-    first = [main, SHEET_DEV_PER_AREA, *(m.sheet for m in MAPPINGS)]
+    """Main sheet, pivot, problems, mapping sheets in priority order, then the rest."""
+    first = [main, SHEET_DEV_PER_AREA, SHEET_PROBLEMS, *(m.sheet for m in MAPPINGS)]
     order = [name for name in dict.fromkeys(first) if name in book]
     return order + [name for name in book if name not in order]
 
@@ -326,6 +361,13 @@ def transform(
         # An input's old pivot must not pass for this run's headcount.
         book[SHEET_DEV_PER_AREA] = pd.DataFrame()
         logger.warning("'%s' is empty: needs %s and %s", SHEET_DEV_PER_AREA, AREA_PATH, EMAIL)
+    book[SHEET_PROBLEMS] = problem_rows(df)
+    if not book[SHEET_PROBLEMS].empty:
+        logger.warning(
+            "%d approved people need fixing before capacity planning; see '%s'",
+            len(book[SHEET_PROBLEMS]),
+            SHEET_PROBLEMS,
+        )
     return main, warnings
 
 

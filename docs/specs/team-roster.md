@@ -23,7 +23,7 @@ team-roster INPUT.xlsx OUTPUT.xlsx [--mapping MAPPING.xlsx] [--dry-run] [--force
 
 `INPUT.xlsx` is read in full and never modified. The **main sheet** is the first
 sheet with a `corporatetitle` column; without one the run fails, and it may not be
-named like a sheet the output writes (`dev_per_area` or a mapping sheet). Its other columns
+named like a sheet the output writes (`dev_per_area`, `problems` or a mapping sheet). Its other columns
 used by the tool, all optional, are `email`, `department_name`, `fullpath` and
 `approved`. Column names are exact and case-sensitive.
 
@@ -86,9 +86,18 @@ counted, and a person without an email is not counted although their AreaPath
 appears. With no countable rows, or without an `email` or `area_path` column, the
 sheet is empty. An existing `dev_per_area` sheet is always replaced, never kept.
 
+The `problems` sheet lists each approved person the headcount cannot count
+correctly, so the mapping can be fixed before a `team-capacity` run: one row per
+person with `row` (their row in the main sheet), `email`, `corporatetitle`,
+`classified_title`, `area_path` and `problem`, the reasons joined by `; `. The
+reasons are `no AreaPath` (left out of the pivot), `no email` (counted as zero) and
+`unclassified title` (a class outside the table above, including `Unknown` and a
+manually entered one). With no problems the sheet has only its headings; like the
+pivot, it is always recomputed, and the run still exits 0.
+
 ## Output
 
-`OUTPUT.xlsx` contains, in order: the main sheet, `dev_per_area`, the three mapping
+`OUTPUT.xlsx` contains, in order: the main sheet, `dev_per_area`, `problems`, the three mapping
 sheets in priority order, then every other input sheet as read. Values are written,
 not formulas: text that starts with `=` stays text, in headings too (a title class
 becomes a pivot heading). Column widths fit their content
@@ -140,8 +149,8 @@ Tests in `tests/team_roster/` cover every classification rule and its priority,
 blank and non-text titles, the person → department → fullpath priority with
 case- and space-insensitive keys, input mapping sheets winning over `--mapping`,
 created empty sheets, kept `classified_title`, the approved rule, pivot counting
-(unapproved, unmapped and email-less people), the blank-versus-`nan` key, sheet
-order, readable widths, formula-like text in cells and pivot headings, reserved
+(unapproved, unmapped and email-less people), the `problems` sheet, the
+blank-versus-`nan` key, sheet order, readable widths, formula-like text in cells and pivot headings, reserved
 sheet names, replacing an old pivot, overwrite protection (forced, non-interactive,
 prompted, and an output appearing during the run), refusing to replace inputs, missing inputs, dry run,
 and that inputs are not modified. The output was compared with the original script's
