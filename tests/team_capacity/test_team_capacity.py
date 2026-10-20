@@ -921,3 +921,31 @@ def test_output_may_not_replace_a_calendar_file(files, tmp_path):
     args = ["--calendar", str(path), "--overwrite"]
     assert cli((roster_path, config_path, path), *args) == 1
     assert path.read_bytes() == before
+
+
+def test_stacked_files_align_columns_whatever_their_case(files, tmp_path):
+    first, second = tmp_path / "a.csv", tmp_path / "b.csv"
+    # Settings files replace the whole sheet, so the first one carries the cadence.
+    first.write_text(
+        "KEY,VALUE\nbug_fix_quota,0\niteration_start,2026-01-05\ndefault_country,UAE\n",
+        encoding="utf-8",
+    )
+    second.write_text(" key ,value\nfocus_loss,0\n", encoding="utf-8")
+    assert cli(files, "--sheet", f"settings={first}", "--sheet", f"settings={second}") == 0
+    row = person_hours(files[2], "a@x", "2026-11")
+    assert row["bug_fix"] == 0 and row["focus"] == 0
+
+
+def test_repeated_column_in_a_file_fails(tmp_path):
+    path = tmp_path / "cal.csv"
+    path.write_text("country,Country,date,hours\nUAE,UAE,2027-01-01,0\n", encoding="utf-8")
+    with pytest.raises(tc.CapacityError, match=r"columns \['country'\] appear more than once"):
+        tc.read_table(path, "calendar")
+
+
+@pytest.mark.parametrize("text", ["country\nUAE\n", "country\tworkdays\nUAE\tMon-Fri\n"])
+def test_csv_separator_is_comma_semicolon_or_tab_only(files, tmp_path, text):
+    path = tmp_path / "countries.csv"
+    path.write_text(text, encoding="utf-8")
+    assert tc.read_table(path, "countries").columns.tolist()[0] == "country"
+    assert cli(files, "--sheet", f"countries={path}") == 0

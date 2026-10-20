@@ -125,8 +125,10 @@ the workbook is never modified. `team-capacity-calibrate` takes the same flags.
 
 A workbook file is read from the sheet with the target's name, or its only sheet; a
 workbook with several sheets and none of that name is an input error. A CSV file is
-read as UTF-8 text (with or without a byte-order mark) with `,`, `;` or tab
-separators; dates are `YYYY-MM-DD`. No file read may also be `--output`.
+read as UTF-8 text (with or without a byte-order mark); its separator is whichever
+of `,`, `;` or tab the header line holds most, and a header with none is one column.
+Dates are `YYYY-MM-DD`. Column names are compared without case or surrounding spaces
+before files are stacked; a name repeated in one file is an input error. No file read may also be `--output`.
 
 ## Calendar
 
@@ -334,8 +336,9 @@ input-protection rules, problem exit codes, and the template's UAE calendar.
 They also cover a calendar given as one CSV and one workbook per year, a calendar
 file missing a year, duplicate and unknown-country rows across calendar files, the
 template calendar round-tripping as CSV and workbook, `--set` overrides and their
-errors, `--sheet` replacing `absences`, a workbook with several sheets, and a calendar
-file that is also the output.
+errors, `--sheet` replacing `absences`, a workbook with several sheets, stacked files
+whose headers differ in case, a repeated column, one-column and tab-separated CSV,
+and a calendar file that is also the output.
 `tests/team_capacity_calibrate/` covers bug shares and logged-to-predicted ratios for two teams over
 three iterations, tasks under bugs, iterations without logged work, uncounted work,
 phase-split suggestions that load as a valid `rates` sheet, and the CLI with

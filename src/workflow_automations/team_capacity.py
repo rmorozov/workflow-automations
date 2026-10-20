@@ -1448,30 +1448,50 @@ CONFIG_SHEETS = (
 )
 
 
+CSV_SEPARATORS = (",", ";", "\t")
+
+
 def read_table(path: Path, sheet: str) -> pd.DataFrame:
     """One config sheet from a CSV file, or from a workbook's sheet of that name (or
-    its only sheet). CSV cells are read as text, with ``,``, ``;`` or tab separators."""
+    its only sheet), with stripped lower-case column names.
+
+    CSV cells are read as text. The separator is whichever of ``,``, ``;`` or tab
+    the header line holds most often; a header without any is one column.
+    """
     if not path.exists():
         raise CapacityError(f"{sheet} file does not exist: {path}")
     try:
         if path.suffix.lower() in (".csv", ".txt"):
-            return pd.read_csv(
+            with path.open(encoding="utf-8-sig") as handle:
+                header = handle.readline()
+            separator = max(CSV_SEPARATORS, key=header.count)
+            frame = pd.read_csv(
                 path,
-                sep=None,
-                engine="python",
+                sep=separator if header.count(separator) else ",",
                 dtype=str,
                 keep_default_na=False,
                 encoding="utf-8-sig",
             )
-        book = pd.read_excel(path, sheet_name=None, engine="openpyxl")
+        else:
+            book = pd.read_excel(path, sheet_name=None, engine="openpyxl")
+            named = {str(name).strip().lower(): f for name, f in book.items()}
+            if sheet in named:
+                frame = named[sheet]
+            elif len(book) == 1:
+                frame = next(iter(book.values()))
+            else:
+                raise CapacityError(f"{path} has several sheets and none is named {sheet}")
+    except CapacityError:
+        raise
     except Exception as exc:  # pandas and openpyxl raise many types for unreadable files
         raise CapacityError(f"Cannot read {sheet} file {path}: {exc}") from exc
-    named = {str(name).strip().lower(): frame for name, frame in book.items()}
-    if sheet in named:
-        return named[sheet]
-    if len(book) == 1:
-        return next(iter(book.values()))
-    raise CapacityError(f"{path} has several sheets and none is named {sheet}")
+    # Stacked files align by column name, so names are normalised before stacking.
+    columns = [str(c).strip().lower() for c in frame.columns]
+    repeated = sorted({c for c in columns if columns.count(c) > 1})
+    if repeated:
+        raise CapacityError(f"{path}: columns {repeated} appear more than once")
+    frame.columns = columns
+    return frame
 
 
 def parse_assignment(text: str, flag: str) -> tuple[str, str]:
