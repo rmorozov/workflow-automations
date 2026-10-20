@@ -126,6 +126,11 @@ def _blank(value: Any) -> bool:
     return value is None or (not isinstance(value, str) and bool(pd.isna(value)))
 
 
+def _missing(value: Any) -> bool:
+    """Blank, or text of spaces only."""
+    return _blank(value) or (isinstance(value, str) and not value.strip())
+
+
 def is_approved(value: Any) -> bool:
     """``approved`` as Excel and CSV exports spell it: TRUE, 1 or their text forms."""
     if isinstance(value, str):
@@ -273,9 +278,9 @@ def problem_rows(df: pd.DataFrame) -> pd.DataFrame:
         reasons = [
             reason
             for reason, missing in (
-                ("no AreaPath", _blank(values.get(AREA_PATH))),
-                ("no email", _blank(values.get(EMAIL))),
-                ("unclassified title", _blank(title) or str(title) not in KNOWN_CLASSES),
+                ("no AreaPath", _missing(values.get(AREA_PATH))),
+                ("no email", _missing(values.get(EMAIL))),
+                ("unclassified title", _missing(title) or str(title).strip() not in KNOWN_CLASSES),
             )
             if missing
         ]
@@ -343,8 +348,15 @@ def transform(
     main = find_main_sheet(book)
     if main is None:
         raise RosterError(f"No sheet has a '{CORPORATE_TITLE}' column")
-    if main in RESERVED_SHEETS:
+    if main.casefold() in RESERVED_SHEETS:
         raise RosterError(f"Main sheet '{main}' has a name the output uses; rename it")
+    # Excel sheet names are case-insensitive: a 'Problems' sheet would clash with the
+    # 'problems' sheet the output writes. An exact match is the output's own sheet.
+    clashes = [n for n in book if n.casefold() in RESERVED_SHEETS and n not in RESERVED_SHEETS]
+    if clashes:
+        raise RosterError(
+            f"Sheets {clashes} differ only in case from sheets the output writes; rename them"
+        )
     logger.info("Main data sheet: '%s'", main)
     df = book[main]
     add_classification(df)
