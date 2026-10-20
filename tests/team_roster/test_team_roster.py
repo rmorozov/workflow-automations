@@ -196,17 +196,44 @@ def test_column_width_is_capped():
     assert team_roster.column_width(pd.Series(["x" * 80]), "h") == team_roster.MAX_COLUMN_WIDTH
 
 
-def test_formula_like_titles_stay_text(tmp_path):
+def test_formula_like_titles_stay_text_in_cells_and_pivot_headings(tmp_path):
     staff = tmp_path / "staff.xlsx"
     wb = Workbook()
-    wb.active.append(["email", "corporatetitle"])
-    wb.active.append(["a", "=1+1"])
+    wb.active.append(["email", "corporatetitle", "approved"])
+    wb.active.append(["a", "=1+1", True])
     wb.active["B2"].data_type = "s"
+    mapping = wb.create_sheet("person_to_area")
+    mapping.append(["email", "area_path"])
+    mapping.append(["a", "P\\Core"])
     wb.save(staff)
     output = tmp_path / "out.xlsx"
     assert run(staff, output) == 0
-    cell = load_workbook(output)["Sheet"]["B2"]
-    assert (cell.value, cell.data_type) == ("=1+1", "s")
+    out = load_workbook(output)
+    cells = [out["Sheet"]["B2"], out["dev_per_area"]["B1"]]
+    assert [(c.value, c.data_type) for c in cells] == [("=1+1", "s")] * 2
+    assert out["dev_per_area"]["B2"].value == 1
+
+
+@pytest.mark.parametrize("name", ["dev_per_area", "person_to_area"])
+def test_main_sheet_with_an_output_sheet_name_fails(tmp_path, name):
+    staff = workbook(tmp_path / "staff.xlsx", {name: {"email": ["a"], "corporatetitle": ["Dev"]}})
+    output = tmp_path / "out.xlsx"
+    assert run(staff, output) == 1
+    assert not output.exists()
+
+
+def test_an_old_pivot_is_not_kept_when_this_run_cannot_count(tmp_path):
+    staff = workbook(
+        tmp_path / "staff.xlsx",
+        {
+            "staff": {"corporatetitle": ["Developer"]},
+            "dev_per_area": {"area_path": ["OLD"], "developer": [999]},
+        },
+    )
+    output = tmp_path / "out.xlsx"
+    assert run(staff, output) == 0
+    assert load_workbook(output)["dev_per_area"].max_row == 1
+    assert sheets(output)["dev_per_area"].empty
 
 
 def test_no_corporatetitle_sheet_fails_and_writes_nothing(tmp_path):
@@ -245,6 +272,26 @@ def test_interactive_prompt_decides_overwrite(inputs, tmp_path, monkeypatch, ans
     monkeypatch.setattr("builtins.input", lambda prompt: answer)
     assert run(staff, output) == 0
     assert (output.read_bytes() != b"old") is replaced
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_output_appearing_during_the_run_is_replaced_only_with_force(
+    inputs, tmp_path, monkeypatch, force
+):
+    staff, _ = inputs
+    output = tmp_path / "out.xlsx"
+    read = team_roster.read_book
+
+    def read_then_race(path, label):
+        output.write_bytes(b"theirs")  # another process creates the output meanwhile
+        return read(path, label)
+
+    monkeypatch.setattr(team_roster, "read_book", read_then_race)
+    assert run(staff, output, *(["--force"] if force else [])) == (0 if force else 1)
+    assert (output.read_bytes() == b"theirs") is not force
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+        ["out.xlsx", staff.name, "mapping.xlsx"]
+    )
 
 
 def test_output_may_not_replace_an_input(inputs):

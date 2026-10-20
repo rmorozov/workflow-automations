@@ -83,6 +83,25 @@ def test_publish_all_refuses_existing_targets_with_the_callers_error(tmp_path):
     assert existing.read_text() == "old" and not fresh.exists()
 
 
+def test_exclusive_publish_never_replaces_a_target_created_while_staging(tmp_path, monkeypatch):
+    target = tmp_path / "a.txt"
+
+    def write_and_race(path):
+        path.write_text("ours")
+        target.write_text("theirs")
+
+    with pytest.raises(FileExistsError, match="not replaced"):
+        excel.publish_all([(target, write_and_race)], False, exclusive=True)
+    assert target.read_text() == "theirs"
+    assert [p.name for p in tmp_path.iterdir()] == ["a.txt"]
+
+    target.unlink()
+    monkeypatch.setattr(excel.os, "link", lambda *a: (_ for _ in ()).throw(PermissionError()))
+    excel.publish_all([(target, lambda p: p.write_text("ours"))], False, exclusive=True)
+    assert target.read_text() == "ours"  # no hard links: falls back to a checked rename
+    assert [p.name for p in tmp_path.iterdir()] == ["a.txt"]
+
+
 def test_publish_all_failure_leaves_every_target_and_no_temp_files(tmp_path):
     first, second = tmp_path / "a.txt", tmp_path / "out" / "b.txt"
     first.write_text("old")
