@@ -379,7 +379,9 @@ def test_whitespace_email_is_a_problem(tmp_path):
     )
     output = tmp_path / "out.xlsx"
     assert run(staff, output) == 0
-    assert sheets(output)["problems"]["problem"].tolist() == ["no email"]
+    book = sheets(output)
+    assert book["problems"]["problem"].tolist() == ["no email"]
+    assert book["dev_per_area"].to_dict("records") == [{"area_path": "P\\A", "developer": 0}]
 
 
 @pytest.mark.parametrize("name", ["Problems", "DEV_PER_AREA", "Person_To_Area"])
