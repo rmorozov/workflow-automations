@@ -1627,7 +1627,8 @@ def run_export(args: argparse.Namespace) -> Report:
     if args.save_snapshot is not None:
         saved = args.save_snapshot.resolve()
         if saved == output or any(
-            p is not None and p.resolve() == saved for p in (args.capacity_file, args.previous_file)
+            p is not None and Path(p).resolve() == saved
+            for p in (args.capacity_file, args.previous_file, args.config, args.options)
         ):
             raise TriageError("--save-snapshot must differ from --output and every input")
         if args.save_snapshot.exists() and not args.overwrite:
@@ -1647,8 +1648,8 @@ def run_export(args: argparse.Namespace) -> Report:
             logger.warning(note)
         targets = team_paths(args.output, args.team_dir, list(teams))
         inputs = {
-            p.resolve()
-            for p in (args.capacity_file, args.previous_file, args.from_snapshot)
+            Path(p).resolve()
+            for p in (args.capacity_file, args.previous_file, args.from_snapshot, args.options)
             if p is not None
         }
         if args.save_snapshot is not None:

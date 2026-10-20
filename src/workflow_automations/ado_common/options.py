@@ -19,7 +19,9 @@ choice. Required options are checked by `require` after parsing, so
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Sequence
+from io import StringIO
 from pathlib import Path
 
 import configargparse
@@ -116,12 +118,29 @@ def _subcommand(root: argparse.ArgumentParser, args: argparse.Namespace):
     return root
 
 
-def _format(value: object) -> str:
+def _read_back(key: str, text: str) -> object:
+    line = StringIO(f"{key} = {text}\n")
+    return configargparse.DefaultConfigFileParser().parse(line).get(key)
+
+
+def _format(key: str, value: object) -> str:
+    """``value`` as the file's parser reads it back: plain when that is exact, else quoted.
+
+    Lists are JSON, so commas inside an element stay in it. The parser strips one pair
+    of surrounding quotes and treats `` #`` or `` ;`` as a comment, so a value that
+    reads back differently is quoted; one that no quoting preserves is refused.
+    """
     if isinstance(value, bool):
         return str(value).lower()
     if isinstance(value, list | tuple):
-        return "[" + ", ".join(str(v) for v in value) + "]"
-    return str(value)
+        expected: object = [str(v) for v in value]
+        plain = json.dumps(expected, ensure_ascii=False)
+    else:
+        expected = plain = str(value)
+    for text in (plain, f'"{plain}"', f"'{plain}'"):
+        if _read_back(key, text) == expected:
+            return text
+    raise ValueError(f"{key} value {plain} cannot be written to an options file")
 
 
 def options_text(parser: argparse.ArgumentParser, args: argparse.Namespace, title: str) -> str:
@@ -142,7 +161,7 @@ def options_text(parser: argparse.ArgumentParser, args: argparse.Namespace, titl
         if value is None or value == []:
             lines.append(f"# {key} =")
         else:
-            lines.append(f"{key} = {_format(value)}")
+            lines.append(f"{key} = {_format(key, value)}")
     return "\n".join(lines) + "\n"
 
 
@@ -162,7 +181,11 @@ def write_options(
     if path.exists() and not getattr(args, "overwrite", False):
         error.error(f"{path} exists; pass --overwrite to replace it")
     try:
-        path.write_text(options_text(parser, args, title), encoding="utf-8")
+        text = options_text(parser, args, title)
+    except ValueError as exc:
+        error.error(f"--write-options {path}: {exc}")
+    try:
+        path.write_text(text, encoding="utf-8")
     except OSError as exc:
         error.error(f"--write-options {path}: cannot write ({exc})")
     return path

@@ -39,3 +39,37 @@ def test_unknown_file_key_names_the_file(tmp_path, capsys):
     with pytest.raises(SystemExit):
         options.parse(_parser(), ["--options", str(path)])
     assert f"--options {path}: unknown option nam" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("name", "tags"),
+    [
+        ("/tmp/reports #1.xlsx", ["Team, owner=Custom.Team"]),
+        ("a ; b", ['quote " inside', "it's", "  padded  "]),
+        ('"quoted"', ["[x]", "#start", "x # y"]),
+        ("  lead and trail  ", ["a,b", "c"]),
+        ("C:\\work\\out.xlsx", ["back\\slash"]),
+    ],
+)
+def test_written_values_read_back_unchanged(tmp_path, name, tags):
+    root = _parser()
+    argv = ["--name", name] + [arg for tag in tags for arg in ("--tag", tag)]
+    args, _ = options.parse(root, argv)
+    path = tmp_path / "o.ini"
+    path.write_text(options.options_text(root, args, "tool options"), encoding="utf-8")
+    again, _ = options.parse(_parser(), ["--options", str(path)])
+    assert (again.name, again.tag) == (name, tags)
+
+
+def test_value_no_quoting_preserves_is_refused(tmp_path, capsys):
+    path = tmp_path / "o.ini"
+    with pytest.raises(SystemExit):
+        options.write_options(*_parse_and_parser(["--name", "[a]", "--write-options", str(path)]))
+    assert "name value [a] cannot be written" in capsys.readouterr().err
+    assert not path.exists()
+
+
+def _parse_and_parser(argv):
+    root = _parser()
+    args, _ = options.parse(root, argv)
+    return root, root, args, "tool options"

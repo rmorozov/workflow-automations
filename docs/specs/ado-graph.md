@@ -32,8 +32,8 @@ its own ADO connection only, and deletes it when export ends, also on failure;
 Every mode (`export`, `replay`, `analyze`) takes `--options FILE` and
 `--write-options FILE`, through the shared `ado_common/options.py` (ConfigArgParse).
 An options file holds `key = value` lines whose keys are the mode's long options
-without dashes; `#` starts a comment, a list is `[a, b]`, a switch is `true` or
-`false`:
+without dashes; `#` starts a comment, a list is `[a, b]` or a JSON list, a switch is
+`true` or `false`, and a value may be wrapped in one pair of quotes:
 
 ```ini
 # ado-graph analyze options
@@ -47,7 +47,9 @@ max-cycles = 500
   Paths in the file are relative to the working directory, as on the command line.
   Environment variables are never read.
 - `--write-options FILE` writes every option of the mode with its effective value
-  (each preceded by its help text; unset ones commented out) and exits 0 without
+  (each preceded by its help text; unset ones commented out; lists as JSON and values
+  with comment markers or edge spaces quoted, so every value reads back unchanged, and
+  a value no quoting preserves exits 2) and exits 0 without
   running or contacting ADO. It works without the required options, so it can start
   from the defaults or record one run. It refuses an existing FILE without
   `--overwrite`.
@@ -57,6 +59,8 @@ max-cycles = 500
 - Required options (`--ado-url` and `--query-id` for export, `--snapshot` for replay,
   `--nodes-file` and `--edges-file` for analyze) may come from the file; when missing
   from both, the mode exits 2 as before.
+- No output of a mode (export files, the saved snapshot, the analyze report) may be the
+  options file; that exits 2 before any work, also with `--overwrite`.
 - The analyze `Config` sheet names the options file (`options_file`) beside the
   effective values it already lists.
 

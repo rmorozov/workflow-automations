@@ -243,7 +243,10 @@ wins over the file, the file over the defaults; environment variables are never 
 commented out, and exits 0 without contacting ADO; `--output` is not needed for it.
 `--overwrite`, `--options`, `--write-options` and `--write-config` are never read from
 a file. An unknown key, such a key or an invalid value exits 2 naming the file. The
-Config sheet names the options file, and `--output` may not be it.
+Config sheet names the options file. No output (the report, team reports, the saved
+snapshot) may be the options file, even with `--overwrite`. `--write-options` writes
+lists as JSON and quotes values holding comment markers or edge spaces, so every value
+reads back unchanged; a value no quoting preserves exits 2.
 
 | Exit | Meaning |
 
