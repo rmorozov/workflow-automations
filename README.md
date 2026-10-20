@@ -11,6 +11,8 @@ upload workbook data. `ado-triage` reads (never writes) an on-premise Azure DevO
 | `xlsx-unfold` | Turn an edited outline back into rows, or merge it into the original | [XLSX outline](docs/specs/xlsx-outline.md#unfold-outline-to-table) |
 | `gerrit-parents` | Match repositories listed in a sheet to their closest parent in a Gerrit tree outline | [Gerrit parents](docs/specs/gerrit-parents.md) |
 | `team-roster` | Classify job titles, map people to ADO AreaPaths and count headcount per area | [Team roster](docs/specs/team-roster.md) |
+| `team-capacity` | Turn the roster and a working calendar into net capacity hours per AreaPath for `ado-triage` | [Team capacity](docs/specs/team-capacity.md) |
+| `team-capacity-calibrate` | Measure bug-fix share and estimate accuracy from a saved ADO snapshot | [Team capacity](docs/specs/team-capacity.md#calibration) |
 | `ado-graph` | Export ADO work-item graphs and analyze saved Parquet data | [ADO graph/export](docs/specs/ado-graph.md) |
 | `ado-triage` | Rank ADO change-request scope into a triage agenda and team summary | [ADO scope triage](docs/specs/ado-triage.md) |
 
@@ -195,6 +197,30 @@ are taken from `--mapping` or created empty for you to fill in. `--dry-run` prev
 the classification without writing; an existing output needs `--force` (or a `y` at
 the prompt). The input is never modified.
 
+## Plan capacity per AreaPath
+
+```bash
+python -m pip install -e '.[team-capacity]'
+team-capacity --template capacity-config.xlsx
+team-capacity --roster work/roster.xlsx --config capacity-config.xlsx \
+  --start-month 2026-11 --months 3 --output work/capacity.xlsx
+```
+
+`--template` writes a starter config: the agreed defaults (8-hour days, two-week
+iterations from Monday to the next Friday, daily scrum and code review, iteration
+rituals, 7 sick days and 30 calendar days of paid leave a year, a 50% bug-fix quota and
+12% focus loss) and the UAE private-sector calendar for 2026 and 2027, with holidays
+and Ramadan's shorter days. Hijri dates are projections; check them against each
+year's official announcement. Add booked leave to `absences`, and team- and phase-specific
+rates to `rates`. The output's `dev_per_area_capacity` sheet is what
+`ado-triage --capacity-file` reads; `capacity_by_role` and `capacity_by_person` show
+where every hour went, and `problems` lists people who could not be counted (the run
+then exits 3 unless `--allow-problems`).
+
+`team-capacity-calibrate --snapshot work/triage.json --roster work/roster.xlsx --config
+capacity-config.xlsx --output work/calibration.xlsx` compares past iterations' completed
+work with the model and suggests `rates` rows.
+
 ## Triage ADO scope
 
 ```bash
@@ -227,7 +253,7 @@ Capacity, previous-report and team options work as usual.
 ## Development
 
 ```bash
-python -m pip install -e '.[translation,outline,team-roster,ado-triage,dev]'
+python -m pip install -e '.[translation,outline,team-roster,team-capacity,ado-triage,dev]'
 ruff check .
 ruff format --check .
 pytest
