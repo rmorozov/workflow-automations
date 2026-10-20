@@ -221,8 +221,8 @@ To keep the calendar or other sheets outside the config, pass them per run:
 `--calendar FILE` (an `.xlsx` or `.csv`, repeated for one file per year) replaces the
 `calendar` sheet, `--sheet NAME=FILE` replaces any config sheet (for example
 `--sheet absences=leave.csv`), and `--set KEY=VALUE` overrides a setting such as
-`--set bug_fix_quota=0.4`. `--template-calendar uae.csv` writes the UAE reference
-calendar alone to start from. The config workbook itself is never changed.
+`--set bug_fix_quota=0.4`. `--template-sheets config-sheets/` writes every template
+sheet as `config-sheets/<sheet>.csv` (the names `--sheet` takes) to start from. The config workbook itself is never changed.
 
 `team-capacity-calibrate --snapshot work/triage.json --roster work/roster.xlsx --config
 capacity-config.xlsx --output work/calibration.xlsx` compares past iterations' completed
