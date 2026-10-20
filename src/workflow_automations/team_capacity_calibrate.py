@@ -195,12 +195,14 @@ def calibrate(
     for area in sorted(set(areas.values()), key=str.lower):
         for iteration in iterations:
             key = (area, iteration.name)
-            base = bug = net = 0.0
+            base = bug = focus = net = 0.0
             if key in predicted.index:
                 bug, focus, net = predicted.loc[key, ["bug_fix", "focus", "net"]]
                 base = bug + focus + net
             work = logged.get(key, Logged())
-            focus_loss = config.rate(area, iteration.start, "focus_loss")
+            # The model applies dated rates per day, so a rate changing inside the
+            # iteration counts by its share of the predicted base.
+            focus_loss = focus / base if base else config.rate(area, iteration.start, "focus_loss")
             row: dict[str, Any] = {
                 "area_path": area,
                 "iteration": iteration.name,
@@ -248,18 +250,21 @@ def calibrate(
 
 
 def suggested_rates(calibration: pd.DataFrame) -> pd.DataFrame:
-    """One ``rates`` row per AreaPath and run of consecutive iterations of one phase,
-    weighted by logged hours; iterations without logged work are left out."""
+    """One ``rates`` row per AreaPath and run of consecutive usable iterations of one
+    phase, weighted by logged hours.
+
+    Runs are formed over every iteration in order: an iteration without usable data
+    or of another phase ends the run, so no row spans dates without evidence.
+    """
     rows = []
-    usable = calibration[calibration["status"] == "ok"]
-    for area, frame in usable.groupby("area_path", sort=False):
-        frame = frame.sort_values("start")
+    for area, frame in calibration.groupby("area_path", sort=False):
         run: list[pd.Series] = []
-        for _, row in frame.iterrows():
-            if run and row["phase"] != run[-1]["phase"]:
+        for _, row in frame.sort_values("start").iterrows():
+            if run and (row["status"] != "ok" or row["phase"] != run[-1]["phase"]):
                 rows.append(_rate_row(area, run))
                 run = []
-            run.append(row)
+            if row["status"] == "ok":
+                run.append(row)
         if run:
             rows.append(_rate_row(area, run))
     return pd.DataFrame(rows, columns=RATES_COLUMNS)

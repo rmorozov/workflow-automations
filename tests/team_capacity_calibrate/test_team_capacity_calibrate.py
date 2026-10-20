@@ -217,3 +217,45 @@ def test_configured_iteration_without_any_item_is_reported():
     result = cal.calibrate(snap, ROSTER, config, {"bug"})["calibration"]
     s2 = result[result["iteration"] == "S2"]
     assert s2["status"].tolist() == ["no logged work", "no logged work"]
+
+
+def test_an_unusable_iteration_ends_a_suggested_run():
+    book = config_book()
+    book["iterations"]["phase"] = ["development", "stabilization", "development"]
+    items = [
+        item(1, "Bug", "Proj\\A", "S1", "a@x", 10),
+        item(2, "Task", "Proj\\A", "S3", "a@x", 10),
+    ]
+    snap = RawSnapshot(producer="ado-triage", source={}, roots=[1, 2], items=items)
+    config = tc.read_config(book, tc.roster_emails(ROSTER))
+    suggested = cal.calibrate(snap, ROSTER, config, {"bug"})["suggested_rates"]
+    rows = suggested[suggested["area_path"] == "Proj\\A"][["from", "to", "bug_fix_quota"]]
+    assert rows.values.tolist() == [
+        [D(2026, 1, 5), D(2026, 1, 16), 0.88],
+        [D(2026, 2, 2), D(2026, 2, 13), 0.0],
+    ]
+
+
+def test_focus_loss_changing_inside_an_iteration_is_weighted_by_day():
+    book = config_book()
+    book["rates"] = pd.DataFrame(
+        {
+            "area_path": ["Proj"],
+            "from": [D(2026, 1, 12)],
+            "to": [D(2026, 1, 16)],
+            "focus_loss": [0.5],
+            "bug_fix_quota": [0.4],
+        }
+    )
+    items = [
+        item(1, "Bug", "Proj\\A", "S1", "a@x", 20),
+        item(2, "Task", "Proj\\A", "S1", "a@x", 20),
+    ]
+    snap = RawSnapshot(producer="ado-triage", source={}, roots=[1, 2], items=items)
+    config = tc.read_config(book, tc.roster_emails(ROSTER))
+    result = cal.calibrate(snap, ROSTER, config, {"bug"})
+    row = result["calibration"].set_index(["area_path", "iteration"]).loc[("Proj\\A", "S1")]
+    focus = (40 * 0.12 + 40 * 0.5) / 80  # 0.31, as the model deducts it
+    assert row["suggested_bug_fix_quota"] == pytest.approx(0.5 * (1 - focus))
+    suggested = result["suggested_rates"].set_index("area_path").loc["Proj\\A"]
+    assert suggested["bug_fix_quota"] == pytest.approx(round(0.5 * (1 - focus), 3))

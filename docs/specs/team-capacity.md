@@ -241,12 +241,14 @@ bug-fix and net hours; completed bug, other and total hours; the configured and
 observed bug share; the suggested quota; and the estimate accuracy, completed other
 hours ÷ predicted net hours. The observed share is bug hours ÷ logged hours. Nobody
 logs focus loss, so logged time is the base less focus loss, and the suggested quota
-is the observed share × (1 − focus loss). An iteration without logged work has
+is the observed share × (1 − focus loss). Focus loss here is the iteration's predicted
+focus hours ÷ predicted base, so a rate changing inside the iteration counts by day. An iteration without logged work has
 status `no logged work`, blank ratios and a `problems` row; it is never counted as
 zero.
 
 `suggested_rates` has one `rates` row per AreaPath and run of consecutive iterations
-with the same `phase`, its quota weighted by logged hours, `focus_loss` blank (so it
+with the same `phase`; an iteration without usable data ends a run, so no row spans
+dates without evidence. Each row has its quota weighted by logged hours, `focus_loss` blank (so it
 inherits) and a `note`. It loads as a valid `rates` sheet, but its dates are the past
 iterations': to forecast with it, change `from` and `to` to the coming phases.
 Nothing changes the config automatically.
