@@ -1,4 +1,4 @@
-"""Behavior of team-capacity-calibrate: observed bug share and estimate accuracy."""
+"""Behavior of team-capacity-calibrate: observed bug share and logged-to-predicted hours."""
 
 import datetime as dt
 import json
@@ -117,7 +117,7 @@ def test_bug_share_and_accuracy_per_area_and_iteration():
         assert (row["bug_hours"], row["other_hours"]) == (bug, other)
         assert row["observed_bug_share"] == pytest.approx(share)
         assert row["suggested_bug_fix_quota"] == pytest.approx(share * 0.88)
-        assert row["estimate_accuracy"] == pytest.approx(other / NET)
+        assert row["logged_to_predicted"] == pytest.approx(other / NET)
         assert row["predicted_base"] == pytest.approx(BASE)
         assert row["configured_bug_fix_quota"] == pytest.approx(0.5)
 
@@ -126,7 +126,7 @@ def test_iteration_without_logged_work_is_reported_not_zero():
     out = outputs()
     row = out["calibration"].set_index(["area_path", "iteration"]).loc[("Proj\\B", "S3")]
     assert row["status"] == "no logged work"
-    assert pd.isna(row["observed_bug_share"]) and pd.isna(row["estimate_accuracy"])
+    assert pd.isna(row["observed_bug_share"]) and pd.isna(row["logged_to_predicted"])
     problems = out["problems"]
     assert ["Proj\\B", "no logged work", "iteration S3"] in problems[
         ["area_path", "problem", "detail"]
