@@ -58,10 +58,6 @@ def _cell_safe(value: Any) -> Any:
     return value
 
 
-def _strip(text: str) -> str:
-    return ILLEGAL_CHARACTERS_RE.sub("", text) if ILLEGAL_CHARACTERS_RE.search(text) else text
-
-
 def keep_text_literal(worksheet: Any, min_row: int = 2) -> None:
     """Store text that openpyxl would read as a formula (``=...``) as a string cell.
 
@@ -78,6 +74,7 @@ def publish_all(
     targets: Sequence[tuple[Path, Callable[[Path], None]]],
     overwrite: bool,
     exists_error: Callable[[str], Exception] = FileExistsError,
+    exclusive: bool = False,
 ) -> None:
     """Write every target to a sibling temp file, then rename them all into place.
 
@@ -85,6 +82,10 @@ def publish_all(
     before anything is written, so each tool keeps its own error type. A failure
     while writing (permissions, full disk, a serialization error) leaves every
     existing target unchanged and removes the temp files.
+
+    With ``exclusive`` and without ``overwrite``, a target that another process
+    creates while the run is staging is not replaced either: it raises
+    ``exists_error``, and targets already placed by this call stay in place.
     """
     for path, _ in targets:
         if path.exists() and not overwrite:
@@ -98,8 +99,24 @@ def publish_all(
             staged.append((Path(tmp), path))
             write(Path(tmp))
         for tmp, path in staged:
-            os.replace(tmp, path)
+            if exclusive and not overwrite:
+                _place_new(tmp, path, exists_error)
+            else:
+                os.replace(tmp, path)
     finally:
         for tmp, _ in staged:
             if tmp.exists():
                 tmp.unlink()
+
+
+def _place_new(tmp: Path, path: Path, exists_error: Callable[[str], Exception]) -> None:
+    """Move ``tmp`` to ``path`` only if ``path`` does not exist, atomically where possible."""
+    try:
+        os.link(tmp, path)  # fails instead of replacing an existing file
+    except FileExistsError:
+        raise exists_error(f"{path} appeared while writing; it was not replaced") from None
+    except OSError:
+        # No hard links on this file system: check, then rename (a short race window).
+        if path.exists():
+            raise exists_error(f"{path} appeared while writing; it was not replaced") from None
+        os.replace(tmp, path)

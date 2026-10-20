@@ -75,6 +75,8 @@ MAPPINGS: tuple[Mapping, ...] = (
     Mapping(SHEET_FULLPATH_TO_AREA, FULLPATH, FULL_PATH, "fullpath_matches"),
 )
 
+# Sheets the output writes; the main sheet may not have one of these names.
+RESERVED_SHEETS = frozenset({SHEET_DEV_PER_AREA, *(m.sheet for m in MAPPINGS)})
 APPROVED_TEXT = frozenset({"TRUE", "True", "true", "1"})
 MAX_COLUMN_WIDTH = 50
 
@@ -287,7 +289,7 @@ def write_book(book: dict[str, pd.DataFrame], order: Sequence[str], path: Path) 
             df = excel_safe(book[name])
             df.to_excel(writer, sheet_name=name, index=False)
             worksheet = writer.sheets[name]
-            keep_text_literal(worksheet)
+            keep_text_literal(worksheet, min_row=1)  # headings too: pivot columns are titles
             for position, heading in enumerate(df.columns, start=1):
                 width = column_width(df.iloc[:, position - 1], heading)
                 worksheet.column_dimensions[get_column_letter(position)].width = width
@@ -306,6 +308,8 @@ def transform(
     main = find_main_sheet(book)
     if main is None:
         raise RosterError(f"No sheet has a '{CORPORATE_TITLE}' column")
+    if main in RESERVED_SHEETS:
+        raise RosterError(f"Main sheet '{main}' has a name the output uses; rename it")
     logger.info("Main data sheet: '%s'", main)
     df = book[main]
     add_classification(df)
@@ -319,7 +323,9 @@ def transform(
     if AREA_PATH in df.columns and EMAIL in df.columns:
         book[SHEET_DEV_PER_AREA] = headcount_pivot(df)
     else:
-        logger.error("Cannot create '%s': needs %s and %s", SHEET_DEV_PER_AREA, AREA_PATH, EMAIL)
+        # An input's old pivot must not pass for this run's headcount.
+        book[SHEET_DEV_PER_AREA] = pd.DataFrame()
+        logger.warning("'%s' is empty: needs %s and %s", SHEET_DEV_PER_AREA, AREA_PATH, EMAIL)
     return main, warnings
 
 
@@ -342,20 +348,25 @@ def dry_run(book: dict[str, pd.DataFrame]) -> None:
         logger.warning("Column '%s' not found in data", APPROVED)
 
 
-def check_output(args: argparse.Namespace) -> bool:
-    """Whether to write ``args.output_file``; refuses to replace an input."""
+def check_output(args: argparse.Namespace) -> bool | None:
+    """Overwrite consent for ``args.output_file``: None to cancel, else whether it may be replaced.
+
+    Refuses to replace an input.
+    """
     output = args.output_file.resolve()
     inputs = [args.input_file, *([args.mapping_file] if args.mapping_file else [])]
     if any(output == path.resolve() for path in inputs):
         raise RosterError(f"Output {args.output_file} would replace an input file")
-    if not args.output_file.exists() or args.force:
+    if args.force:
         return True
+    if not args.output_file.exists():
+        return False
     if not sys.stdin.isatty():
         raise RosterError(f"{args.output_file} exists; pass --force to overwrite it")
     answer = input(f"Output file '{args.output_file}' already exists. Overwrite? (y/n): ")
     if answer.lower() != "y":
         logger.info("Operation cancelled by user")
-        return False
+        return None
     return True
 
 
@@ -368,7 +379,8 @@ def run(args: argparse.Namespace) -> None:
         logger.info("DRY RUN: no output is written")
         dry_run(read_book(args.input_file, "input"))
         return
-    if not check_output(args):
+    overwrite = check_output(args)
+    if overwrite is None:
         return
     book = read_book(args.input_file, "input")
     mapping_book = read_book(args.mapping_file, "mapping file") if args.mapping_file else {}
@@ -376,7 +388,11 @@ def run(args: argparse.Namespace) -> None:
     try:
         publish_all(
             [(args.output_file, lambda tmp: write_book(book, sheet_order(book, main), tmp))],
-            overwrite=True,
+            overwrite=overwrite,
+            exists_error=lambda message: RosterError(
+                f"{args.output_file} appeared while writing; it was not replaced (use --force)"
+            ),
+            exclusive=True,
         )
     except OSError as exc:
         raise RosterError(f"Cannot write {args.output_file}: {exc}") from exc

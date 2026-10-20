@@ -22,7 +22,8 @@ team-roster INPUT.xlsx OUTPUT.xlsx [--mapping MAPPING.xlsx] [--dry-run] [--force
 ## Input
 
 `INPUT.xlsx` is read in full and never modified. The **main sheet** is the first
-sheet with a `corporatetitle` column; without one the run fails. Its other columns
+sheet with a `corporatetitle` column; without one the run fails, and it may not be
+named like a sheet the output writes (`dev_per_area` or a mapping sheet). Its other columns
 used by the tool, all optional, are `email`, `department_name`, `fullpath` and
 `approved`. Column names are exact and case-sensitive.
 
@@ -82,21 +83,25 @@ non-blank `email` values. Only approved rows count when the main sheet has an
 `approved` column: `TRUE`, `1` (as a boolean, number or the text `TRUE`, `True`,
 `true`, `1`); without the column every row counts. Rows without an AreaPath are not
 counted, and a person without an email is not counted although their AreaPath
-appears. With no countable rows the sheet is empty. An existing `dev_per_area` sheet
-is replaced.
+appears. With no countable rows, or without an `email` or `area_path` column, the
+sheet is empty. An existing `dev_per_area` sheet is always replaced, never kept.
 
 ## Output
 
 `OUTPUT.xlsx` contains, in order: the main sheet, `dev_per_area`, the three mapping
 sheets in priority order, then every other input sheet as read. Values are written,
-not formulas: text that starts with `=` stays text. Column widths fit their content
+not formulas: text that starts with `=` stays text, in headings too (a title class
+becomes a pivot heading). Column widths fit their content
 up to 50 characters. The file is written to a temporary sibling and renamed into
 place, so a failed run leaves an existing output unchanged; missing parent
 directories are created.
 
 An existing output is replaced only with `--force` or after answering `y` at the
 prompt; when the standard input is not a terminal the run fails instead of
-prompting. The output may not be the input or mapping file. `--dry-run` reads the
+prompting. Without that consent, an output that another process creates while the
+run is working is not replaced either: the run fails and leaves it (on file systems
+without hard links, a short race window remains). The output may not be the input
+or mapping file. `--dry-run` reads the
 input, logs its sheet, columns, missing mapping columns, five sample
 classifications and the approved count, and writes nothing.
 
@@ -108,7 +113,7 @@ errors only (`-v` wins when both are given).
 | Code | Meaning |
 | --- | --- |
 | 0 | Output written, dry run done, or overwrite declined at the prompt |
-| 1 | Missing or unreadable input or mapping file, no `corporatetitle` sheet, refused overwrite, or write failure; nothing written |
+| 1 | Missing or unreadable input or mapping file, no `corporatetitle` sheet or one with a reserved name, refused overwrite, or write failure; nothing written |
 
 ## Changes from the script
 
@@ -123,6 +128,9 @@ errors only (`-v` wins when both are given).
   pivot's rule.
 - Overwriting no longer blocks on a prompt without a terminal, and the output may not
   replace an input.
+- An input sheet named `dev_per_area` was overwritten by the pivot, and an old
+  pivot was kept when this run could not compute one; the first now fails, the second
+  writes an empty pivot.
 - Text cells openpyxl cannot store (control characters) are cleaned rather than
   failing the write.
 
@@ -133,7 +141,8 @@ blank and non-text titles, the person → department → fullpath priority with
 case- and space-insensitive keys, input mapping sheets winning over `--mapping`,
 created empty sheets, kept `classified_title`, the approved rule, pivot counting
 (unapproved, unmapped and email-less people), the blank-versus-`nan` key, sheet
-order, readable widths, formula-like text, overwrite protection (forced,
-non-interactive and prompted), refusing to replace inputs, missing inputs, dry run,
+order, readable widths, formula-like text in cells and pivot headings, reserved
+sheet names, replacing an old pivot, overwrite protection (forced, non-interactive,
+prompted, and an output appearing during the run), refusing to replace inputs, missing inputs, dry run,
 and that inputs are not modified. The output was compared with the original script's
 on synthetic data under pandas 2.2.
