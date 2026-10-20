@@ -257,5 +257,39 @@ def test_focus_loss_changing_inside_an_iteration_is_weighted_by_day():
     row = result["calibration"].set_index(["area_path", "iteration"]).loc[("Proj\\A", "S1")]
     focus = (40 * 0.12 + 40 * 0.5) / 80  # 0.31, as the model deducts it
     assert row["suggested_bug_fix_quota"] == pytest.approx(0.5 * (1 - focus))
-    suggested = result["suggested_rates"].set_index("area_path").loc["Proj\\A"]
-    assert suggested["bug_fix_quota"] == pytest.approx(round(0.5 * (1 - focus), 3))
+    suggested = result["suggested_rates"]
+    rows = suggested[suggested["area_path"] == "Proj\\A"][["from", "to", "bug_fix_quota"]]
+    assert rows.values.tolist() == [
+        [D(2026, 1, 5), D(2026, 1, 11), 0.44],
+        [D(2026, 1, 12), D(2026, 1, 16), 0.25],
+    ]
+
+
+def test_suggested_rates_fit_the_focus_loss_they_inherit():
+    # All logged work is bug work while focus loss changes inside the iteration:
+    # one averaged quota (0.69) plus the inherited 0.5 would be more than 1.
+    book = config_book()
+    book["rates"] = pd.DataFrame(
+        {
+            "area_path": ["Proj"],
+            "from": [D(2026, 1, 12)],
+            "to": [D(2026, 1, 16)],
+            "focus_loss": [0.5],
+            "bug_fix_quota": [0.4],
+        }
+    )
+    items = [item(1, "Bug", "Proj\\A", "S1", "a@x", 40)]
+    snap = RawSnapshot(producer="ado-triage", source={}, roots=[1], items=items)
+    config = tc.read_config(book, tc.roster_emails(ROSTER))
+    suggested = cal.calibrate(snap, ROSTER, config, {"bug"})["suggested_rates"]
+    rows = suggested[suggested["area_path"] == "Proj\\A"][["from", "to", "bug_fix_quota"]]
+    assert rows.values.tolist() == [
+        [D(2026, 1, 5), D(2026, 1, 11), 0.88],
+        [D(2026, 1, 12), D(2026, 1, 16), 0.5],
+    ]
+    book["rates"] = pd.concat([book["rates"], suggested], ignore_index=True)
+    applied = tc.read_config(book, tc.roster_emails(ROSTER))
+    days = tc.compute(ROSTER, applied, D(2026, 1, 5), D(2026, 1, 16)).days
+    a = days[(days["area_path"] == "Proj\\A") & (days["gross"] > 0)]
+    assert len(a) == 10
+    assert a["net"].sum() == pytest.approx(0)

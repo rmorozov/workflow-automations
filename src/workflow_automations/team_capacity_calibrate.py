@@ -11,6 +11,7 @@ Nothing contacts ADO and nothing changes the config.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import logging
 import re
 import sys
@@ -240,7 +241,7 @@ def calibrate(
                 )
             rows.append(row)
     calibration = pd.DataFrame(rows, columns=[*CALIBRATION_COLUMNS, "focus_loss"])
-    suggested = suggested_rates(calibration)
+    suggested = suggested_rates(calibration, config)
     calibration = calibration[CALIBRATION_COLUMNS]
     problem_frame = pd.DataFrame(
         [vars(p) for p in [*result.problems, *problems]],
@@ -249,39 +250,56 @@ def calibrate(
     return {"calibration": calibration, "suggested_rates": suggested, "problems": problem_frame}
 
 
-def suggested_rates(calibration: pd.DataFrame) -> pd.DataFrame:
-    """One ``rates`` row per AreaPath and run of consecutive usable iterations of one
-    phase, weighted by logged hours.
+def suggested_rates(calibration: pd.DataFrame, config: tc.Config) -> pd.DataFrame:
+    """``rates`` rows per AreaPath and run of consecutive usable iterations of one
+    phase, from the run's observed bug share weighted by logged hours.
 
     Runs are formed over every iteration in order: an iteration without usable data
-    or of another phase ends the run, so no row spans dates without evidence.
+    or of another phase ends the run, so no row spans dates without evidence. A run
+    is split where the focus loss it inherits changes, so each row's quota fits the
+    focus loss the model applies on its days.
     """
     rows = []
     for area, frame in calibration.groupby("area_path", sort=False):
         run: list[pd.Series] = []
         for _, row in frame.sort_values("start").iterrows():
             if run and (row["status"] != "ok" or row["phase"] != run[-1]["phase"]):
-                rows.append(_rate_row(area, run))
+                rows.extend(_rate_rows(area, run, config))
                 run = []
             if row["status"] == "ok":
                 run.append(row)
         if run:
-            rows.append(_rate_row(area, run))
+            rows.extend(_rate_rows(area, run, config))
     return pd.DataFrame(rows, columns=RATES_COLUMNS)
 
 
-def _rate_row(area: str, run: list[pd.Series]) -> dict[str, Any]:
+def _rate_rows(area: str, run: list[pd.Series], config: tc.Config) -> list[dict[str, Any]]:
     logged = sum(r["logged_hours"] for r in run)
-    quota = sum(r["bug_hours"] * (1 - r["focus_loss"]) for r in run) / logged
-    return {
-        "area_path": area,
-        "from": run[0]["start"],
-        "to": run[-1]["end"],
-        "phase": run[0]["phase"],
-        "bug_fix_quota": round(quota, 3),
-        "focus_loss": None,
-        "note": f"exploratory: {len(run)} iterations, {logged:g} logged hours",
-    }
+    share = sum(r["bug_hours"] for r in run) / logged
+    note = f"exploratory: {len(run)} iterations, {logged:g} logged hours"
+    rows: list[dict[str, Any]] = []
+    day, last = run[0]["start"], run[-1]["end"]
+    while day <= last:
+        focus = config.rate(area, day, "focus_loss")
+        end = day
+        while end < last and config.rate(area, end + dt.timedelta(days=1), "focus_loss") == focus:
+            end += dt.timedelta(days=1)
+        # Logged time is the base without its focus loss, which nobody logs; rounding
+        # never lifts the quota past what the inherited focus loss leaves.
+        quota = min(round(share * (1 - focus), 3), 1 - focus)
+        rows.append(
+            {
+                "area_path": area,
+                "from": day,
+                "to": end,
+                "phase": run[0]["phase"],
+                "bug_fix_quota": quota,
+                "focus_loss": None,
+                "note": note,
+            }
+        )
+        day = end + dt.timedelta(days=1)
+    return rows
 
 
 def run(args: argparse.Namespace) -> None:
