@@ -29,7 +29,7 @@ only if those estimates exclude what the model deducts (see [What change-request
 estimates contain](#what-change-request-estimates-contain)). Open work on these
 limits: the measurement contract (CP-008), availability versus productivity
 (CP-009), calibration evidence (CP-010, CP-011), leave balances (CP-012) and
-sensitivity (CP-013), in `docs/backlog/`.
+sensitivity (CP-013), plus demand quality in triage (CP-014), in `docs/backlog/`.
 
 ```bash
 team-capacity --template CONFIG.xlsx [--overwrite]
