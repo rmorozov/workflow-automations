@@ -270,8 +270,12 @@ zero.
 
 `suggested_rates` has one `rates` row per AreaPath and run of consecutive iterations
 with the same `phase`; an iteration without usable data ends a run, so no row spans
-dates without evidence. Each row has its quota weighted by logged hours, `focus_loss` blank (so it
-inherits) and a `note`. It loads as a valid `rates` sheet, but its dates are the past
+dates without evidence. A run is split further where the focus loss it inherits
+changes, so a row can be shorter than an iteration. Each row's quota is the run's
+observed share (bug hours ÷ logged hours) × (1 − that row's inherited focus loss),
+never more than 1 − focus loss; `focus_loss` stays blank (so it inherits) and a
+`note` marks it exploratory. Added to the config it was calibrated with, every
+covered day computes. It loads as a valid `rates` sheet, but its dates are the past
 iterations': to forecast with it, change `from` and `to` to the coming phases.
 Nothing changes the config automatically.
 
