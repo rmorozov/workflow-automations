@@ -36,7 +36,7 @@ What a test or measurement must show for the task to be done.
 
 - `id` matches the file name. Prefixes: `AG` ADO graph, `SH` code shared by the ADO
   tools, `TR` ADO triage, `XT` XLSX translation, `XO` XLSX outline/unfold, `GP`
-  Gerrit parents, `RW` repository workflow.
+  Gerrit parents, `CP` team roster and capacity model, `RW` repository workflow.
 - `depends_on` lists tasks whose result this one needs. A deleted task is done, so a
   dependency on a missing ID is satisfied. Cycles among open tasks fail `check`.
 - `touches` lists the files the change will edit: a path, a directory ending in `/`,

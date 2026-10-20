@@ -14,6 +14,7 @@ dependencies = []
 [project.optional-dependencies]
 translation = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4"]
 outline = ["openpyxl>=3.1.5,<4", "pyyaml>=6,<7"]
+team-roster = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4"]
 ado-triage = ["pandas>=2.2,<4", "openpyxl>=3.1.5,<4", "azure-devops>=7.1.0b4,<8"]
 # Separate: on Linux this builds gssapi and needs system Kerberos headers (libkrb5-dev).
 ado-kerberos = ["requests-kerberos>=0.15,<1"]
@@ -24,7 +25,7 @@ ado-graph = ["workflow-automations[ado-graph-analyze]", "azure-devops>=7.1.0b4,<
              "msrest>=0.7.1,<0.8", "requests-kerberos>=0.15,<1", "certifi>=2024.2.2",
              "tqdm>=4,<5"]
 # Every tool's runtime dependencies, including Kerberos (see ado-kerberos above).
-all = ["workflow-automations[translation,outline,ado-triage,ado-kerberos,ado-graph]"]
+all = ["workflow-automations[translation,outline,team-roster,ado-triage,ado-kerberos,ado-graph]"]
 dev = ["pytest>=8,<10", "ruff==0.16.9", "build>=1.2,<2"]
 
 [project.scripts]
@@ -32,6 +33,7 @@ xlsx-translate = "workflow_automations.xlsx_translation:main"
 xlsx-outline = "workflow_automations.xlsx_outline:main"
 xlsx-unfold = "workflow_automations.xlsx_unfold:main"
 gerrit-parents = "workflow_automations.gerrit_parents:main"
+team-roster = "workflow_automations.team_roster:main"
 ado-triage = "workflow_automations.ado_triage:main"
 ado-graph = "workflow_automations.ado_graph:main"
 
