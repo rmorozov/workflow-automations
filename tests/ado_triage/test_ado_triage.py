@@ -1026,3 +1026,79 @@ def test_swapped_field_names_are_read_from_the_original_fields(tmp_path):
     assert master.loc[1, tool.FIELD_ORIGINAL_ESTIMATE] == 5
     assert master.loc[1, tool.FIELD_COMPLETED_WORK] == 30
     assert "OVER_ESTIMATE" in master.loc[1, tool.COL_FLAGS]
+
+
+def test_options_file_sets_thresholds_and_command_line_wins(snapshot, tmp_path, monkeypatch):
+    monkeypatch.setattr(tool, "fetch_snapshot", lambda url, query: snapshot)
+    config = write_config(tmp_path / "c.json", {"weights": {"DATE_DRIFT": 7}})
+    options = tmp_path / "triage.ini"
+    options.write_text(
+        f"stale-days = 5\nagenda-size = 3\nconfig = {config}\nprofile = exec\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "r.xlsx"
+    args = cli(tmp_path, "--options", str(options), "--agenda-size", "4", "--output", str(out))
+    assert tool.main(args) == tool.EXIT_OK
+    rows = load_workbook(out)[tool.SHEET_CONFIG].iter_rows(values_only=True)
+    meta = {row[0]: row[1] for row in rows if row}
+    assert meta["Stale threshold (days)"] == "5"
+    assert meta["Agenda size"] == "4"
+    assert meta["Profile"] == "exec"
+    assert meta["Options file"] == str(options)
+    assert meta["Config file"] == str(config)
+
+
+def test_written_options_and_config_reproduce_the_settings(tmp_path, no_network, capsys):
+    options, config = tmp_path / "triage.ini", tmp_path / "triage.json"
+    argv = ["export", "--stale-days", "30", "--profile", "exec", "--write-options", str(options)]
+    assert tool.main(argv) == tool.EXIT_OK
+    text = options.read_text(encoding="utf-8")
+    assert "stale-days = 30\n" in text and "# output =\n" in text and "overwrite =" not in text
+    assert "write-config" not in text
+    parsed, _ = tool.options.parse(tool.parser(), ["export", "--options", str(options)])
+    assert (parsed.stale_days, parsed.profile, parsed.timebox_days) == (30, "exec", 60)
+
+    custom = write_config(tmp_path / "c.json", {"rag": {"amber_from_pct": 80}})
+    argv = ["export", "--config", str(custom), "--write-config", str(config)]
+    assert tool.main(argv) == tool.EXIT_OK
+    template = json.loads(config.read_text(encoding="utf-8"))
+    assert template["rag"] == {"red_above_pct": 100.0, "amber_from_pct": 80.0}
+    assert template["weights"]["DATE_DRIFT"] == 3
+    assert template["fields"]["remaining_work"] == tool.FIELD_REMAINING_WORK
+    effective = tool.config_template(tool.load_config(custom))
+    assert tool.config_template(tool.load_config(config)) == effective == template
+
+    assert tool.main(argv) == tool.EXIT_VALIDATION  # existing file without --overwrite
+    assert "exists; pass --overwrite" in capsys.readouterr().err
+    assert tool.main([*argv, "--overwrite"]) == tool.EXIT_OK
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        ("stale-day = 5\n", "unknown option stale-day"),
+        ("overwrite = true\n", "overwrite must be given on the command line"),
+        ("agenda-size = many\n", "invalid int value"),
+    ],
+)
+def test_options_file_rejects_bad_keys(tmp_path, no_network, capsys, content, message):
+    options = tmp_path / "bad.ini"
+    options.write_text(content, encoding="utf-8")
+    out = tmp_path / "r.xlsx"
+    with pytest.raises(SystemExit) as exc:
+        tool.main(cli(tmp_path, "--options", str(options), "--output", str(out)))
+    assert exc.value.code == tool.EXIT_VALIDATION
+    assert message in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_output_is_required_and_may_not_be_the_options_file(tmp_path, no_network, capsys):
+    with pytest.raises(SystemExit) as exc:
+        tool.main(cli(tmp_path))
+    assert exc.value.code == tool.EXIT_VALIDATION
+    assert "required: --output" in capsys.readouterr().err
+    options = tmp_path / "triage.ini"
+    options.write_text("stale-days = 5\n", encoding="utf-8")
+    same = cli(tmp_path, "--options", str(options), "--output", str(options), "--overwrite")
+    assert tool.main(same) == tool.EXIT_VALIDATION
+    assert options.read_text(encoding="utf-8") == "stale-days = 5\n"

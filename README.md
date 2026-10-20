@@ -251,6 +251,12 @@ only the leadership sheets plus Master Data, so it still works as `--previous-fi
 own items. Existing output requires
 `--overwrite`.
 
+For a recurring run, `ado-triage export --stale-days 30 --profile exec --write-options
+work/triage.ini` saves every option to a `key = value` file, and `ado-triage export
+--options work/triage.ini --output work/triage-2026-10-08.xlsx` reuses it (options on the
+command line win). `--write-config site.json` writes the `--config` JSON with every
+field name, hour band, flag weight and RAG band at its default, ready to edit.
+
 Add `--save-snapshot work/triage-2026-10-01.json` to also keep the fetched ADO data.
 Later, `ado-triage export --from-snapshot work/triage-2026-10-01.json --as-of 2026-10-01
 --output work/rerun.xlsx` rebuilds the same report offline, with no Kerberos ticket or
@@ -306,6 +312,9 @@ offline, with only the analyze extra.
 Report sheets carry no organization-specific fields unless asked: add one with
 `analyze --meta-field Team=Custom.Team`, or `--meta-preset legacy` for the former
 `Roadmap_State` column.
+Each mode also takes `--options FILE` (a `key = value` file of its options, such as
+`steps = orphans,scc` or `meta-field = [Team=Custom.Team]`); `--write-options FILE`
+writes every option with its current value as a starting point. The command line wins.
 The equivalent script invocation is `python scripts/ado_graph.py ...` after installation.
 
 ## Agentic development
