@@ -10,6 +10,7 @@ upload workbook data. `ado-triage` reads (never writes) an on-premise Azure DevO
 | `xlsx-outline` | Fold repeated left-to-right sheet values into a Markdown outline | [XLSX outline](docs/specs/xlsx-outline.md) |
 | `xlsx-unfold` | Turn an edited outline back into rows, or merge it into the original | [XLSX outline](docs/specs/xlsx-outline.md#unfold-outline-to-table) |
 | `gerrit-parents` | Match repositories listed in a sheet to their closest parent in a Gerrit tree outline | [Gerrit parents](docs/specs/gerrit-parents.md) |
+| `team-roster` | Classify job titles, map people to ADO AreaPaths and count headcount per area | [Team roster](docs/specs/team-roster.md) |
 | `ado-graph` | Export ADO work-item graphs and analyze saved Parquet data | [ADO graph/export](docs/specs/ado-graph.md) |
 | `ado-triage` | Rank ADO change-request scope into a triage agenda and team summary | [ADO scope triage](docs/specs/ado-triage.md) |
 
@@ -177,6 +178,23 @@ neither, the outline goes to standard output. Names missing from the tree, liste
 under more than one parent, or at the top level are reported (and listed at the
 end of the outline) instead of guessed; the exit code is then 4.
 
+## Count people per AreaPath
+
+```bash
+python -m pip install -e '.[team-roster]'
+team-roster staff.xlsx work/roster.xlsx --mapping area-mapping.xlsx
+```
+
+The input is a staff export with a `corporatetitle` column (and `email`,
+`department_name`, `fullpath`, `approved`). The output copies it, adds
+`classified_title` (for example `Senior Developer` becomes `developer`) and
+`area_path`, and adds a `dev_per_area` sheet counting approved people per AreaPath
+and title class. AreaPaths come from the `person_to_area`, `department_to_area` and
+`fullpath_to_area` sheets, a person's own row first; sheets missing from the input
+are taken from `--mapping` or created empty for you to fill in. `--dry-run` previews
+the classification without writing; an existing output needs `--force` (or a `y` at
+the prompt). The input is never modified.
+
 ## Triage ADO scope
 
 ```bash
@@ -209,7 +227,7 @@ Capacity, previous-report and team options work as usual.
 ## Development
 
 ```bash
-python -m pip install -e '.[translation,outline,ado-triage,dev]'
+python -m pip install -e '.[translation,outline,team-roster,ado-triage,dev]'
 ruff check .
 ruff format --check .
 pytest
