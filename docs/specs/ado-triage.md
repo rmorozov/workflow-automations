@@ -230,7 +230,23 @@ renamed fields and weights. Malformed JSON, unknown keys, wrong types and the
 constraints above are validation errors (exit 2) found before ADO is contacted or
 any file is written; `--config` may not be the output.
 
+`--write-config FILE` writes that JSON with every key at its effective value (the
+defaults, with `--config` applied when given) and exits 0, so a site starts from the
+full list of keys rather than from this page. It refuses an existing FILE without
+`--overwrite` and may not be the `--config` file.
+
+`--options FILE` reads any `export` option from a `key = value` file (keys are the long
+options without dashes, such as `stale-days = 30` or `config = site.json`), through the
+ConfigArgParse helper shared with ado-graph (`ado_common/options.py`). The command line
+wins over the file, the file over the defaults; environment variables are never read.
+`--write-options FILE` writes every option with its effective value, unset ones
+commented out, and exits 0 without contacting ADO; `--output` is not needed for it.
+`--overwrite`, `--options`, `--write-options` and `--write-config` are never read from
+a file. An unknown key, such a key or an invalid value exits 2 naming the file. The
+Config sheet names the options file, and `--output` may not be it.
+
 | Exit | Meaning |
+
 | --- | --- |
 | 0 | Report written (warnings, if any, are printed and listed on the Config sheet) |
 | 2 | Invalid options, config, capacity, previous report, or existing output without `--overwrite` |

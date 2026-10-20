@@ -26,6 +26,7 @@ from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from workflow_automations.ado_common import options
 from workflow_automations.ado_common.dependency import DependencySubgraph
 from workflow_automations.ado_common.excel import excel_safe, keep_text_literal
 from workflow_automations.ado_common.excel import publish_all as shared_publish_all
@@ -1472,6 +1473,32 @@ def load_config(path: Path) -> dict[str, Any]:
     return out
 
 
+def config_template(configured: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``--config`` JSON with each key at its effective value, ``configured`` over defaults."""
+    cfg = Settings(as_of=datetime(2000, 1, 1), base_url="", **configured)
+    hours = {key: getattr(cfg, attr) for key, attr in CONFIG_HOURS.items()}
+    rag = {key: getattr(cfg, attr) for key, attr in CONFIG_RAG.items()}
+    return {
+        "fields": {key: cfg.field_names.get(c, c) for key, c in CONFIG_FIELDS.items()},
+        "hours": hours,
+        "weights": {h.flag: h.weight for h in heuristics(cfg) if h.kind == "risk"},
+        "rag": rag,
+    }
+
+
+def write_config_template(args: argparse.Namespace) -> Path:
+    """``--write-config``: the effective ``--config`` JSON, refusing to replace a file silently."""
+    path = args.write_config
+    if path.exists() and not args.overwrite:
+        raise TriageError(f"{path} exists; pass --overwrite to replace it")
+    if args.config is not None and path.resolve() == args.config.resolve():
+        raise TriageError("--write-config must differ from --config")
+    configured = load_config(args.config) if args.config else {}
+    text = json.dumps(config_template(configured), indent=2) + "\n"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def output_labels(cfg: Settings) -> dict[str, str]:
     """Column renames that show configured ADO field names in the written report."""
     return dict(cfg.field_names)
@@ -1483,7 +1510,7 @@ def output_labels(cfg: Settings) -> dict[str, str]:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    root = options.new_parser(description=__doc__.splitlines()[0])
     commands = root.add_subparsers(dest="mode", required=True)
     ex = commands.add_parser("export", help="Query ADO and write the triage report")
     ex.add_argument("--url", help="ADO collection URL (default with --from-snapshot: its URL)")
@@ -1495,9 +1522,7 @@ def parser() -> argparse.ArgumentParser:
     source.add_argument(
         "--save-snapshot", type=Path, help="Also save the fetched data as a JSON snapshot"
     )
-    ex.add_argument(
-        "--output", "--file", dest="output", required=True, type=Path, help="Report path"
-    )
+    ex.add_argument("--output", "--file", dest="output", type=Path, help="Report path (required)")
     ex.add_argument("--overwrite", action="store_true", help="Replace an existing report")
     ex.add_argument("--format", choices=["excel", "csv"], default="excel")
     ex.add_argument("--capacity-file", type=Path, help="XLSX with 'dev_per_area_capacity'")
@@ -1513,10 +1538,18 @@ def parser() -> argparse.ArgumentParser:
         "--config", type=Path, help="JSON file: field names, hour bands, flag weights, RAG bands"
     )
     ex.add_argument(
+        "--write-config",
+        type=Path,
+        metavar="FILE",
+        help="Write the --config JSON with every key at its effective value and exit "
+        "(needs --overwrite to replace FILE)",
+    )
+    ex.add_argument(
         "--team-dir",
         type=Path,
         help="Also write one report per team into this directory (<output stem>.<team>.<ext>)",
     )
+    options.add_options_file(ex)
     return root
 
 
@@ -1578,8 +1611,9 @@ def run_export(args: argparse.Namespace) -> Report:
     replay = _replay_source(args)
     cfg = _settings(args)
     output = args.output.resolve()
-    for name in ("capacity_file", "previous_file", "from_snapshot", "config"):
+    for name in ("capacity_file", "previous_file", "from_snapshot", "config", "options"):
         source = getattr(args, name)
+        source = Path(source) if isinstance(source, str) else source
         if source is not None and source.resolve() == output:
             raise TriageError(f"--output must differ from --{name.replace('_', '-')}")
     if args.format == "csv" and (args.previous_file or args.profile != "full"):
@@ -1635,6 +1669,7 @@ def run_export(args: argparse.Namespace) -> Report:
         "Agenda size": str(cfg.agenda_size),
         "Stale threshold (days)": str(cfg.stale_days),
         "Timebox (days)": str(cfg.timebox_days),
+        "Options file": str(getattr(args, "options", None) or "(none)"),
         "Config file": str(args.config or "(none)"),
         "Quick win (remaining hours)": (f"{cfg.quick_win_min_hours:g}-{cfg.quick_win_max_hours:g}"),
         "Minor progress (completed hours)": f"< {cfg.minor_progress_hours:g}",
@@ -1662,9 +1697,18 @@ def run_export(args: argparse.Namespace) -> Report:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    root = parser()
+    args, command = options.parse(root, argv)
+    written = options.write_options(command, root, args, f"ado-triage {args.mode} options")
+    if written is not None:
+        print(f"Wrote {written}")
+        return EXIT_OK
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stderr)
     try:
+        if args.write_config is not None:
+            print(f"Wrote {write_config_template(args)}")
+            return EXIT_OK
+        options.require(root, args, ["--output"])
         report = run_export(args)
     except (TriageError, SnapshotError) as exc:
         print(f"Validation error: {exc}", file=sys.stderr)
