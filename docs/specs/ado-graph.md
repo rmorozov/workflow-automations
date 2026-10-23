@@ -79,6 +79,8 @@ max-cycles = 500
 | `--include-projects` | Case-insensitive comma list of projects kept in scope; empty means all |
 | `--filtered-relations` | `stop` (default) or `follow`; whether relations of filtered items are traversed |
 | `--save-snapshot` | Also save the fetched work items as a JSON snapshot for offline `replay`; see [Snapshots and offline replay](#snapshots-and-offline-replay) |
+| `--long-text` | `split` (default), `trim` or `keep`: how `work_items.xlsx` holds text over `--max-cell-chars`; see [Long text cells](#long-text-cells) (also for `replay` and `analyze`) |
+| `--max-cell-chars` | Longest Excel cell text for `split` and `trim`, marker included; 256 to 32,767 (default, Excel's limit) |
 
 Default excluded types: Task, Bug, Test Case, Test Suite, Test Plan, Test Run,
 Shared Steps, Shared Parameter.
@@ -226,7 +228,7 @@ fetched, pruned, or omitted).
 | --- | --- |
 | Parquet | `nodes.parquet`, `edges.parquet` |
 | CSV | `nodes.csv`, `edges.csv`; pandas defaults, header and no index |
-| Excel | `work_items.xlsx`, sheets `Nodes`, `Edges`; text starting with `=` stays a literal string cell, never a formula |
+| Excel | `work_items.xlsx`, sheets `Nodes`, `Edges`, and `Long_Text` when a cell was split (see [Long text cells](#long-text-cells)); text starting with `=` stays a literal string cell, never a formula |
 
 Batch progress and per-type/project statistics are printed, followed by the pruned
 (WIQL-rejected, not fetched) and omitted (not returned by ADO) totals. Per-type and
@@ -251,7 +253,7 @@ an export that exits 5 writes neither. When the snapshot cannot be written (an
 unwritable path, a full disk, field values that are not JSON data) the error is
 logged, the export files are still written, and export exits 6, before exit 4.
 
-`ado-graph replay --snapshot PATH [--output-dir DIR] [--formats …] [--overwrite]`
+`ado-graph replay --snapshot PATH [--output-dir DIR] [--formats …] [--long-text …] [--overwrite]`
 writes the export files of an `ado-graph` snapshot without contacting ADO, needing
 only the `ado-graph-analyze` extra. It applies the recorded filters and relation
 policy to the recorded items, so a snapshot replays into the same files as its
@@ -500,7 +502,9 @@ written as an Excel formula by pandas/openpyxl; arbitrary identity/datetime fiel
 objects may fail serialization.
 
 Excel limits are checked before anything is written: at most 1,048,576 rows
-including the heading, 16,384 columns and 32,767 characters of text in a cell.
+including the heading, 16,384 columns and 32,767 characters of text in a cell
+(counted as Excel does, in UTF-16 units, so an emoji counts 2). Text over the cell
+limit is handled by `--long-text` (below); rows and columns are not.
 An export that requests `excel` with a Nodes or Edges sheet over a limit raises
 `ExcelLimitError` (a `ValueError`) naming the sheet and limit, and writes none of
 the requested formats; Parquet and CSV have no such limit. Analyze instead writes
@@ -518,6 +522,29 @@ default width and is logged as a warning. The final log line reports the seconds
 spent writing (including the workbook save) and sizing; `ADO_GRAPH_BENCH=1 pytest -s -k benchmark
 tests/ado_graph/test_report.py` prints graph compute, write and sizing time for a
 synthetic chain (`ADO_GRAPH_BENCH_NODES`, default 5,000).
+
+### Long text cells
+
+ADO text fields (descriptions, acceptance criteria, history, metadata columns in
+analysis sheets) can exceed Excel's 32,767 characters per cell. `export`, `replay`
+and `analyze` take `--long-text` and `--max-cell-chars N` (256 to 32,767, the
+default), from the command line or an options file (`long-text = trim`). They apply
+to the Excel sheets only; Parquet, CSV and spill files always keep the full text.
+Analyze's `About`, `Config` and `Summary` sheets are never changed.
+
+| Mode | A text cell over `--max-cell-chars` |
+| --- | --- |
+| `split` (default) | Keeps its start and the marker ` … [N characters; full text in Long_Text row R]`, within the limit, and links to that row. The workbook's last sheet, `Long_Text`, has one row per such cell: `Sheet`, `Cell` (`E3`, linked back to it), `Column`, `Key` (the row's first-column value, such as `WI_ID` or `CR_ID`), `Characters`, `Parts` and the full text in `Part_1`, `Part_2`, ... of at most 32,767 characters each; joining the parts gives the text back exactly |
+| `trim` | Keeps its start and ` … [N characters; trimmed]`; the rest is not in the workbook. Analyze marks the sheet `Complete=False` |
+| `keep` | Text is never changed, the earlier behavior: a cell over 32,767 characters makes export and replay raise `ExcelLimitError` and analyze spill the sheet to CSV; `--max-cell-chars` is ignored |
+
+Parts are cut on UTF-16 boundaries and never split an emoji. Trimmed cells and parts
+are literal text, never formulas. Each trimmed sheet logs a warning with its count;
+analyze's `Summary` note says how many cells of a sheet were trimmed, and `Config`
+lists `long_text` and `max_cell_chars`. Links beyond Excel's 65,530 per worksheet
+(counting work-item URLs) are left out with a warning; the marker still names the
+row. A `Long_Text` sheet over Excel's row or column limit raises `ExcelLimitError`
+and nothing is published.
 
 ## Verification and next steps
 

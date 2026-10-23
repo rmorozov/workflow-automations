@@ -27,7 +27,7 @@ from workflow_automations.ado_common.snapshot import (
 )
 from workflow_automations.ado_graph.client import FIELD_RENAME
 from workflow_automations.ado_graph.export import EXIT_INCOMPLETE, _parse_wi, _project_from_wi
-from workflow_automations.ado_graph.report import _export_dataframes
+from workflow_automations.ado_graph.report import LongText, _export_dataframes
 
 log = logging.getLogger("ado_tool")
 
@@ -134,7 +134,11 @@ def frames_from_snapshot(snapshot: RawSnapshot) -> tuple[pd.DataFrame, pd.DataFr
 
 
 def replay_export(
-    snapshot: RawSnapshot, output_dir: Path, formats: list[str], overwrite: bool = False
+    snapshot: RawSnapshot,
+    output_dir: Path,
+    formats: list[str],
+    overwrite: bool = False,
+    long_text: LongText | None = None,
 ) -> list[int]:
     """Write the export files of ``snapshot`` into ``output_dir`` for ``analyze``.
 
@@ -142,7 +146,9 @@ def replay_export(
     incomplete, as the export's exit 4 reports.
     """
     df_nodes, df_edges = frames_from_snapshot(snapshot)
-    _export_dataframes(df_nodes, df_edges, output_dir, formats, overwrite=overwrite)
+    _export_dataframes(
+        df_nodes, df_edges, output_dir, formats, overwrite=overwrite, long_text=long_text
+    )
     roots = set(snapshot.roots)
     omitted_linked = sorted(i for i in snapshot.omitted if i not in roots)
     if omitted_linked:
@@ -171,7 +177,13 @@ def run_replay(args: argparse.Namespace) -> None:
     )
     output_dir = Path(args.output_dir)
     formats = [f.strip().lower() for f in args.formats.split(",")]
-    omitted_linked = replay_export(snapshot, output_dir, formats, overwrite=args.overwrite)
+    omitted_linked = replay_export(
+        snapshot,
+        output_dir,
+        formats,
+        overwrite=args.overwrite,
+        long_text=LongText.from_args(args),
+    )
     if omitted_linked:
         log.warning("Replay incomplete → %s (exit %d).", output_dir, EXIT_INCOMPLETE)
         raise SystemExit(EXIT_INCOMPLETE)

@@ -315,6 +315,10 @@ Report sheets carry no organization-specific fields unless asked: add one with
 Each mode also takes `--options FILE` (a `key = value` file of its options, such as
 `steps = orphans,scc` or `meta-field = [Team=Custom.Team]`); `--write-options FILE`
 writes every option with its current value as a starting point. The command line wins.
+Excel holds at most 32,767 characters in a cell. By default a longer text cell keeps its
+start, with a marker linking to a `Long_Text` sheet that holds the full text split across
+cells; `--long-text trim` only shortens it, `--long-text keep` refuses (export) or moves the
+sheet to CSV (analyze), and `--max-cell-chars N` shortens cells further for readability.
 The equivalent script invocation is `python scripts/ado_graph.py ...` after installation.
 
 ## Agentic development

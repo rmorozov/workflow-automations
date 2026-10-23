@@ -12,7 +12,13 @@ from pathlib import Path
 import networkx as nx
 import pandas as pd
 
-from workflow_automations.ado_graph.report import plan_analysis_report, write_analysis_report
+from workflow_automations.ado_graph.report import (
+    LONG_TEXT_SHEET,
+    LongText,
+    long_text_counts,
+    plan_analysis_report,
+    write_analysis_report,
+)
 
 log = logging.getLogger("ado_tool")
 
@@ -866,14 +872,16 @@ def run_analyze(args: argparse.Namespace) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     results = order_sheets(results)
-    spills = plan_analysis_report(results, output_path)
-    summary = summarize_results(results, steps_requested, spills)
+    long_text = LongText.from_args(args)
+    spills = plan_analysis_report(results, output_path, long_text)
+    trimmed = long_text_counts(results, spills, long_text)
+    summary = summarize_results(results, steps_requested, spills, trimmed, long_text)
     preamble = {
         ABOUT_SHEET: about_frame(args, analyzer, summary),
         CONFIG_SHEET: config_frame(args, analyzer, list(results)),
         SUMMARY_SHEET: summary,
     }
-    write_analysis_report(results, output_path, preamble=preamble)
+    write_analysis_report(results, output_path, preamble=preamble, long_text=long_text)
 
 
 # ---------------------------------------------------------------------------
@@ -926,8 +934,16 @@ def summarize_results(
     results: dict[str, pd.DataFrame],
     steps: list[tuple[str, str, str | None]],
     spills: dict[str, tuple[Path, str]],
+    trimmed: dict[str, int] | None = None,
+    long_text: LongText | None = None,
 ) -> pd.DataFrame:
-    """One row per result sheet: rows, headline count, completeness and notes."""
+    """One row per result sheet: rows, headline count, completeness and notes.
+
+    ``trimmed`` counts each sheet's cells shortened by ``long_text``; the full
+    text stays in Long_Text with split, so only trim makes the sheet incomplete.
+    """
+    trimmed = trimmed or {}
+    long_text = long_text or LongText()
     step_of = {sheet: (step, subgraph or STEP_SUBGRAPH[step]) for sheet, step, subgraph in steps}
     rows = []
     for sheet, df in results.items():
@@ -946,6 +962,13 @@ def summarize_results(
         if sheet in spills:
             path, reason = spills[sheet]
             notes.append(f"rows written to {path.name}: {reason}")
+        if trimmed.get(sheet):
+            where = f"full text in {LONG_TEXT_SHEET}" if long_text.mode == "split" else "text cut"
+            notes.append(
+                f"{trimmed[sheet]} cell(s) over {long_text.cell_limit:,} characters "
+                f"trimmed; {where}"
+            )
+            complete = complete and long_text.mode == "split"
         rows.append(
             {
                 "Sheet": sheet[:31],
@@ -1007,6 +1030,7 @@ def config_frame(
 
     Files are named without their directory, so runs from different folders compare.
     """
+    long_text = LongText.from_args(args)
     settings = [
         ("nodes_file", Path(args.nodes_file).name),
         ("edges_file", Path(args.edges_file).name),
@@ -1026,5 +1050,7 @@ def config_frame(
         ("max_cycles", analyzer.max_cycles),
         ("max_cycle_rows", analyzer.max_cycle_rows),
         ("centrality_sources", analyzer.centrality_sources),
+        ("long_text", long_text.mode),
+        ("max_cell_chars", long_text.cell_limit),
     ]
     return pd.DataFrame(settings, columns=["Setting", "Value"])
