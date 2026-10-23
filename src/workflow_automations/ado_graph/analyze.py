@@ -59,7 +59,9 @@ META_PRESETS: dict[str, dict[str, str]] = {
 }
 MISSING_META_POLICIES = ("omit", "blank", "error")
 # Labels that would collide with columns the analyzer writes itself.
-RESERVED_META_LABELS = frozenset({*BASE_META_COLUMNS, "WI_ID", "In_Scope", "Graph_Neighbors_Debug"})
+RESERVED_META_LABELS = frozenset(
+    {*BASE_META_COLUMNS, "WI_ID", "In_Scope", "Graph_Neighbors_Debug", "Cycle_Edges_Debug"}
+)
 
 
 def parse_meta_fields(specs: list[str], presets: list[str]) -> dict[str, str]:
@@ -426,6 +428,16 @@ class GraphAnalyzer:
 
         return " | ".join(diagnostics) if diagnostics else "Isolated Node"
 
+    @staticmethod
+    def _cycle_edges_diagnostic(g: nx.DiGraph, prev: int, node: int, succ: int) -> str:
+        """The two cycle edges at a member: from the previous member and to the next."""
+        prev_type = g.nodes[prev].get("WorkItemType", "Unknown")
+        succ_type = g.nodes[succ].get("WorkItemType", "Unknown")
+        return (
+            f"<- [{_edge_label(g.edges[prev, node])}] from {prev_type} ({prev}) | "
+            f"-> [{_edge_label(g.edges[node, succ])}] to {succ_type} ({succ})"
+        )
+
     def _nodes_subset(self, node_ids: list) -> pd.DataFrame:
         """Full node rows for a subset, in WI_ID order, enriched with debugging metrics."""
         df = self.df_nodes[self.df_nodes["WI_ID"].isin(node_ids)].copy().reset_index(drop=True)
@@ -467,7 +479,8 @@ class GraphAnalyzer:
 
         Each cycle starts at its smallest member and keeps its direction; cycles are
         listed shortest first, then by their member sequence, and `Cycle_Index`
-        numbers them in that order.
+        numbers them in that order.  `Cycle_Edges_Debug` names the link from the
+        previous member and the link to the next, as the step's graph has them.
         """
         name, g = self._step_graph("cycles", subgraph)
         cycles: list[list] = []
@@ -485,9 +498,12 @@ class GraphAnalyzer:
         cycles.sort(key=lambda c: (len(c), c))
         rows = []
         for index, cycle in enumerate(cycles):
-            for node in cycle:
+            for pos, node in enumerate(cycle):
                 row = {"Cycle_Index": index, "Node_ID": node}
                 row.update(self._meta(node))
+                row["Cycle_Edges_Debug"] = self._cycle_edges_diagnostic(
+                    g, cycle[pos - 1], node, cycle[(pos + 1) % len(cycle)]
+                )
                 row["Cycles_Complete"] = complete
                 rows.append(row)
         count = len(cycles)
@@ -504,13 +520,18 @@ class GraphAnalyzer:
                 self.max_cycles,
                 self.max_cycle_rows,
             )
+        # The debug column follows WI_URL, as Graph_Neighbors_Debug does on node sheets.
+        meta = self._meta_columns()
+        at = meta.index("WI_URL") + 1
         columns = [
             "Cycle_Index",
             "Node_ID",
-            *self._meta_columns(),
+            *meta[:at],
+            "Cycle_Edges_Debug",
+            *meta[at:],
             "Cycles_Complete",
         ]
-        df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+        df = pd.DataFrame(rows, columns=columns)
         df.attrs["cycles_complete"] = complete
         return df
 

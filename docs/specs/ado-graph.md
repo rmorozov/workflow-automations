@@ -293,7 +293,7 @@ nodes file is logged as a warning and named in the About sheet; `--missing-meta`
 then omits its column (`omit`, the default), writes it blank (`blank`), or exits 2
 before analysis (`error`). An empty label or field, a label used twice or a field
 used twice, a label the report writes itself (the columns above, `WI_ID`,
-`In_Scope`, `Graph_Neighbors_Debug`) and a label that is another column of the
+`In_Scope`, `Graph_Neighbors_Debug`, `Cycle_Edges_Debug`) and a label that is another column of the
 nodes file exit 2 before analysis.
 
 Minimum input columns: nodes `WI_ID`; edges `Source_ID`, `Target_ID`, `Link_Type`.
@@ -366,7 +366,7 @@ scheduling graph.
 
 | Step / sheet | Current meaning |
 | --- | --- |
-| `cycles` | Enumerates simple cycles within a budget; one row per cycle member with metadata and `Cycles_Complete` |
+| `cycles` | Enumerates simple cycles within a budget; one row per cycle member with metadata, `Cycle_Edges_Debug` and `Cycles_Complete` |
 | `orphans` | Nodes with zero incoming and outgoing degree; full node fields plus URL/debug neighbors |
 | `no_cr_dep` | Nodes that are neither a Change Request nor downstream of one |
 | `has_cr_dep` | Change Requests and every node downstream of one (items that depend on a CR) |
@@ -407,11 +407,19 @@ repeatable. Within the sheets:
 | `cr_scope_impact`, `cr_prereqs` | Effort total or count descending, ties by `CR_ID`; the ID lists ascending |
 | `cr_impact_unpacked`, `cr_prereqs_unpacked` | `CR_ID`, then the related item's ID |
 | neighbor debug column | Predecessors, then successors, each by ID |
+| `Cycle_Edges_Debug` | The link from the previous member, then the link to the next |
 
 `longest_chain` keeps `SCC_Index` from the condensation of its own step, which is
 not the `scc` sheet's index. When `cycles` stops at its budget, the cycles listed are
 the first ones networkx enumerates on that graph, so the same snapshot and settings
 list the same cycles.
+
+`Cycle_Edges_Debug`, right after `WI_URL` on the cycles sheet, shows the two cycle
+edges at that member as `<- [link] from Type (ID) | -> [link] to Type (ID)`, in
+the format of `Graph_Neighbors_Debug`. Unlike that column, which lists every
+neighbor on the `all` graph, it names only the cycle's own links, as the step's
+subgraph has them: parallel types on that subgraph are joined with ` & `, and an
+indirect edge names its bridges. Reading a cycle's rows in order follows the cycle.
 
 Both measures count links (hops), not time. The graph has no duration, effort-based
 scheduling, capacity or calendar model, so the longest chain is the longest

@@ -359,6 +359,34 @@ def test_cycles_exactly_at_the_budget_are_complete():
     assert empty.empty and "Cycles_Complete" in empty.columns
 
 
+def test_cycle_rows_name_the_links_to_their_neighbours_on_the_cycle():
+    # 1->2->3->1 on `all`; 1->2 also carries Parent->Child, so `dependency` shows Blocks alone.
+    links = pd.DataFrame(
+        [(1, 2, "Blocks"), (1, 2, "Parent->Child"), (2, 3, "Blocks"), (3, 1, "Affects")],
+        columns=edges().columns,
+    )
+    analyzer = analyze.GraphAnalyzer(nodes(), links, "https://ado.example")
+    cycles = analyzer.find_cycles()
+    columns = list(cycles.columns)
+    assert columns.index("Cycle_Edges_Debug") == columns.index("WI_URL") + 1
+    assert list(cycles["Cycle_Edges_Debug"]) == [
+        "<- [Affects] from Feature (3) | -> [Parent->Child & Blocks] to Feature (2)",
+        "<- [Parent->Child & Blocks] from Change Request (1) | -> [Blocks] to Feature (3)",
+        "<- [Blocks] from Feature (2) | -> [Affects] to Change Request (1)",
+    ]
+    assert analyzer.find_cycles("impact").empty
+    two = pd.DataFrame(
+        [(1, 2, "Blocks"), (2, 1, "Blocks"), (1, 2, "Parent->Child")], columns=edges().columns
+    )
+    debug = analyze.GraphAnalyzer(nodes(), two).find_cycles("dependency")["Cycle_Edges_Debug"]
+    assert list(debug) == [
+        "<- [Blocks] from Feature (2) | -> [Blocks] to Feature (2)",
+        "<- [Blocks] from Change Request (1) | -> [Blocks] to Change Request (1)",
+    ]
+    empty = analyze.GraphAnalyzer(nodes(), edges()).find_cycles()
+    assert "Cycle_Edges_Debug" in empty.columns
+
+
 def test_betweenness_is_exact_within_budget_and_sampled_above_it():
     # 1->2->3->4: the inner nodes carry every path through them.
     links = pd.DataFrame(
@@ -446,7 +474,9 @@ def test_default_sheets_carry_no_organization_specific_field():
     base = list(analyze.BASE_META_COLUMNS)
     assert list(analyzer.find_scc().columns)[-6:] == base
     assert list(analyzer.compute_metrics().columns)[-6:] == base
-    assert list(analyzer.find_cycles().columns)[-7:-1] == base
+    cycle_columns = list(analyzer.find_cycles().columns)
+    cycle_columns.remove("Cycle_Edges_Debug")
+    assert cycle_columns[-7:-1] == base
 
 
 def test_configured_fields_appear_under_their_labels_on_every_sheet():
