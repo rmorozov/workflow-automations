@@ -7,6 +7,7 @@ import logging
 import time
 from collections.abc import Callable
 from importlib import metadata
+from itertools import pairwise
 from pathlib import Path
 
 import networkx as nx
@@ -59,9 +60,15 @@ META_PRESETS: dict[str, dict[str, str]] = {
 }
 MISSING_META_POLICIES = ("omit", "blank", "error")
 # Labels that would collide with columns the analyzer writes itself.
-RESERVED_META_LABELS = frozenset(
-    {*BASE_META_COLUMNS, "WI_ID", "In_Scope", "Graph_Neighbors_Debug", "Cycle_Edges_Debug"}
+DEBUG_COLUMNS = (
+    "Graph_Neighbors_Debug",
+    "Cycle_Edges_Debug",
+    "Chain_Edges_Debug",
+    "SCC_Edges_Debug",
+    "CR_Path_Debug",
+    "Path_Debug",
 )
+RESERVED_META_LABELS = frozenset({*BASE_META_COLUMNS, "WI_ID", "In_Scope", *DEBUG_COLUMNS})
 
 
 def parse_meta_fields(specs: list[str], presets: list[str]) -> dict[str, str]:
@@ -164,6 +171,31 @@ def _edge_label(edge_data: dict) -> str:
     if not via:
         return label
     return f"{label} via {'>'.join(map(str, via))} ({', '.join(_edge_path(edge_data))})"
+
+
+def _wi_tag(g: nx.DiGraph, node) -> str:
+    return f"{g.nodes[node].get('WorkItemType', 'Unknown')} ({node})"
+
+
+def _links_diagnostic(g: nx.DiGraph, node, preds, succs) -> str:
+    """`<- [link] from Type (ID)` for each predecessor, then `-> [link] to Type (ID)`."""
+    parts = [f"<- [{_edge_label(g.edges[p, node])}] from {_wi_tag(g, p)}" for p in preds]
+    parts += [f"-> [{_edge_label(g.edges[node, s])}] to {_wi_tag(g, s)}" for s in succs]
+    return " | ".join(parts)
+
+
+def _path_diagnostic(g: nx.DiGraph, path: list) -> str:
+    """`Type (ID) -[link]-> Type (ID) ...` along a path of g."""
+    text = _wi_tag(g, path[0])
+    for u, v in pairwise(path):
+        text += f" -[{_edge_label(g.edges[u, v])}]-> {_wi_tag(g, v)}"
+    return text
+
+
+def _after_url(meta: list[str], *debug: str) -> list[str]:
+    """Metadata columns with debug columns right after WI_URL, as on the node sheets."""
+    at = meta.index("WI_URL") + 1
+    return [*meta[:at], *debug, *meta[at:]]
 
 
 class GraphAnalyzer:
@@ -412,31 +444,9 @@ class GraphAnalyzer:
         """Helper to generate a human-readable string of direct connections for debugging."""
         if node_id not in self.G:
             return ""
-
-        diagnostics = []
-        # Incoming edges (What points to this node)
-        for pred in sorted(self.G.predecessors(node_id)):
-            edge_data = self.G.edges[pred, node_id]
-            pred_type = self.G.nodes[pred].get("WorkItemType", "Unknown")
-            diagnostics.append(f"<- [{_edge_label(edge_data)}] from {pred_type} ({pred})")
-
-        # Outgoing edges (What this node points to)
-        for succ in sorted(self.G.successors(node_id)):
-            edge_data = self.G.edges[node_id, succ]
-            succ_type = self.G.nodes[succ].get("WorkItemType", "Unknown")
-            diagnostics.append(f"-> [{_edge_label(edge_data)}] to {succ_type} ({succ})")
-
-        return " | ".join(diagnostics) if diagnostics else "Isolated Node"
-
-    @staticmethod
-    def _cycle_edges_diagnostic(g: nx.DiGraph, prev: int, node: int, succ: int) -> str:
-        """The two cycle edges at a member: from the previous member and to the next."""
-        prev_type = g.nodes[prev].get("WorkItemType", "Unknown")
-        succ_type = g.nodes[succ].get("WorkItemType", "Unknown")
-        return (
-            f"<- [{_edge_label(g.edges[prev, node])}] from {prev_type} ({prev}) | "
-            f"-> [{_edge_label(g.edges[node, succ])}] to {succ_type} ({succ})"
-        )
+        preds = sorted(self.G.predecessors(node_id))
+        succs = sorted(self.G.successors(node_id))
+        return _links_diagnostic(self.G, node_id, preds, succs) or "Isolated Node"
 
     def _nodes_subset(self, node_ids: list) -> pd.DataFrame:
         """Full node rows for a subset, in WI_ID order, enriched with debugging metrics."""
@@ -501,8 +511,8 @@ class GraphAnalyzer:
             for pos, node in enumerate(cycle):
                 row = {"Cycle_Index": index, "Node_ID": node}
                 row.update(self._meta(node))
-                row["Cycle_Edges_Debug"] = self._cycle_edges_diagnostic(
-                    g, cycle[pos - 1], node, cycle[(pos + 1) % len(cycle)]
+                row["Cycle_Edges_Debug"] = _links_diagnostic(
+                    g, node, [cycle[pos - 1]], [cycle[(pos + 1) % len(cycle)]]
                 )
                 row["Cycles_Complete"] = complete
                 rows.append(row)
@@ -520,15 +530,10 @@ class GraphAnalyzer:
                 self.max_cycles,
                 self.max_cycle_rows,
             )
-        # The debug column follows WI_URL, as Graph_Neighbors_Debug does on node sheets.
-        meta = self._meta_columns()
-        at = meta.index("WI_URL") + 1
         columns = [
             "Cycle_Index",
             "Node_ID",
-            *meta[:at],
-            "Cycle_Edges_Debug",
-            *meta[at:],
+            *_after_url(self._meta_columns(), "Cycle_Edges_Debug"),
             "Cycles_Complete",
         ]
         df = pd.DataFrame(rows, columns=columns)
@@ -553,7 +558,15 @@ class GraphAnalyzer:
         reachable = self._cr_downstream_set(g)
         has_dep = [n for n in g.nodes if n in reachable]
         log.info("WIs with CR dependency in the %s subgraph: %d", name, len(has_dep))
-        return self._nodes_subset(has_dep)
+        df = self._nodes_subset(has_dep)
+        if df.empty:
+            return df
+        # One shortest path from the nearest Change Request; a CR is its own.
+        paths = nx.multi_source_dijkstra_path(g, self._cr_nodes(g))
+        df["CR_Path_Debug"] = df["WI_ID"].map(lambda n: _path_diagnostic(g, paths[n]))
+        cols = list(df.columns)
+        cols.insert(cols.index("Graph_Neighbors_Debug") + 1, cols.pop(cols.index("CR_Path_Debug")))
+        return df[cols]
 
     def find_longest_chain(self, subgraph: str | None = None) -> pd.DataFrame:
         name, g = self._step_graph("longest_chain", subgraph)
@@ -562,7 +575,7 @@ class GraphAnalyzer:
             "Chain_Rank",
             "SCC_Index",
             "WI_ID",
-            *self._meta_columns(),
+            *_after_url(self._meta_columns(), "Chain_Edges_Debug"),
         ]
         cond = nx.condensation(g)
         if len(cond) == 0:
@@ -575,9 +588,12 @@ class GraphAnalyzer:
         first = {i: min(cond.nodes[i]["members"]) for i in cond}
         order = list(nx.lexicographical_topological_sort(cond, key=first.__getitem__))
         path_scc_indices = nx.dag_longest_path(cond, topo_order=order)
+        members = [cond.nodes[i]["members"] for i in path_scc_indices]
         rows = []
         for rank, scc_idx in enumerate(path_scc_indices):
-            for wi_id in sorted(cond.nodes[scc_idx]["members"]):
+            before = members[rank - 1] if rank else set()
+            after = members[rank + 1] if rank + 1 < len(members) else set()
+            for wi_id in sorted(members[rank]):
                 row = {
                     "Chain_Length": length,
                     "Chain_Rank": rank,
@@ -585,9 +601,16 @@ class GraphAnalyzer:
                     "WI_ID": wi_id,
                 }
                 row.update(self._meta(wi_id))
+                # Only the links that join this step of the chain to its neighbours.
+                row["Chain_Edges_Debug"] = _links_diagnostic(
+                    g,
+                    wi_id,
+                    sorted(n for n in g.predecessors(wi_id) if n in before),
+                    sorted(n for n in g.successors(wi_id) if n in after),
+                )
                 rows.append(row)
         log.info("Longest chain in the %s subgraph (condensed DAG hops): %d", name, length)
-        df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=columns)
+        df = pd.DataFrame(rows, columns=columns)
         df.attrs["longest_path_length"] = length
         return df
 
@@ -600,21 +623,26 @@ class GraphAnalyzer:
         )
         rows = []
         for i, scc in enumerate(sccs):
+            inside = set(scc)
             for node in scc:
                 row = {"SCC_Index": i, "WI_ID": node, "SCC_Size": len(scc)}
                 row.update(self._meta(node))
+                # Links to and from other members (or a self-link) of this component.
+                row["SCC_Edges_Debug"] = _links_diagnostic(
+                    g,
+                    node,
+                    sorted(n for n in g.predecessors(node) if n in inside),
+                    sorted(n for n in g.successors(node) if n in inside),
+                )
                 rows.append(row)
         log.info("SCCs found in the %s subgraph: %d", name, len(sccs))
-        if not rows:
-            return pd.DataFrame(
-                columns=[
-                    "SCC_Index",
-                    "WI_ID",
-                    "SCC_Size",
-                    *self._meta_columns(),
-                ]
-            )
-        return pd.DataFrame(rows)
+        columns = [
+            "SCC_Index",
+            "WI_ID",
+            "SCC_Size",
+            *_after_url(self._meta_columns(), "SCC_Edges_Debug"),
+        ]
+        return pd.DataFrame(rows, columns=columns)
 
     def compute_metrics(self, subgraph: str | None = None) -> pd.DataFrame:
         name, g = self._step_graph("metrics", subgraph)
@@ -747,6 +775,8 @@ class GraphAnalyzer:
         for cr_id in self._cr_nodes(g):
             cr_meta = self._meta(cr_id, prefix="CR_")
             cr_title = g.nodes[cr_id].get("Title", "")
+            # Breadth-first, so each path is a shortest one from the CR.
+            paths = nx.single_source_shortest_path(g, cr_id)
             for desc_id in sorted(nx.descendants(g, cr_id)):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
@@ -754,13 +784,16 @@ class GraphAnalyzer:
                     {
                         "Impacted_WI_ID": desc_id,
                         "Impacted_Title": g.nodes[desc_id].get("Title", ""),
+                        "Path_Debug": _path_diagnostic(g, paths[desc_id]),
                     }
                 )
                 row.update(self._meta(desc_id, prefix="Impacted_"))
                 rows.append(row)
         log.info("Generated unpacked impact view (%d rows).", len(rows))
         if not rows:
-            return pd.DataFrame(columns=["CR_ID", "CR_Title", "Impacted_WI_ID", "Impacted_Title"])
+            return pd.DataFrame(
+                columns=["CR_ID", "CR_Title", "Impacted_WI_ID", "Impacted_Title", "Path_Debug"]
+            )
         return pd.DataFrame(rows)
 
     def analyze_cr_prereqs_unpacked(self, subgraph: str | None = None) -> pd.DataFrame:
@@ -770,17 +803,25 @@ class GraphAnalyzer:
         for cr_id in self._cr_nodes(g):
             cr_meta = self._meta(cr_id, prefix="CR_")
             cr_title = g.nodes[cr_id].get("Title", "")
+            # Shortest paths to the CR, read in link direction (prerequisite first).
+            paths = nx.single_source_shortest_path(g.reverse(copy=False), cr_id)
             for asc_id in sorted(nx.ancestors(g, cr_id)):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
                 row.update(
-                    {"Prereq_WI_ID": asc_id, "Prereq_Title": g.nodes[asc_id].get("Title", "")}
+                    {
+                        "Prereq_WI_ID": asc_id,
+                        "Prereq_Title": g.nodes[asc_id].get("Title", ""),
+                        "Path_Debug": _path_diagnostic(g, paths[asc_id][::-1]),
+                    }
                 )
                 row.update(self._meta(asc_id, prefix="Prereq_"))
                 rows.append(row)
         log.info("Generated unpacked prerequisites view (%d rows).", len(rows))
         if not rows:
-            return pd.DataFrame(columns=["CR_ID", "CR_Title", "Prereq_WI_ID", "Prereq_Title"])
+            return pd.DataFrame(
+                columns=["CR_ID", "CR_Title", "Prereq_WI_ID", "Prereq_Title", "Path_Debug"]
+            )
         return pd.DataFrame(rows)
 
 

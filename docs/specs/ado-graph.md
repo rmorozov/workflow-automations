@@ -293,7 +293,7 @@ nodes file is logged as a warning and named in the About sheet; `--missing-meta`
 then omits its column (`omit`, the default), writes it blank (`blank`), or exits 2
 before analysis (`error`). An empty label or field, a label used twice or a field
 used twice, a label the report writes itself (the columns above, `WI_ID`,
-`In_Scope`, `Graph_Neighbors_Debug`, `Cycle_Edges_Debug`) and a label that is another column of the
+`In_Scope` and the debug columns below) and a label that is another column of the
 nodes file exit 2 before analysis.
 
 Minimum input columns: nodes `WI_ID`; edges `Source_ID`, `Target_ID`, `Link_Type`.
@@ -369,14 +369,14 @@ scheduling graph.
 | `cycles` | Enumerates simple cycles within a budget; one row per cycle member with metadata, `Cycle_Edges_Debug` and `Cycles_Complete` |
 | `orphans` | Nodes with zero incoming and outgoing degree; full node fields plus URL/debug neighbors |
 | `no_cr_dep` | Nodes that are neither a Change Request nor downstream of one |
-| `has_cr_dep` | Change Requests and every node downstream of one (items that depend on a CR) |
-| `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count in `Chain_Length`; every SCC member emitted |
-| `scc` | Every strongly connected component including singletons; index, size, members, metadata |
+| `has_cr_dep` | Change Requests and every node downstream of one (items that depend on a CR), with `CR_Path_Debug` |
+| `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count in `Chain_Length`; every SCC member emitted, with `Chain_Edges_Debug` |
+| `scc` | Every strongly connected component including singletons; index, size, members, metadata, `SCC_Edges_Debug` |
 | `metrics` | Degrees (distinct neighbors), normalized betweenness (exact or sampled, `Betweenness_Sources`), longest-depth `Dependency_Depth` and metadata |
 | `cr_scope_impact` | CR descendants, count/IDs; numeric effort of CR plus descendants, invalid effort becomes zero |
 | `cr_prereqs` | CR ancestors (dependency subgraph by default), count/IDs and metadata |
-| `cr_impact_unpacked` | One row per CR/downstream node pair with both metadata sets |
-| `cr_prereqs_unpacked` | One row per CR/upstream node pair with both metadata sets |
+| `cr_impact_unpacked` | One row per CR/downstream node pair with both metadata sets and `Path_Debug` |
+| `cr_prereqs_unpacked` | One row per CR/upstream node pair with both metadata sets and `Path_Debug` |
 
 CR recognition is exact `WorkItemType == "Change Request"`. `Dependency_Depth` is
 the longest depth: the number of hops on the longest path from any source to the
@@ -408,18 +408,32 @@ repeatable. Within the sheets:
 | `cr_impact_unpacked`, `cr_prereqs_unpacked` | `CR_ID`, then the related item's ID |
 | neighbor debug column | Predecessors, then successors, each by ID |
 | `Cycle_Edges_Debug` | The link from the previous member, then the link to the next |
+| `Chain_Edges_Debug`, `SCC_Edges_Debug` | Predecessors, then successors, each by ID |
 
 `longest_chain` keeps `SCC_Index` from the condensation of its own step, which is
 not the `scc` sheet's index. When `cycles` stops at its budget, the cycles listed are
 the first ones networkx enumerates on that graph, so the same snapshot and settings
 list the same cycles.
 
-`Cycle_Edges_Debug`, right after `WI_URL` on the cycles sheet, shows the two cycle
-edges at that member as `<- [link] from Type (ID) | -> [link] to Type (ID)`, in
-the format of `Graph_Neighbors_Debug`. Unlike that column, which lists every
-neighbor on the `all` graph, it names only the cycle's own links, as the step's
+Debug columns explain why a row is on its sheet. `Graph_Neighbors_Debug` on the
+`orphans`, `no_cr_dep` and `has_cr_dep` sheets lists every neighbor on the `all`
+graph. The others name only the links that put the row there, as the step's own
 subgraph has them: parallel types on that subgraph are joined with ` & `, and an
-indirect edge names its bridges. Reading a cycle's rows in order follows the cycle.
+indirect edge names its bridges. Links read `<- [link] from Type (ID)` and
+`-> [link] to Type (ID)`, joined with ` | `; paths read
+`Type (ID) -[link]-> Type (ID) ...` in link direction. Long cells follow
+`--long-text` like any other cell.
+
+| Column | Sheet | Shows |
+| --- | --- | --- |
+| `Cycle_Edges_Debug` | `cycles`, after `WI_URL` | The link from the previous member and the link to the next; reading a cycle's rows in order follows the cycle |
+| `Chain_Edges_Debug` | `longest_chain`, after `WI_URL` | The links from members of the previous chain step and to members of the next; a shortcut that skips a step is left out, and a member with no such link is blank |
+| `SCC_Edges_Debug` | `scc`, after `WI_URL` | Links to and from other members of the same component (or a self-link); blank for a singleton without one |
+| `CR_Path_Debug` | `has_cr_dep`, after `Graph_Neighbors_Debug` | One shortest path from the nearest Change Request; a CR shows only itself |
+| `Path_Debug` | `cr_impact_unpacked`, `cr_prereqs_unpacked`, after the related item's title | One shortest path from the CR to the impacted item, or from the prerequisite to the CR |
+
+Among equally short paths the one found first (walking the graph in ID order) is
+shown, so the same snapshot and settings give the same path.
 
 Both measures count links (hops), not time. The graph has no duration, effort-based
 scheduling, capacity or calendar model, so the longest chain is the longest
