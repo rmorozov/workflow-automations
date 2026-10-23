@@ -32,7 +32,16 @@ from workflow_automations.ado_graph.client import (
     DEFAULT_SKIP_TYPES,
     import_network_modules,
 )
-from workflow_automations.ado_graph.report import EDGE_COLUMNS, EXPORT_FILES, NODE_KEY, export_paths
+from workflow_automations.ado_graph.report import (
+    EDGE_COLUMNS,
+    EXCEL_MAX_CELL_CHARS,
+    EXPORT_FILES,
+    LONG_TEXT_MODES,
+    LONG_TEXT_SHEET,
+    MIN_CELL_CHARS,
+    NODE_KEY,
+    export_paths,
+)
 
 log = logging.getLogger("ado_tool")
 
@@ -59,6 +68,50 @@ def _positive_int(raw: str) -> int:
     if value < 1:
         raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
     return value
+
+
+def _cell_chars(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {raw!r}") from None
+    if not MIN_CELL_CHARS <= value <= EXCEL_MAX_CELL_CHARS:
+        raise argparse.ArgumentTypeError(
+            f"must be from {MIN_CELL_CHARS} to {EXCEL_MAX_CELL_CHARS:,}, got {value}"
+        )
+    return value
+
+
+def add_long_text(parser: argparse.ArgumentParser, keep: str) -> None:
+    """``--long-text`` and ``--max-cell-chars``; ``keep`` says what keep does in this mode."""
+    parser.add_argument(
+        "--long-text",
+        choices=LONG_TEXT_MODES,
+        default="split",
+        help=(
+            "Excel text longer than --max-cell-chars.  split (default): the cell keeps "
+            "its start and a marker linking to a row of the "
+            f"{LONG_TEXT_SHEET} sheet, which holds the full text split across Part_N "
+            "cells.  trim: only the start and the marker.  keep: never change text; "
+            f"{keep}"
+        ),
+    )
+    parser.add_argument(
+        "--max-cell-chars",
+        type=_cell_chars,
+        default=EXCEL_MAX_CELL_CHARS,
+        metavar="N",
+        help=(
+            "Longest Excel cell text, marker included, for --long-text split and trim "
+            f"({MIN_CELL_CHARS} to Excel's limit {EXCEL_MAX_CELL_CHARS:,}, the default)."
+        ),
+    )
+
+
+KEEP_EXPORT = (
+    "a cell over Excel's limit makes the run fail before writing; Parquet and CSV "
+    "always keep the full text."
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -157,6 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
             "followed too, which can reach many unrelated projects."
         ),
     )
+    add_long_text(ep, KEEP_EXPORT)
 
     # ── replay ────────────────────────────────────────────────────────────
     rp = subparsers.add_parser(
@@ -178,6 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Replace existing export files in --output-dir (default: refuse).",
     )
+    add_long_text(rp, KEEP_EXPORT)
 
     # ── analyze ───────────────────────────────────────────────────────────
     ap = subparsers.add_parser("analyze", help="Run graph analysis on exported parquet files.")
@@ -279,6 +334,11 @@ def build_parser() -> argparse.ArgumentParser:
             "metrics step: exact betweenness up to this many nodes, sampled from this "
             f"many sources (fixed seed) above it.  Default: {DEFAULT_CENTRALITY_SOURCES:,}."
         ),
+    )
+    add_long_text(
+        ap,
+        "a sheet with a cell over Excel's limit is written to a CSV file beside the "
+        "report instead.",
     )
 
     for sub in (ep, rp, ap):

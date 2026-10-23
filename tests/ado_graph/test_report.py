@@ -141,7 +141,7 @@ def test_failed_export_leaves_the_whole_previous_bundle(tmp_path, monkeypatch):
     for name, content in previous.items():
         (tmp_path / name).write_bytes(content)
 
-    def fail(_nodes, _edges, path):
+    def fail(_nodes, _edges, path, *_):
         path.write_bytes(b"partial")
         raise ValueError("cannot serialize")
 

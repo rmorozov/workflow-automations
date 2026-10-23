@@ -21,7 +21,7 @@ from workflow_automations.ado_graph.client import (
     WIQL_FILTER_CHUNK,
     ADOClient,
 )
-from workflow_automations.ado_graph.report import _export_dataframes
+from workflow_automations.ado_graph.report import LongText, _export_dataframes
 
 log = logging.getLogger("ado_tool")
 
@@ -543,7 +543,7 @@ def _run_export(args: argparse.Namespace, bundle: str | None) -> None:
 
     # 8. Export
     formats = [f.strip().lower() for f in args.formats.split(",")]
-    _export_dataframes(df_nodes, df_edges, output_dir, formats)
+    _export_dataframes(df_nodes, df_edges, output_dir, formats, long_text=LongText.from_args(args))
     stats.log_omitted()
     if not snapshot_saved:
         log.error(
