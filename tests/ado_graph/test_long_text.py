@@ -204,3 +204,14 @@ def test_links_beyond_the_hyperlink_budget_stay_text(tmp_path, monkeypatch):
     cells = excel_cells(tmp_path / "work_items.xlsx", "Nodes")
     assert cells["E3"].hyperlink is None
     assert cells["E3"].value.endswith("full text in Long_Text row 2]")
+
+
+def test_trimmed_urls_keep_their_full_link_target(tmp_path):
+    url = "https://ado.example/_workitems/edit/4?" + "q" * 300
+    frame = pd.DataFrame({"WI_ID": [4], "WI_URL": [url]})
+    output = tmp_path / "report.xlsx"
+    policy = report.LongText("trim", 256)
+    report.write_analysis_report({"orphans": frame}, output, long_text=policy)
+    cell = excel_cells(output, "orphans")["B2"]
+    assert cell.value.endswith("characters; trimmed]")
+    assert cell.hyperlink.target == url

@@ -647,7 +647,8 @@ def _write_workbook(
                     worksheet.column_dimensions[get_column_letter(position)].width = width
             timings["sizing"] += time.perf_counter() - start
             _add_filter(worksheet)
-            linked = _link_urls(worksheet, frame, safe_name)
+            # Link URLs from the values before fitting: a trimmed URL is no target.
+            linked = _link_urls(worksheet, frame if sheet_name in spills else df, safe_name)
             if sheet_name not in spills and sheet_name not in preamble:
                 _link_cells(worksheet, safe_name, links, EXCEL_MAX_HYPERLINKS - linked)
             if sheet_name in preamble:
