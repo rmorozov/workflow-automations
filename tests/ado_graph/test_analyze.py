@@ -1,5 +1,7 @@
 """Offline behavior tests for ado-graph analysis and bridge contraction."""
 
+import tracemalloc
+
 import pandas as pd
 import pytest
 from ado_graph_data import edges, fan_bridge, nodes
@@ -478,6 +480,92 @@ def test_has_cr_dep_rows_show_the_path_from_the_nearest_cr():
         5: "Change Request (5)",
         6: "Change Request (5) -[Affects]-> Bug (6)",
     }
+
+
+def test_path_ties_follow_id_order_through_reverse_and_contracted_links():
+    # Normalization makes 1's successors [3, 2] in insertion order; 2->4 is contracted
+    # through bridge 6.  Both routes to 4 are two hops; walking by ID picks 2.
+    graph_nodes = pd.concat(
+        [nodes(), pd.DataFrame([{"WI_ID": 6, "WorkItemType": "Bug", "In_Scope": False}])],
+        ignore_index=True,
+    )
+    links = pd.DataFrame(
+        [
+            (1, 3, "Blocks"),
+            (2, 1, "Blocked By"),
+            (2, 6, "Blocks"),
+            (6, 4, "Blocks"),
+            (3, 4, "Blocks"),
+        ],
+        columns=edges().columns,
+    )
+    analyzer = analyze.GraphAnalyzer(graph_nodes, links)
+    assert list(analyzer.G.successors(1)) == [3, 2]
+    expected = (
+        "Change Request (1) -[Blocks]-> Feature (2) "
+        "-[Indirect via 6 (Blocks, Blocks)]-> Feature (4)"
+    )
+    assert analyzer.find_has_cr_dep().set_index("WI_ID").loc[4, "CR_Path_Debug"] == expected
+    impact = analyzer.analyze_cr_impact_unpacked().set_index("Impacted_WI_ID")
+    assert impact.loc[4, "Path_Debug"] == expected
+
+
+def test_has_cr_dep_keeps_its_columns_without_change_requests():
+    features = nodes().assign(WorkItemType="Feature")
+    for graph_nodes in (features, features.iloc[:0]):
+        has_dep = analyze.GraphAnalyzer(graph_nodes, edges()).find_has_cr_dep()
+        assert has_dep.empty
+        assert {"WI_URL", "Graph_Neighbors_Debug", "CR_Path_Debug"} <= set(has_dep.columns)
+
+
+def cr_chain(n):
+    """CR 1 heading a chain 1 -> 2 -> ... -> n."""
+    graph_nodes = pd.DataFrame(
+        {
+            "WI_ID": range(1, n + 1),
+            "Title": "t",
+            "WorkItemType": ["Change Request"] + ["Feature"] * (n - 1),
+        }
+    )
+    links = pd.DataFrame(
+        {"Source_ID": range(1, n), "Target_ID": range(2, n + 1), "Link_Type": "Blocks"}
+    )
+    return analyze.GraphAnalyzer(graph_nodes, links)
+
+
+def test_long_paths_show_only_the_hops_next_to_the_item():
+    analyzer = cr_chain(13)
+    analyzer.max_path_hops = 2
+    paths = analyzer.find_has_cr_dep().set_index("WI_ID")["CR_Path_Debug"]
+    assert paths[3] == "Change Request (1) -[Blocks]-> Feature (2) -[Blocks]-> Feature (3)"
+    assert paths[4] == (
+        "Change Request (1) -[… 1 hop not shown …]-> Feature (2) -[Blocks]-> Feature (3) "
+        "-[Blocks]-> Feature (4)"
+    )
+    assert paths[13].startswith("Change Request (1) -[… 10 hops not shown …]-> Feature (11)")
+    reverse = analyze.GraphAnalyzer(
+        pd.DataFrame(
+            {"WI_ID": [1, 2, 3, 4], "WorkItemType": ["Bug", "Bug", "Bug", "Change Request"]}
+        ),
+        pd.DataFrame({"Source_ID": [1, 2, 3], "Target_ID": [2, 3, 4], "Link_Type": "Blocks"}),
+        max_path_hops=1,
+    )
+    row = reverse.analyze_cr_prereqs_unpacked().set_index("Prereq_WI_ID").loc[1, "Path_Debug"]
+    assert row == "Bug (1) -[Blocks]-> Bug (2) -[… 2 hops not shown …]-> Change Request (4)"
+
+
+def test_path_columns_grow_linearly_on_long_chains():
+    # Full paths on an n-item chain hold n²/2 hops; the reviewer measured 69 MB at 2,000.
+    analyzer = cr_chain(2_000)
+    tracemalloc.start()
+    has_dep = analyzer.find_has_cr_dep()
+    impact = analyzer.analyze_cr_impact_unpacked()
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 20_000_000
+    for column in (has_dep["CR_Path_Debug"], impact["Path_Debug"]):
+        assert column.str.len().max() < 400
+        assert column.str.len().sum() < 2_000 * 400
 
 
 def test_betweenness_is_exact_within_budget_and_sampled_above_it():

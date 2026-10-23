@@ -432,8 +432,20 @@ indirect edge names its bridges. Links read `<- [link] from Type (ID)` and
 | `CR_Path_Debug` | `has_cr_dep`, after `Graph_Neighbors_Debug` | One shortest path from the nearest Change Request; a CR shows only itself |
 | `Path_Debug` | `cr_impact_unpacked`, `cr_prereqs_unpacked`, after the related item's title | One shortest path from the CR to the impacted item, or from the prerequisite to the CR |
 
-Among equally short paths the one found first (walking the graph in ID order) is
-shown, so the same snapshot and settings give the same path.
+Paths come from one breadth-first walk per sheet (per CR on the unpacked sheets)
+that visits sources and then neighbors by ID, so among equally short paths the
+first in ID order is shown whatever order the links were stored or normalized in,
+and the nearest CR with the smallest ID wins a tie. The walk keeps one parent per
+item, and a path is rendered from it row by row with at most `--max-path-hops`
+hops (default 10) next to the row's item; a longer path names its far end and
+replaces the rest with one `-[… N hops not shown …]->` step, for example
+`Change Request (1) -[… 1989 hops not shown …]-> Feature (1990) -[Blocks]-> …`.
+Each path cell therefore stays short and the columns grow linearly with the rows,
+however long the graph's chains are: on a 2,000-item chain under one CR,
+`has_cr_dep` peaks at about 3 MB where full paths took about 70 MB.
+
+An empty `orphans`, `no_cr_dep` or `has_cr_dep` sheet keeps the same columns as a
+non-empty one, debug columns included.
 
 Both measures count links (hops), not time. The graph has no duration, effort-based
 scheduling, capacity or calendar model, so the longest chain is the longest
@@ -456,9 +468,9 @@ that, `metrics` estimates it from 500 source nodes sampled with a fixed seed (so
 repeat runs on the same graph agree) and logs a warning. `Betweenness_Sources` on
 every row (and the attr `betweenness_sources`) is the number of sources used, which
 equals the node count when the value is exact. The options
-`--max-cycles`, `--max-cycle-rows` and `--centrality-sources` (each at least 1)
-change these budgets; `GraphAnalyzer` takes them as `max_cycles`, `max_cycle_rows`
-and `centrality_sources`. With the defaults, synthetic graphs of 10,000 and 50,000 items run
+`--max-cycles`, `--max-cycle-rows`, `--centrality-sources` and `--max-path-hops`
+(each at least 1) change these budgets; `GraphAnalyzer` takes them as `max_cycles`,
+`max_cycle_rows`, `centrality_sources` and `max_path_hops`. With the defaults, synthetic graphs of 10,000 and 50,000 items run
 every step in about 10 seconds and 60 to 90 seconds respectively on a development
 container, of which sampled betweenness takes about 40 seconds at 50,000 items.
 
@@ -474,7 +486,7 @@ before the results:
 | Sheet | Content |
 | --- | --- |
 | `About` | `Item`/`Value` rows: purpose, how to read the report, tool version, the input file names, work items and links loaded, relations after normalization, links skipped for an absent endpoint or an unknown type, bridge items contracted or dropped, work items analyzed, metadata fields not in the nodes file (or `none`), result-sheet count, and `Complete` (`yes`, or `no:` with the partial sheets) |
-| `Config` | `Setting`/`Value` rows: input, output and options file names (without their folder), `ado_url`, `effort_field`, `meta_fields` (`LABEL=FIELD` pairs, presets expanded), `missing_meta`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
+| `Config` | `Setting`/`Value` rows: input, output and options file names (without their folder), `ado_url`, `effort_field`, `meta_fields` (`LABEL=FIELD` pairs, presets expanded), `missing_meta`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`, `max_path_hops`) |
 | `Summary` | One row per result sheet: `Sheet` (a link to it), `Step`, `Subgraph`, `Rows`, a headline `Count` and what it `Counted`, `Complete` and `Note` |
 
 The headline count is cycles for `cycles`, components for `scc` (the note adds how

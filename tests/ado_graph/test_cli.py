@@ -256,14 +256,18 @@ def test_analyze_budget_options_reach_the_report(tmp_path):
     )
     nodes().to_parquet(tmp_path / "nodes.parquet")
     budgets = ["--max-cycles", "1", "--max-cycle-rows", "50", "--centrality-sources", "2"]
+    budgets += ["--max-path-hops", "3"]
     tool.main(_analyze(tmp_path, "--steps", "cycles,metrics", *budgets))
     sheets = pd.read_excel(tmp_path / "out" / "report.xlsx", sheet_name=None)
+    assert sheets["Config"].set_index("Setting").loc["max_path_hops", "Value"] == 3
     assert sheets["cycles"]["Cycle_Index"].nunique() == 1
     assert set(sheets["cycles"]["Cycles_Complete"]) == {False}
     assert set(sheets["metrics"]["Betweenness_Sources"]) == {2}
 
 
-@pytest.mark.parametrize("option", ["--max-cycles", "--max-cycle-rows", "--centrality-sources"])
+@pytest.mark.parametrize(
+    "option", ["--max-cycles", "--max-cycle-rows", "--centrality-sources", "--max-path-hops"]
+)
 def test_analyze_budgets_must_be_positive(parquet_inputs, capsys, option):
     assert "must be at least 1" in _rejected(capsys, _analyze(parquet_inputs, option, "0"))
 

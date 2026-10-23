@@ -19,6 +19,7 @@ from workflow_automations.ado_graph.analyze import (
     DEFAULT_MAX_CYCLE_ROWS,
     DEFAULT_MAX_CYCLES,
     DEFAULT_MAX_INDIRECT_EDGES,
+    DEFAULT_MAX_PATH_HOPS,
     META_PRESETS,
     MISSING_META_POLICIES,
     SUBGRAPHS,
@@ -333,6 +334,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "metrics step: exact betweenness up to this many nodes, sampled from this "
             f"many sources (fixed seed) above it.  Default: {DEFAULT_CENTRALITY_SOURCES:,}."
+        ),
+    )
+    ap.add_argument(
+        "--max-path-hops",
+        type=_positive_int,
+        default=DEFAULT_MAX_PATH_HOPS,
+        help=(
+            "Path_Debug and CR_Path_Debug: show at most this many hops next to the row's "
+            "item; a longer path names its far end and how many hops are not shown.  "
+            f"Default: {DEFAULT_MAX_PATH_HOPS}."
         ),
     )
     add_long_text(

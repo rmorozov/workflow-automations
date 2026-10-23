@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from importlib import metadata
 from itertools import pairwise
@@ -38,6 +39,10 @@ DEFAULT_MAX_INDIRECT_EDGES = 1_000_000
 DEFAULT_MAX_CYCLES = 1_000
 DEFAULT_MAX_CYCLE_ROWS = 100_000
 DEFAULT_CENTRALITY_SOURCES = 500
+# Path debug columns show at most this many hops next to the row's item; a longer
+# path names its far end and how many hops it leaves out, so each cell stays short
+# however long the graph's chains are.
+DEFAULT_MAX_PATH_HOPS = 10
 CENTRALITY_SEED = 0
 CYCLE_PROGRESS_EVERY = 250
 
@@ -184,12 +189,54 @@ def _links_diagnostic(g: nx.DiGraph, node, preds, succs) -> str:
     return " | ".join(parts)
 
 
-def _path_diagnostic(g: nx.DiGraph, path: list) -> str:
-    """`Type (ID) -[link]-> Type (ID) ...` along a path of g."""
-    text = _wi_tag(g, path[0])
-    for u, v in pairwise(path):
+def _bfs_tree(g: nx.DiGraph, sources, reverse: bool = False) -> tuple[dict, dict, dict]:
+    """
+    Breadth-first tree from `sources` (following links backwards when `reverse`):
+    each reached node's parent, root source and hop distance.  Sources and
+    neighbors are visited by ID, so among equally short paths the tree keeps the
+    one first in ID order whatever the graph's insertion order.  The tree is
+    linear in the nodes reached; paths are only rendered from it, row by row.
+    """
+    neighbors = g.predecessors if reverse else g.successors
+    parent: dict = {}
+    root: dict = {}
+    dist: dict = {}
+    queue: deque = deque()
+    for source in sorted(sources):
+        if source not in dist:
+            parent[source], root[source], dist[source] = None, source, 0
+            queue.append(source)
+    while queue:
+        node = queue.popleft()
+        for nxt in sorted(neighbors(node)):
+            if nxt not in dist:
+                parent[nxt], root[nxt], dist[nxt] = node, root[node], dist[node] + 1
+                queue.append(nxt)
+    return parent, root, dist
+
+
+def _tree_path_diagnostic(
+    g: nx.DiGraph, tree: tuple[dict, dict, dict], node, max_hops: int, reverse: bool = False
+) -> str:
+    """
+    `Type (ID) -[link]-> Type (ID) ...` in link direction, from the tree's root to
+    `node` (from `node` to the root when `reverse`).  Only the max_hops hops next
+    to `node` are shown; the rest become one `-[… N hops not shown …]->` step.
+    """
+    parent, root, dist = tree
+    shown = [node]
+    for _ in range(min(dist[node], max_hops)):
+        shown.append(parent[shown[-1]])
+    hidden = dist[node] - (len(shown) - 1)
+    seq = shown if reverse else shown[::-1]
+    text = _wi_tag(g, seq[0])
+    for u, v in pairwise(seq):
         text += f" -[{_edge_label(g.edges[u, v])}]-> {_wi_tag(g, v)}"
-    return text
+    if not hidden:
+        return text
+    gap = f"-[… {hidden} hop{'s' if hidden != 1 else ''} not shown …]->"
+    far = _wi_tag(g, root[node])
+    return f"{text} {gap} {far}" if reverse else f"{far} {gap} {text}"
 
 
 def _after_url(meta: list[str], *debug: str) -> list[str]:
@@ -229,6 +276,7 @@ class GraphAnalyzer:
         max_cycles: int = DEFAULT_MAX_CYCLES,
         max_cycle_rows: int = DEFAULT_MAX_CYCLE_ROWS,
         centrality_sources: int = DEFAULT_CENTRALITY_SOURCES,
+        max_path_hops: int = DEFAULT_MAX_PATH_HOPS,
         meta_fields: dict[str, str] | None = None,
         missing_meta: str = "omit",
     ) -> None:
@@ -243,6 +291,7 @@ class GraphAnalyzer:
         self.max_cycles = max_cycles
         self.max_cycle_rows = max_cycle_rows
         self.centrality_sources = centrality_sources
+        self.max_path_hops = max_path_hops
         self._configure_meta(dict(meta_fields or {}), missing_meta)
         self.relations: nx.MultiDiGraph = nx.MultiDiGraph()
         self._graphs: dict[str, nx.DiGraph] = {}
@@ -456,12 +505,12 @@ class GraphAnalyzer:
         for label in self.meta_fields:
             if label not in df.columns:
                 df[label] = ""
-        if df.empty:
-            return df
 
-        # Inject the debugging metrics requested
-        df["WI_URL"] = df["WI_ID"].apply(self._wi_url)
-        df["Graph_Neighbors_Debug"] = df["WI_ID"].apply(self._get_neighborhood_diagnostic)
+        # An empty subset keeps the same columns.  Inject the debugging metrics requested
+        df["WI_URL"] = df["WI_ID"].map(self._wi_url).astype(object)
+        df["Graph_Neighbors_Debug"] = (
+            df["WI_ID"].map(self._get_neighborhood_diagnostic).astype(object)
+        )
 
         # Shift structural validation metrics right next to the Title column for readability
         cols = list(df.columns)
@@ -559,11 +608,13 @@ class GraphAnalyzer:
         has_dep = [n for n in g.nodes if n in reachable]
         log.info("WIs with CR dependency in the %s subgraph: %d", name, len(has_dep))
         df = self._nodes_subset(has_dep)
-        if df.empty:
-            return df
         # One shortest path from the nearest Change Request; a CR is its own.
-        paths = nx.multi_source_dijkstra_path(g, self._cr_nodes(g))
-        df["CR_Path_Debug"] = df["WI_ID"].map(lambda n: _path_diagnostic(g, paths[n]))
+        tree = _bfs_tree(g, self._cr_nodes(g))
+        df["CR_Path_Debug"] = (
+            df["WI_ID"]
+            .map(lambda n: _tree_path_diagnostic(g, tree, n, self.max_path_hops))
+            .astype(object)
+        )
         cols = list(df.columns)
         cols.insert(cols.index("Graph_Neighbors_Debug") + 1, cols.pop(cols.index("CR_Path_Debug")))
         return df[cols]
@@ -775,16 +826,15 @@ class GraphAnalyzer:
         for cr_id in self._cr_nodes(g):
             cr_meta = self._meta(cr_id, prefix="CR_")
             cr_title = g.nodes[cr_id].get("Title", "")
-            # Breadth-first, so each path is a shortest one from the CR.
-            paths = nx.single_source_shortest_path(g, cr_id)
-            for desc_id in sorted(nx.descendants(g, cr_id)):
+            tree = _bfs_tree(g, [cr_id])
+            for desc_id in sorted(n for n in tree[2] if n != cr_id):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
                 row.update(
                     {
                         "Impacted_WI_ID": desc_id,
                         "Impacted_Title": g.nodes[desc_id].get("Title", ""),
-                        "Path_Debug": _path_diagnostic(g, paths[desc_id]),
+                        "Path_Debug": _tree_path_diagnostic(g, tree, desc_id, self.max_path_hops),
                     }
                 )
                 row.update(self._meta(desc_id, prefix="Impacted_"))
@@ -803,16 +853,18 @@ class GraphAnalyzer:
         for cr_id in self._cr_nodes(g):
             cr_meta = self._meta(cr_id, prefix="CR_")
             cr_title = g.nodes[cr_id].get("Title", "")
-            # Shortest paths to the CR, read in link direction (prerequisite first).
-            paths = nx.single_source_shortest_path(g.reverse(copy=False), cr_id)
-            for asc_id in sorted(nx.ancestors(g, cr_id)):
+            # Walked backwards from the CR; paths read in link direction (prerequisite first).
+            tree = _bfs_tree(g, [cr_id], reverse=True)
+            for asc_id in sorted(n for n in tree[2] if n != cr_id):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
                 row.update(
                     {
                         "Prereq_WI_ID": asc_id,
                         "Prereq_Title": g.nodes[asc_id].get("Title", ""),
-                        "Path_Debug": _path_diagnostic(g, paths[asc_id][::-1]),
+                        "Path_Debug": _tree_path_diagnostic(
+                            g, tree, asc_id, self.max_path_hops, reverse=True
+                        ),
                     }
                 )
                 row.update(self._meta(asc_id, prefix="Prereq_"))
@@ -893,6 +945,7 @@ def run_analyze(args: argparse.Namespace) -> None:
             max_cycles=args.max_cycles,
             max_cycle_rows=args.max_cycle_rows,
             centrality_sources=args.centrality_sources,
+            max_path_hops=args.max_path_hops,
             meta_fields=parse_meta_fields(args.meta_field, args.meta_preset),
             missing_meta=args.missing_meta,
         )
@@ -1112,6 +1165,7 @@ def config_frame(
         ("max_cycles", analyzer.max_cycles),
         ("max_cycle_rows", analyzer.max_cycle_rows),
         ("centrality_sources", analyzer.centrality_sources),
+        ("max_path_hops", analyzer.max_path_hops),
         ("long_text", long_text.mode),
         ("max_cell_chars", long_text.cell_limit),
     ]
