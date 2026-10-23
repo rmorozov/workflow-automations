@@ -67,6 +67,18 @@ def test_export_splits_long_text_into_a_linked_long_text_sheet(tmp_path):
     assert pd.read_csv(tmp_path / "nodes.csv")["Description"][1] == LONG
 
 
+@pytest.mark.parametrize("tail", ["#N/A", "#VALUE!", "=1+1"])
+def test_parts_that_look_like_excel_errors_or_formulas_stay_text(tmp_path, tail):
+    frame = nodes()
+    frame["Description"] = [None, "x" * LIMIT + tail, None, None]
+    report._export_dataframes(frame, edges(), tmp_path, ["excel"])
+    path = tmp_path / "work_items.xlsx"
+    part = excel_cells(path, "Long_Text")["H2"]
+    assert (part.value, part.data_type) == (tail, "s")
+    sheet = pd.read_excel(path, sheet_name="Long_Text", keep_default_na=False)
+    assert sheet.loc[0, "Part_1"] + sheet.loc[0, "Part_2"] == "x" * LIMIT + tail
+
+
 def test_trim_keeps_the_start_and_a_marker_within_max_cell_chars(tmp_path):
     policy = report.LongText("trim", 300)
     report._export_dataframes(long_nodes(), edges(), tmp_path, ["excel"], long_text=policy)

@@ -364,8 +364,10 @@ class LongTextFitter:
         frame = excel_safe(self.frame())
         frame.to_excel(writer, sheet_name=LONG_TEXT_SHEET, index=False)
         worksheet = writer.sheets[LONG_TEXT_SHEET]
-        # Parts are cut at arbitrary places, so one can start with "=".
-        keep_text_literal(worksheet)
+        # Parts are cut at arbitrary places, so one can start with "=" or be "#N/A".
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                _keep_literal(cell)
         start = time.perf_counter()
         for position, width in enumerate(_column_widths(LONG_TEXT_SHEET, frame), start=1):
             if width is not None:
@@ -700,6 +702,13 @@ def _link_urls(worksheet: Any, frame: pd.DataFrame, sheet: str) -> int:
     return len(targets)
 
 
+def _keep_literal(cell: Any) -> None:
+    """Store text that openpyxl typed as a formula (``=...``) or error (``#N/A``) as text."""
+    if cell.data_type in ("f", "e") and isinstance(cell.value, str):
+        cell.data_type = "s"
+        cell.quotePrefix = cell.value.startswith("=")
+
+
 def _link_cells(
     worksheet: Any,
     sheet: str,
@@ -713,10 +722,7 @@ def _link_cells(
     skip is logged: the cells still name their target in text.
     """
     for row, column, _ in targets:
-        cell = worksheet.cell(row=row, column=column)
-        if cell.data_type == "f":
-            cell.data_type = "s"
-            cell.quotePrefix = True
+        _keep_literal(worksheet.cell(row=row, column=column))
     targets = [target for target in targets if target[2] is not None]
     budget = EXCEL_MAX_HYPERLINKS if budget is None else budget
     if len(targets) > budget:
