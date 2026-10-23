@@ -293,7 +293,7 @@ nodes file is logged as a warning and named in the About sheet; `--missing-meta`
 then omits its column (`omit`, the default), writes it blank (`blank`), or exits 2
 before analysis (`error`). An empty label or field, a label used twice or a field
 used twice, a label the report writes itself (the columns above, `WI_ID`,
-`In_Scope`, `Graph_Neighbors_Debug`) and a label that is another column of the
+`In_Scope` and the debug columns below) and a label that is another column of the
 nodes file exit 2 before analysis.
 
 Minimum input columns: nodes `WI_ID`; edges `Source_ID`, `Target_ID`, `Link_Type`.
@@ -366,17 +366,17 @@ scheduling graph.
 
 | Step / sheet | Current meaning |
 | --- | --- |
-| `cycles` | Enumerates simple cycles within a budget; one row per cycle member with metadata and `Cycles_Complete` |
+| `cycles` | Enumerates simple cycles within a budget; one row per cycle member with metadata, `Cycle_Edges_Debug` and `Cycles_Complete` |
 | `orphans` | Nodes with zero incoming and outgoing degree; full node fields plus URL/debug neighbors |
 | `no_cr_dep` | Nodes that are neither a Change Request nor downstream of one |
-| `has_cr_dep` | Change Requests and every node downstream of one (items that depend on a CR) |
-| `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count in `Chain_Length`; every SCC member emitted |
-| `scc` | Every strongly connected component including singletons; index, size, members, metadata |
+| `has_cr_dep` | Change Requests and every node downstream of one (items that depend on a CR), with `CR_Path_Debug` |
+| `longest_chain` | Longest path in SCC-condensed DAG, unweighted hop count in `Chain_Length`; every SCC member emitted, with `Chain_Edges_Debug` |
+| `scc` | Every strongly connected component including singletons; index, size, members, metadata, `SCC_Edges_Debug` |
 | `metrics` | Degrees (distinct neighbors), normalized betweenness (exact or sampled, `Betweenness_Sources`), longest-depth `Dependency_Depth` and metadata |
 | `cr_scope_impact` | CR descendants, count/IDs; numeric effort of CR plus descendants, invalid effort becomes zero |
 | `cr_prereqs` | CR ancestors (dependency subgraph by default), count/IDs and metadata |
-| `cr_impact_unpacked` | One row per CR/downstream node pair with both metadata sets |
-| `cr_prereqs_unpacked` | One row per CR/upstream node pair with both metadata sets |
+| `cr_impact_unpacked` | One row per CR/downstream node pair with both metadata sets and `Path_Debug` |
+| `cr_prereqs_unpacked` | One row per CR/upstream node pair with both metadata sets and `Path_Debug` |
 
 CR recognition is exact `WorkItemType == "Change Request"`. `Dependency_Depth` is
 the longest depth: the number of hops on the longest path from any source to the
@@ -407,11 +407,45 @@ repeatable. Within the sheets:
 | `cr_scope_impact`, `cr_prereqs` | Effort total or count descending, ties by `CR_ID`; the ID lists ascending |
 | `cr_impact_unpacked`, `cr_prereqs_unpacked` | `CR_ID`, then the related item's ID |
 | neighbor debug column | Predecessors, then successors, each by ID |
+| `Cycle_Edges_Debug` | The link from the previous member, then the link to the next |
+| `Chain_Edges_Debug`, `SCC_Edges_Debug` | Predecessors, then successors, each by ID |
 
 `longest_chain` keeps `SCC_Index` from the condensation of its own step, which is
 not the `scc` sheet's index. When `cycles` stops at its budget, the cycles listed are
 the first ones networkx enumerates on that graph, so the same snapshot and settings
 list the same cycles.
+
+Debug columns explain why a row is on its sheet. `Graph_Neighbors_Debug` on the
+`orphans`, `no_cr_dep` and `has_cr_dep` sheets lists every neighbor on the `all`
+graph. The others name only the links that put the row there, as the step's own
+subgraph has them: parallel types on that subgraph are joined with ` & `, and an
+indirect edge names its bridges. Links read `<- [link] from Type (ID)` and
+`-> [link] to Type (ID)`, joined with ` | `; paths read
+`Type (ID) -[link]-> Type (ID) ...` in link direction. Long cells follow
+`--long-text` like any other cell.
+
+| Column | Sheet | Shows |
+| --- | --- | --- |
+| `Cycle_Edges_Debug` | `cycles`, after `WI_URL` | The link from the previous member and the link to the next; reading a cycle's rows in order follows the cycle |
+| `Chain_Edges_Debug` | `longest_chain`, after `WI_URL` | The links from members of the previous chain step and to members of the next; a shortcut that skips a step is left out, and a member with no such link is blank |
+| `SCC_Edges_Debug` | `scc`, after `WI_URL` | Links to and from other members of the same component (or a self-link); blank for a singleton without one |
+| `CR_Path_Debug` | `has_cr_dep`, after `Graph_Neighbors_Debug` | One shortest path from the nearest Change Request; a CR shows only itself |
+| `Path_Debug` | `cr_impact_unpacked`, `cr_prereqs_unpacked`, after the related item's title | One shortest path from the CR to the impacted item, or from the prerequisite to the CR |
+
+Paths come from one breadth-first walk per sheet (per CR on the unpacked sheets)
+that visits sources and then neighbors by ID, so among equally short paths the
+first in ID order is shown whatever order the links were stored or normalized in,
+and the nearest CR with the smallest ID wins a tie. The walk keeps one parent per
+item, and a path is rendered from it row by row with at most `--max-path-hops`
+hops (default 10) next to the row's item; a longer path names its far end and
+replaces the rest with one `-[… N hops not shown …]->` step, for example
+`Change Request (1) -[… 1989 hops not shown …]-> Feature (1990) -[Blocks]-> …`.
+Each path cell therefore stays short and the columns grow linearly with the rows,
+however long the graph's chains are: on a 2,000-item chain under one CR,
+`has_cr_dep` peaks at about 3 MB where full paths took about 70 MB.
+
+An empty `orphans`, `no_cr_dep` or `has_cr_dep` sheet keeps the same columns as a
+non-empty one, debug columns included.
 
 Both measures count links (hops), not time. The graph has no duration, effort-based
 scheduling, capacity or calendar model, so the longest chain is the longest
@@ -434,9 +468,9 @@ that, `metrics` estimates it from 500 source nodes sampled with a fixed seed (so
 repeat runs on the same graph agree) and logs a warning. `Betweenness_Sources` on
 every row (and the attr `betweenness_sources`) is the number of sources used, which
 equals the node count when the value is exact. The options
-`--max-cycles`, `--max-cycle-rows` and `--centrality-sources` (each at least 1)
-change these budgets; `GraphAnalyzer` takes them as `max_cycles`, `max_cycle_rows`
-and `centrality_sources`. With the defaults, synthetic graphs of 10,000 and 50,000 items run
+`--max-cycles`, `--max-cycle-rows`, `--centrality-sources` and `--max-path-hops`
+(each at least 1) change these budgets; `GraphAnalyzer` takes them as `max_cycles`,
+`max_cycle_rows`, `centrality_sources` and `max_path_hops`. With the defaults, synthetic graphs of 10,000 and 50,000 items run
 every step in about 10 seconds and 60 to 90 seconds respectively on a development
 container, of which sampled betweenness takes about 40 seconds at 50,000 items.
 
@@ -452,7 +486,7 @@ before the results:
 | Sheet | Content |
 | --- | --- |
 | `About` | `Item`/`Value` rows: purpose, how to read the report, tool version, the input file names, work items and links loaded, relations after normalization, links skipped for an absent endpoint or an unknown type, bridge items contracted or dropped, work items analyzed, metadata fields not in the nodes file (or `none`), result-sheet count, and `Complete` (`yes`, or `no:` with the partial sheets) |
-| `Config` | `Setting`/`Value` rows: input, output and options file names (without their folder), `ado_url`, `effort_field`, `meta_fields` (`LABEL=FIELD` pairs, presets expanded), `missing_meta`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`) |
+| `Config` | `Setting`/`Value` rows: input, output and options file names (without their folder), `ado_url`, `effort_field`, `meta_fields` (`LABEL=FIELD` pairs, presets expanded), `missing_meta`, `steps` as given, the resulting sheets, `bridges` and every budget (`max_indirect_edges`, `max_cycles`, `max_cycle_rows`, `centrality_sources`, `max_path_hops`) |
 | `Summary` | One row per result sheet: `Sheet` (a link to it), `Step`, `Subgraph`, `Rows`, a headline `Count` and what it `Counted`, `Complete` and `Note` |
 
 The headline count is cycles for `cycles`, components for `scc` (the note adds how

@@ -1,5 +1,7 @@
 """Offline behavior tests for ado-graph analysis and bridge contraction."""
 
+import tracemalloc
+
 import pandas as pd
 import pytest
 from ado_graph_data import edges, fan_bridge, nodes
@@ -359,6 +361,213 @@ def test_cycles_exactly_at_the_budget_are_complete():
     assert empty.empty and "Cycles_Complete" in empty.columns
 
 
+def test_cycle_rows_name_the_links_to_their_neighbours_on_the_cycle():
+    # 1->2->3->1 on `all`; 1->2 also carries Parent->Child, so `dependency` shows Blocks alone.
+    links = pd.DataFrame(
+        [(1, 2, "Blocks"), (1, 2, "Parent->Child"), (2, 3, "Blocks"), (3, 1, "Affects")],
+        columns=edges().columns,
+    )
+    analyzer = analyze.GraphAnalyzer(nodes(), links, "https://ado.example")
+    cycles = analyzer.find_cycles()
+    columns = list(cycles.columns)
+    assert columns.index("Cycle_Edges_Debug") == columns.index("WI_URL") + 1
+    assert list(cycles["Cycle_Edges_Debug"]) == [
+        "<- [Affects] from Feature (3) | -> [Parent->Child & Blocks] to Feature (2)",
+        "<- [Parent->Child & Blocks] from Change Request (1) | -> [Blocks] to Feature (3)",
+        "<- [Blocks] from Feature (2) | -> [Affects] to Change Request (1)",
+    ]
+    assert analyzer.find_cycles("impact").empty
+    two = pd.DataFrame(
+        [(1, 2, "Blocks"), (2, 1, "Blocks"), (1, 2, "Parent->Child")], columns=edges().columns
+    )
+    debug = analyze.GraphAnalyzer(nodes(), two).find_cycles("dependency")["Cycle_Edges_Debug"]
+    assert list(debug) == [
+        "<- [Blocks] from Feature (2) | -> [Blocks] to Feature (2)",
+        "<- [Blocks] from Change Request (1) | -> [Blocks] to Change Request (1)",
+    ]
+    empty = analyze.GraphAnalyzer(nodes(), edges()).find_cycles()
+    assert "Cycle_Edges_Debug" in empty.columns
+
+
+def test_chain_and_scc_rows_name_the_links_that_join_them():
+    # Chain {1} -> {2,3} -> {4}; the shortcut 1->4 joins no two neighbouring steps.
+    links = pd.DataFrame(
+        [(1, 2, "Blocks"), (2, 3, "Blocks"), (3, 2, "Blocks"), (3, 4, "Blocks"), (1, 4, "Blocks")],
+        columns=edges().columns,
+    )
+    analyzer = analyze.GraphAnalyzer(nodes(), links)
+    chain = analyzer.find_longest_chain()
+    columns = list(chain.columns)
+    assert columns.index("Chain_Edges_Debug") == columns.index("WI_URL") + 1
+    assert dict(zip(chain["WI_ID"], chain["Chain_Edges_Debug"], strict=True)) == {
+        1: "-> [Blocks] to Feature (2)",
+        2: "<- [Blocks] from Change Request (1)",
+        3: "-> [Blocks] to Feature (4)",
+        4: "<- [Blocks] from Feature (3)",
+    }
+    scc = analyzer.find_scc()
+    columns = list(scc.columns)
+    assert columns.index("SCC_Edges_Debug") == columns.index("WI_URL") + 1
+    assert dict(zip(scc["WI_ID"], scc["SCC_Edges_Debug"], strict=True)) == {
+        2: "<- [Blocks] from Feature (3) | -> [Blocks] to Feature (3)",
+        3: "<- [Blocks] from Feature (2) | -> [Blocks] to Feature (2)",
+        1: "",
+        4: "",
+    }
+    empty = analyze.GraphAnalyzer(nodes(), edges())
+    assert "Chain_Edges_Debug" in empty.find_longest_chain("impact").columns
+    assert "SCC_Edges_Debug" in analyze.GraphAnalyzer(nodes().iloc[:0], edges()).find_scc().columns
+
+
+def cr_paths():
+    """CR 1 and CR 5; 6 -> 4 -> 1 are its prerequisites, and CR 5 affects 6."""
+    graph_nodes = pd.concat(
+        [
+            nodes(),
+            pd.DataFrame(
+                [
+                    {"WI_ID": 5, "Title": "CR two", "WorkItemType": "Change Request"},
+                    {"WI_ID": 6, "Title": "Bug", "WorkItemType": "Bug"},
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    links = pd.DataFrame(
+        [
+            (1, 2, "Blocks"),
+            (2, 3, "Predecessor->Successor"),
+            (1, 3, "Parent->Child"),
+            (4, 1, "Blocks"),
+            (6, 4, "Blocks"),
+            (5, 6, "Affects"),
+        ],
+        columns=edges().columns,
+    )
+    return analyze.GraphAnalyzer(graph_nodes, links)
+
+
+def test_unpacked_cr_rows_show_one_shortest_path():
+    analyzer = cr_paths()
+    impact = analyzer.analyze_cr_impact_unpacked()
+    paths = impact[impact["CR_ID"] == 1].set_index("Impacted_WI_ID")["Path_Debug"]
+    # 3 is reached directly through Parent->Child, not through 2.
+    assert paths.to_dict() == {
+        2: "Change Request (1) -[Blocks]-> Feature (2)",
+        3: "Change Request (1) -[Parent->Child]-> Feature (3)",
+    }
+    prereqs = analyzer.analyze_cr_prereqs_unpacked()
+    paths = prereqs[prereqs["CR_ID"] == 1].set_index("Prereq_WI_ID")["Path_Debug"]
+    # Read in link direction; the impact link 5->6 is outside the dependency subgraph.
+    assert paths.to_dict() == {
+        4: "Feature (4) -[Blocks]-> Change Request (1)",
+        6: "Bug (6) -[Blocks]-> Feature (4) -[Blocks]-> Change Request (1)",
+    }
+    empty = analyze.GraphAnalyzer(nodes(), edges())
+    assert "Path_Debug" in empty.analyze_cr_impact_unpacked("hierarchy").columns
+    assert "Path_Debug" in empty.analyze_cr_prereqs_unpacked("impact").columns
+
+
+def test_has_cr_dep_rows_show_the_path_from_the_nearest_cr():
+    has_dep = cr_paths().find_has_cr_dep()
+    columns = list(has_dep.columns)
+    assert columns.index("CR_Path_Debug") == columns.index("Graph_Neighbors_Debug") + 1
+    assert has_dep.set_index("WI_ID")["CR_Path_Debug"].to_dict() == {
+        1: "Change Request (1)",
+        2: "Change Request (1) -[Blocks]-> Feature (2)",
+        3: "Change Request (1) -[Parent->Child]-> Feature (3)",
+        4: "Change Request (5) -[Affects]-> Bug (6) -[Blocks]-> Feature (4)",
+        5: "Change Request (5)",
+        6: "Change Request (5) -[Affects]-> Bug (6)",
+    }
+
+
+def test_path_ties_follow_id_order_through_reverse_and_contracted_links():
+    # Normalization makes 1's successors [3, 2] in insertion order; 2->4 is contracted
+    # through bridge 6.  Both routes to 4 are two hops; walking by ID picks 2.
+    graph_nodes = pd.concat(
+        [nodes(), pd.DataFrame([{"WI_ID": 6, "WorkItemType": "Bug", "In_Scope": False}])],
+        ignore_index=True,
+    )
+    links = pd.DataFrame(
+        [
+            (1, 3, "Blocks"),
+            (2, 1, "Blocked By"),
+            (2, 6, "Blocks"),
+            (6, 4, "Blocks"),
+            (3, 4, "Blocks"),
+        ],
+        columns=edges().columns,
+    )
+    analyzer = analyze.GraphAnalyzer(graph_nodes, links)
+    assert list(analyzer.G.successors(1)) == [3, 2]
+    expected = (
+        "Change Request (1) -[Blocks]-> Feature (2) "
+        "-[Indirect via 6 (Blocks, Blocks)]-> Feature (4)"
+    )
+    assert analyzer.find_has_cr_dep().set_index("WI_ID").loc[4, "CR_Path_Debug"] == expected
+    impact = analyzer.analyze_cr_impact_unpacked().set_index("Impacted_WI_ID")
+    assert impact.loc[4, "Path_Debug"] == expected
+
+
+def test_has_cr_dep_keeps_its_columns_without_change_requests():
+    features = nodes().assign(WorkItemType="Feature")
+    for graph_nodes in (features, features.iloc[:0]):
+        has_dep = analyze.GraphAnalyzer(graph_nodes, edges()).find_has_cr_dep()
+        assert has_dep.empty
+        assert {"WI_URL", "Graph_Neighbors_Debug", "CR_Path_Debug"} <= set(has_dep.columns)
+
+
+def cr_chain(n):
+    """CR 1 heading a chain 1 -> 2 -> ... -> n."""
+    graph_nodes = pd.DataFrame(
+        {
+            "WI_ID": range(1, n + 1),
+            "Title": "t",
+            "WorkItemType": ["Change Request"] + ["Feature"] * (n - 1),
+        }
+    )
+    links = pd.DataFrame(
+        {"Source_ID": range(1, n), "Target_ID": range(2, n + 1), "Link_Type": "Blocks"}
+    )
+    return analyze.GraphAnalyzer(graph_nodes, links)
+
+
+def test_long_paths_show_only_the_hops_next_to_the_item():
+    analyzer = cr_chain(13)
+    analyzer.max_path_hops = 2
+    paths = analyzer.find_has_cr_dep().set_index("WI_ID")["CR_Path_Debug"]
+    assert paths[3] == "Change Request (1) -[Blocks]-> Feature (2) -[Blocks]-> Feature (3)"
+    assert paths[4] == (
+        "Change Request (1) -[… 1 hop not shown …]-> Feature (2) -[Blocks]-> Feature (3) "
+        "-[Blocks]-> Feature (4)"
+    )
+    assert paths[13].startswith("Change Request (1) -[… 10 hops not shown …]-> Feature (11)")
+    reverse = analyze.GraphAnalyzer(
+        pd.DataFrame(
+            {"WI_ID": [1, 2, 3, 4], "WorkItemType": ["Bug", "Bug", "Bug", "Change Request"]}
+        ),
+        pd.DataFrame({"Source_ID": [1, 2, 3], "Target_ID": [2, 3, 4], "Link_Type": "Blocks"}),
+        max_path_hops=1,
+    )
+    row = reverse.analyze_cr_prereqs_unpacked().set_index("Prereq_WI_ID").loc[1, "Path_Debug"]
+    assert row == "Bug (1) -[Blocks]-> Bug (2) -[… 2 hops not shown …]-> Change Request (4)"
+
+
+def test_path_columns_grow_linearly_on_long_chains():
+    # Full paths on an n-item chain hold n²/2 hops; the reviewer measured 69 MB at 2,000.
+    analyzer = cr_chain(2_000)
+    tracemalloc.start()
+    has_dep = analyzer.find_has_cr_dep()
+    impact = analyzer.analyze_cr_impact_unpacked()
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 20_000_000
+    for column in (has_dep["CR_Path_Debug"], impact["Path_Debug"]):
+        assert column.str.len().max() < 400
+        assert column.str.len().sum() < 2_000 * 400
+
+
 def test_betweenness_is_exact_within_budget_and_sampled_above_it():
     # 1->2->3->4: the inner nodes carry every path through them.
     links = pd.DataFrame(
@@ -444,9 +653,13 @@ def custom_field_nodes():
 def test_default_sheets_carry_no_organization_specific_field():
     analyzer = analyze.GraphAnalyzer(nodes(), edges())
     base = list(analyze.BASE_META_COLUMNS)
-    assert list(analyzer.find_scc().columns)[-6:] == base
+
+    def without_debug(df):
+        return [c for c in df.columns if c not in analyze.DEBUG_COLUMNS]
+
+    assert without_debug(analyzer.find_scc())[-6:] == base
     assert list(analyzer.compute_metrics().columns)[-6:] == base
-    assert list(analyzer.find_cycles().columns)[-7:-1] == base
+    assert without_debug(analyzer.find_cycles())[-7:-1] == base
 
 
 def test_configured_fields_appear_under_their_labels_on_every_sheet():

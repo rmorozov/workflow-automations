@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import logging
 import time
+from collections import deque
 from collections.abc import Callable
 from importlib import metadata
+from itertools import pairwise
 from pathlib import Path
 
 import networkx as nx
@@ -37,6 +39,10 @@ DEFAULT_MAX_INDIRECT_EDGES = 1_000_000
 DEFAULT_MAX_CYCLES = 1_000
 DEFAULT_MAX_CYCLE_ROWS = 100_000
 DEFAULT_CENTRALITY_SOURCES = 500
+# Path debug columns show at most this many hops next to the row's item; a longer
+# path names its far end and how many hops it leaves out, so each cell stays short
+# however long the graph's chains are.
+DEFAULT_MAX_PATH_HOPS = 10
 CENTRALITY_SEED = 0
 CYCLE_PROGRESS_EVERY = 250
 
@@ -59,7 +65,15 @@ META_PRESETS: dict[str, dict[str, str]] = {
 }
 MISSING_META_POLICIES = ("omit", "blank", "error")
 # Labels that would collide with columns the analyzer writes itself.
-RESERVED_META_LABELS = frozenset({*BASE_META_COLUMNS, "WI_ID", "In_Scope", "Graph_Neighbors_Debug"})
+DEBUG_COLUMNS = (
+    "Graph_Neighbors_Debug",
+    "Cycle_Edges_Debug",
+    "Chain_Edges_Debug",
+    "SCC_Edges_Debug",
+    "CR_Path_Debug",
+    "Path_Debug",
+)
+RESERVED_META_LABELS = frozenset({*BASE_META_COLUMNS, "WI_ID", "In_Scope", *DEBUG_COLUMNS})
 
 
 def parse_meta_fields(specs: list[str], presets: list[str]) -> dict[str, str]:
@@ -164,6 +178,73 @@ def _edge_label(edge_data: dict) -> str:
     return f"{label} via {'>'.join(map(str, via))} ({', '.join(_edge_path(edge_data))})"
 
 
+def _wi_tag(g: nx.DiGraph, node) -> str:
+    return f"{g.nodes[node].get('WorkItemType', 'Unknown')} ({node})"
+
+
+def _links_diagnostic(g: nx.DiGraph, node, preds, succs) -> str:
+    """`<- [link] from Type (ID)` for each predecessor, then `-> [link] to Type (ID)`."""
+    parts = [f"<- [{_edge_label(g.edges[p, node])}] from {_wi_tag(g, p)}" for p in preds]
+    parts += [f"-> [{_edge_label(g.edges[node, s])}] to {_wi_tag(g, s)}" for s in succs]
+    return " | ".join(parts)
+
+
+def _bfs_tree(g: nx.DiGraph, sources, reverse: bool = False) -> tuple[dict, dict, dict]:
+    """
+    Breadth-first tree from `sources` (following links backwards when `reverse`):
+    each reached node's parent, root source and hop distance.  Sources and
+    neighbors are visited by ID, so among equally short paths the tree keeps the
+    one first in ID order whatever the graph's insertion order.  The tree is
+    linear in the nodes reached; paths are only rendered from it, row by row.
+    """
+    neighbors = g.predecessors if reverse else g.successors
+    parent: dict = {}
+    root: dict = {}
+    dist: dict = {}
+    queue: deque = deque()
+    for source in sorted(sources):
+        if source not in dist:
+            parent[source], root[source], dist[source] = None, source, 0
+            queue.append(source)
+    while queue:
+        node = queue.popleft()
+        for nxt in sorted(neighbors(node)):
+            if nxt not in dist:
+                parent[nxt], root[nxt], dist[nxt] = node, root[node], dist[node] + 1
+                queue.append(nxt)
+    return parent, root, dist
+
+
+def _tree_path_diagnostic(
+    g: nx.DiGraph, tree: tuple[dict, dict, dict], node, max_hops: int, reverse: bool = False
+) -> str:
+    """
+    `Type (ID) -[link]-> Type (ID) ...` in link direction, from the tree's root to
+    `node` (from `node` to the root when `reverse`).  Only the max_hops hops next
+    to `node` are shown; the rest become one `-[… N hops not shown …]->` step.
+    """
+    parent, root, dist = tree
+    shown = [node]
+    for _ in range(min(dist[node], max_hops)):
+        shown.append(parent[shown[-1]])
+    hidden = dist[node] - (len(shown) - 1)
+    seq = shown if reverse else shown[::-1]
+    text = _wi_tag(g, seq[0])
+    for u, v in pairwise(seq):
+        text += f" -[{_edge_label(g.edges[u, v])}]-> {_wi_tag(g, v)}"
+    if not hidden:
+        return text
+    gap = f"-[… {hidden} hop{'s' if hidden != 1 else ''} not shown …]->"
+    far = _wi_tag(g, root[node])
+    return f"{text} {gap} {far}" if reverse else f"{far} {gap} {text}"
+
+
+def _after_url(meta: list[str], *debug: str) -> list[str]:
+    """Metadata columns with debug columns right after WI_URL, as on the node sheets."""
+    at = meta.index("WI_URL") + 1
+    return [*meta[:at], *debug, *meta[at:]]
+
+
 class GraphAnalyzer:
     """
     Keeps every normalized relation in a MultiDiGraph and runs each analysis step
@@ -195,6 +276,7 @@ class GraphAnalyzer:
         max_cycles: int = DEFAULT_MAX_CYCLES,
         max_cycle_rows: int = DEFAULT_MAX_CYCLE_ROWS,
         centrality_sources: int = DEFAULT_CENTRALITY_SOURCES,
+        max_path_hops: int = DEFAULT_MAX_PATH_HOPS,
         meta_fields: dict[str, str] | None = None,
         missing_meta: str = "omit",
     ) -> None:
@@ -209,6 +291,7 @@ class GraphAnalyzer:
         self.max_cycles = max_cycles
         self.max_cycle_rows = max_cycle_rows
         self.centrality_sources = centrality_sources
+        self.max_path_hops = max_path_hops
         self._configure_meta(dict(meta_fields or {}), missing_meta)
         self.relations: nx.MultiDiGraph = nx.MultiDiGraph()
         self._graphs: dict[str, nx.DiGraph] = {}
@@ -410,21 +493,9 @@ class GraphAnalyzer:
         """Helper to generate a human-readable string of direct connections for debugging."""
         if node_id not in self.G:
             return ""
-
-        diagnostics = []
-        # Incoming edges (What points to this node)
-        for pred in sorted(self.G.predecessors(node_id)):
-            edge_data = self.G.edges[pred, node_id]
-            pred_type = self.G.nodes[pred].get("WorkItemType", "Unknown")
-            diagnostics.append(f"<- [{_edge_label(edge_data)}] from {pred_type} ({pred})")
-
-        # Outgoing edges (What this node points to)
-        for succ in sorted(self.G.successors(node_id)):
-            edge_data = self.G.edges[node_id, succ]
-            succ_type = self.G.nodes[succ].get("WorkItemType", "Unknown")
-            diagnostics.append(f"-> [{_edge_label(edge_data)}] to {succ_type} ({succ})")
-
-        return " | ".join(diagnostics) if diagnostics else "Isolated Node"
+        preds = sorted(self.G.predecessors(node_id))
+        succs = sorted(self.G.successors(node_id))
+        return _links_diagnostic(self.G, node_id, preds, succs) or "Isolated Node"
 
     def _nodes_subset(self, node_ids: list) -> pd.DataFrame:
         """Full node rows for a subset, in WI_ID order, enriched with debugging metrics."""
@@ -434,12 +505,12 @@ class GraphAnalyzer:
         for label in self.meta_fields:
             if label not in df.columns:
                 df[label] = ""
-        if df.empty:
-            return df
 
-        # Inject the debugging metrics requested
-        df["WI_URL"] = df["WI_ID"].apply(self._wi_url)
-        df["Graph_Neighbors_Debug"] = df["WI_ID"].apply(self._get_neighborhood_diagnostic)
+        # An empty subset keeps the same columns.  Inject the debugging metrics requested
+        df["WI_URL"] = df["WI_ID"].map(self._wi_url).astype(object)
+        df["Graph_Neighbors_Debug"] = (
+            df["WI_ID"].map(self._get_neighborhood_diagnostic).astype(object)
+        )
 
         # Shift structural validation metrics right next to the Title column for readability
         cols = list(df.columns)
@@ -467,7 +538,8 @@ class GraphAnalyzer:
 
         Each cycle starts at its smallest member and keeps its direction; cycles are
         listed shortest first, then by their member sequence, and `Cycle_Index`
-        numbers them in that order.
+        numbers them in that order.  `Cycle_Edges_Debug` names the link from the
+        previous member and the link to the next, as the step's graph has them.
         """
         name, g = self._step_graph("cycles", subgraph)
         cycles: list[list] = []
@@ -485,9 +557,12 @@ class GraphAnalyzer:
         cycles.sort(key=lambda c: (len(c), c))
         rows = []
         for index, cycle in enumerate(cycles):
-            for node in cycle:
+            for pos, node in enumerate(cycle):
                 row = {"Cycle_Index": index, "Node_ID": node}
                 row.update(self._meta(node))
+                row["Cycle_Edges_Debug"] = _links_diagnostic(
+                    g, node, [cycle[pos - 1]], [cycle[(pos + 1) % len(cycle)]]
+                )
                 row["Cycles_Complete"] = complete
                 rows.append(row)
         count = len(cycles)
@@ -507,10 +582,10 @@ class GraphAnalyzer:
         columns = [
             "Cycle_Index",
             "Node_ID",
-            *self._meta_columns(),
+            *_after_url(self._meta_columns(), "Cycle_Edges_Debug"),
             "Cycles_Complete",
         ]
-        df = pd.DataFrame(rows, columns=columns) if rows else pd.DataFrame(columns=columns)
+        df = pd.DataFrame(rows, columns=columns)
         df.attrs["cycles_complete"] = complete
         return df
 
@@ -532,7 +607,17 @@ class GraphAnalyzer:
         reachable = self._cr_downstream_set(g)
         has_dep = [n for n in g.nodes if n in reachable]
         log.info("WIs with CR dependency in the %s subgraph: %d", name, len(has_dep))
-        return self._nodes_subset(has_dep)
+        df = self._nodes_subset(has_dep)
+        # One shortest path from the nearest Change Request; a CR is its own.
+        tree = _bfs_tree(g, self._cr_nodes(g))
+        df["CR_Path_Debug"] = (
+            df["WI_ID"]
+            .map(lambda n: _tree_path_diagnostic(g, tree, n, self.max_path_hops))
+            .astype(object)
+        )
+        cols = list(df.columns)
+        cols.insert(cols.index("Graph_Neighbors_Debug") + 1, cols.pop(cols.index("CR_Path_Debug")))
+        return df[cols]
 
     def find_longest_chain(self, subgraph: str | None = None) -> pd.DataFrame:
         name, g = self._step_graph("longest_chain", subgraph)
@@ -541,7 +626,7 @@ class GraphAnalyzer:
             "Chain_Rank",
             "SCC_Index",
             "WI_ID",
-            *self._meta_columns(),
+            *_after_url(self._meta_columns(), "Chain_Edges_Debug"),
         ]
         cond = nx.condensation(g)
         if len(cond) == 0:
@@ -554,9 +639,12 @@ class GraphAnalyzer:
         first = {i: min(cond.nodes[i]["members"]) for i in cond}
         order = list(nx.lexicographical_topological_sort(cond, key=first.__getitem__))
         path_scc_indices = nx.dag_longest_path(cond, topo_order=order)
+        members = [cond.nodes[i]["members"] for i in path_scc_indices]
         rows = []
         for rank, scc_idx in enumerate(path_scc_indices):
-            for wi_id in sorted(cond.nodes[scc_idx]["members"]):
+            before = members[rank - 1] if rank else set()
+            after = members[rank + 1] if rank + 1 < len(members) else set()
+            for wi_id in sorted(members[rank]):
                 row = {
                     "Chain_Length": length,
                     "Chain_Rank": rank,
@@ -564,9 +652,16 @@ class GraphAnalyzer:
                     "WI_ID": wi_id,
                 }
                 row.update(self._meta(wi_id))
+                # Only the links that join this step of the chain to its neighbours.
+                row["Chain_Edges_Debug"] = _links_diagnostic(
+                    g,
+                    wi_id,
+                    sorted(n for n in g.predecessors(wi_id) if n in before),
+                    sorted(n for n in g.successors(wi_id) if n in after),
+                )
                 rows.append(row)
         log.info("Longest chain in the %s subgraph (condensed DAG hops): %d", name, length)
-        df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=columns)
+        df = pd.DataFrame(rows, columns=columns)
         df.attrs["longest_path_length"] = length
         return df
 
@@ -579,21 +674,26 @@ class GraphAnalyzer:
         )
         rows = []
         for i, scc in enumerate(sccs):
+            inside = set(scc)
             for node in scc:
                 row = {"SCC_Index": i, "WI_ID": node, "SCC_Size": len(scc)}
                 row.update(self._meta(node))
+                # Links to and from other members (or a self-link) of this component.
+                row["SCC_Edges_Debug"] = _links_diagnostic(
+                    g,
+                    node,
+                    sorted(n for n in g.predecessors(node) if n in inside),
+                    sorted(n for n in g.successors(node) if n in inside),
+                )
                 rows.append(row)
         log.info("SCCs found in the %s subgraph: %d", name, len(sccs))
-        if not rows:
-            return pd.DataFrame(
-                columns=[
-                    "SCC_Index",
-                    "WI_ID",
-                    "SCC_Size",
-                    *self._meta_columns(),
-                ]
-            )
-        return pd.DataFrame(rows)
+        columns = [
+            "SCC_Index",
+            "WI_ID",
+            "SCC_Size",
+            *_after_url(self._meta_columns(), "SCC_Edges_Debug"),
+        ]
+        return pd.DataFrame(rows, columns=columns)
 
     def compute_metrics(self, subgraph: str | None = None) -> pd.DataFrame:
         name, g = self._step_graph("metrics", subgraph)
@@ -726,20 +826,24 @@ class GraphAnalyzer:
         for cr_id in self._cr_nodes(g):
             cr_meta = self._meta(cr_id, prefix="CR_")
             cr_title = g.nodes[cr_id].get("Title", "")
-            for desc_id in sorted(nx.descendants(g, cr_id)):
+            tree = _bfs_tree(g, [cr_id])
+            for desc_id in sorted(n for n in tree[2] if n != cr_id):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
                 row.update(
                     {
                         "Impacted_WI_ID": desc_id,
                         "Impacted_Title": g.nodes[desc_id].get("Title", ""),
+                        "Path_Debug": _tree_path_diagnostic(g, tree, desc_id, self.max_path_hops),
                     }
                 )
                 row.update(self._meta(desc_id, prefix="Impacted_"))
                 rows.append(row)
         log.info("Generated unpacked impact view (%d rows).", len(rows))
         if not rows:
-            return pd.DataFrame(columns=["CR_ID", "CR_Title", "Impacted_WI_ID", "Impacted_Title"])
+            return pd.DataFrame(
+                columns=["CR_ID", "CR_Title", "Impacted_WI_ID", "Impacted_Title", "Path_Debug"]
+            )
         return pd.DataFrame(rows)
 
     def analyze_cr_prereqs_unpacked(self, subgraph: str | None = None) -> pd.DataFrame:
@@ -749,17 +853,27 @@ class GraphAnalyzer:
         for cr_id in self._cr_nodes(g):
             cr_meta = self._meta(cr_id, prefix="CR_")
             cr_title = g.nodes[cr_id].get("Title", "")
-            for asc_id in sorted(nx.ancestors(g, cr_id)):
+            # Walked backwards from the CR; paths read in link direction (prerequisite first).
+            tree = _bfs_tree(g, [cr_id], reverse=True)
+            for asc_id in sorted(n for n in tree[2] if n != cr_id):
                 row = {"CR_ID": cr_id, "CR_Title": cr_title}
                 row.update(cr_meta)
                 row.update(
-                    {"Prereq_WI_ID": asc_id, "Prereq_Title": g.nodes[asc_id].get("Title", "")}
+                    {
+                        "Prereq_WI_ID": asc_id,
+                        "Prereq_Title": g.nodes[asc_id].get("Title", ""),
+                        "Path_Debug": _tree_path_diagnostic(
+                            g, tree, asc_id, self.max_path_hops, reverse=True
+                        ),
+                    }
                 )
                 row.update(self._meta(asc_id, prefix="Prereq_"))
                 rows.append(row)
         log.info("Generated unpacked prerequisites view (%d rows).", len(rows))
         if not rows:
-            return pd.DataFrame(columns=["CR_ID", "CR_Title", "Prereq_WI_ID", "Prereq_Title"])
+            return pd.DataFrame(
+                columns=["CR_ID", "CR_Title", "Prereq_WI_ID", "Prereq_Title", "Path_Debug"]
+            )
         return pd.DataFrame(rows)
 
 
@@ -831,6 +945,7 @@ def run_analyze(args: argparse.Namespace) -> None:
             max_cycles=args.max_cycles,
             max_cycle_rows=args.max_cycle_rows,
             centrality_sources=args.centrality_sources,
+            max_path_hops=args.max_path_hops,
             meta_fields=parse_meta_fields(args.meta_field, args.meta_preset),
             missing_meta=args.missing_meta,
         )
@@ -1050,6 +1165,7 @@ def config_frame(
         ("max_cycles", analyzer.max_cycles),
         ("max_cycle_rows", analyzer.max_cycle_rows),
         ("centrality_sources", analyzer.centrality_sources),
+        ("max_path_hops", analyzer.max_path_hops),
         ("long_text", long_text.mode),
         ("max_cell_chars", long_text.cell_limit),
     ]
