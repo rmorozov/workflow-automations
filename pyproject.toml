@@ -29,7 +29,7 @@ ado-graph = ["workflow-automations[ado-graph-analyze]", "azure-devops>=7.1.0b4,<
              "tqdm>=4,<5"]
 # Every tool's runtime dependencies, including Kerberos (see ado-kerberos above).
 all = ["workflow-automations[translation,outline,team-roster,team-capacity,ado-triage,ado-kerberos,ado-graph]"]
-dev = ["pytest>=8,<10", "ruff==0.16.9", "build>=1.2,<2"]
+dev = ["pytest>=8,<10", "ruff==0.17.3", "build>=1.2,<2"]
 
 [project.scripts]
 xlsx-translate = "workflow_automations.xlsx_translation:main"
