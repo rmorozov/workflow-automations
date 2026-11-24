@@ -119,6 +119,9 @@ Details:
   with its change until that change gets a new patchset or a Ready-for-review, or
   the reviewer changes it; uploads to other changes don't clear it.
 - A new patchset drops the change's +2 unless the event says `keeps_votes`.
+- A vote that names a `patchset` other than the current one, a withdrawal included,
+  is ignored: a late +2 for patchset 1 doesn't approve patchset 2. A vote without a
+  `patchset` applies to the current one.
 - An `infra` or `canceled` build asks nothing of the author; a `fail` does.
 - Without `labels`, the CI verdict comes from build results as above. With `labels`, it
   comes from the labels instead (next section), and builds only explain `ci_queue` and
@@ -158,9 +161,10 @@ history.
   failures hide inside the ordinary labels. What answers it decides: a new patchset of
   that change is author time (rule 3); a later build of the topic, or a new vote on the
   same label and patchset, without new code is `ci_retry`; nothing yet is `ci_failed`.
-  A tie goes to the patchset, since an upload triggers its own build. So the label of a
-  span can depend on a later event, and an open cycle's last −1 stays `ci_failed` until
-  a later snapshot.
+  A tie goes to the patchset, since an upload triggers its own build. Only events up to
+  the work item's cycle end count, so activity on a shared topic after one item closed
+  can't rewrite that item. So the label of a span can depend on a later event within
+  the cycle, and an open cycle's last −1 stays `ci_failed` until a later snapshot.
 - Each work item uses the label rules of its own input file, so files with and without
   rules can be combined.
 
