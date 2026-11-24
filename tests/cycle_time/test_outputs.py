@@ -591,3 +591,85 @@ def test_critical_topic_ranks_by_completion_transition():
 def test_spans_csv_keeps_sub_second_times():
     out = report.spans_csv(compute(model.read(scenario("20_"))))
     assert "2026-11-02T10:04:00.100000Z" in out and ",0.8," in out
+
+
+def _label_item(b_events, branch="main", labels=None):
+    rules = labels or {
+        "mandatory": ["Build"],
+        "extra": [{"repo": "r", "branch": "release/*", "labels": ["Lint"]}],
+    }
+    return model.load(
+        minimal(
+            labels=rules,
+            topics=[
+                {
+                    "id": "t",
+                    "wi_ids": [1],
+                    "changes": [{"number": 1, "repo": "r", "branch": branch, "events": b_events}],
+                }
+            ],
+        )
+    )
+
+
+def _vote(at, value, label="Code-Review", **kw):
+    return {"kind": "vote", "at": f"2026-11-02T{at}Z", "value": value, "label": label, **kw}
+
+
+def _ps(at, n, **kw):
+    return {"kind": "patchset", "at": f"2026-11-02T{at}Z", "patchset": n, **kw}
+
+
+def test_label_rules_add_extras_by_repo_and_branch_pattern():
+    rules = model.LabelRules(("Build",), (("r", "release/*", ("Lint",)),))
+    assert rules.required("r", "release/2") == {"Build", "Lint"}
+    assert rules.required("r", "main") == {"Build"}
+    assert rules.required("other", "release/2") == {"Build"}
+
+
+def test_labels_of_an_earlier_patchset_do_not_count():
+    events = [
+        _ps("09:10", 1),
+        _vote("09:20", 2),
+        _vote("09:30", 1, "Build", patchset=1),
+        _ps("09:40", 2, keeps_votes=True),
+        _vote("09:50", 1, "Build", patchset=1),  # late vote for the old patchset
+    ]
+    (result,) = compute(_label_item(events))
+    assert [s.kind for s in result.spans][-2:] == ["submit_wait", "unattributed"]
+    assert result.spans[-1].start == model.parse_time("2026-11-02T09:40Z", "")
+
+
+def test_extra_label_counts_only_on_matching_branches():
+    events = [
+        _ps("09:10", 1),
+        _vote("09:20", 2),
+        _vote("09:30", 1, "Build", patchset=1),
+        _vote("09:30", -1, "Lint", patchset=1),
+    ]
+    (main,) = compute(_label_item(events, "main"))
+    assert main.spans[-1].kind == "submit_wait"  # Lint is not required on main
+    (release,) = compute(_label_item(events, "release/1"))
+    assert release.spans[-1].kind == "ci_failed"  # required there, and nothing answered it
+
+
+def test_files_with_and_without_label_rules_combine():
+    merged = model.merge([model.read(scenario("01_")), model.read(scenario("25_"))])
+    kinds = {r.item.id: {s.kind for s in r.spans} for r in compute(merged)}
+    assert "ci_retry" in kinds[131] and "submit_wait" in kinds[101]
+
+
+@pytest.mark.parametrize(
+    "labels, message",
+    [
+        ({"mandatory": "Build"}, "labels.mandatory"),
+        ({"mandatory": ["Build"], "extra": [{"repo": "r", "labels": ["L"]}]}, "branch"),
+        (
+            {"mandatory": ["Build"], "extra": [{"repo": "r", "branch": "*", "labels": [1]}]},
+            "labels",
+        ),
+    ],
+)
+def test_bad_label_rules_are_refused(labels, message):
+    with pytest.raises(model.InputError, match=message):
+        model.load(minimal(labels=labels))
