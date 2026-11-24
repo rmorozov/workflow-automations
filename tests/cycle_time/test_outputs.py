@@ -494,6 +494,47 @@ def test_stale_builds_compute_in_linear_time():
     assert {s.kind for s in result.spans} == {"coding", "review_wait", "unattributed"}
 
 
+def test_repeated_partial_builds_compute_in_linear_time():
+    # A1+B1 pending, every build tests A1 only: none is current, and repeats of the same
+    # tested map keep one entry instead of a growing history scanned at every cut.
+    base = model.parse_time("2026-11-02T10:00:00Z", "")
+    builds = []
+    for k in range(3000):
+        q = base + k * 600 * model.SECOND
+        builds.append(
+            {
+                "id": k,
+                "queued_at": model.format_time(q),
+                "started_at": model.format_time(q + 60 * model.SECOND),
+                "finished_at": model.format_time(q + 300 * model.SECOND),
+                "result": "pass",
+                "tested": {"1": 1},
+            }
+        )
+    events = [
+        {"kind": "patchset", "patchset": 1, "at": "2026-11-02T09:10Z"},
+        {"kind": "ready", "at": "2026-11-02T09:30Z"},
+        {"kind": "vote", "value": 2, "at": "2026-11-02T09:40Z"},
+    ]
+    data = model.load(
+        minimal(
+            topics=[
+                {
+                    "id": "t",
+                    "wi_ids": [1],
+                    "changes": [{"number": 1, "events": events}, {"number": 2, "events": events}],
+                    "builds": builds,
+                }
+            ],
+            as_of="2026-11-30T00:00:00Z",
+        )
+    )
+    started = time.perf_counter()
+    (result,) = compute(data)
+    assert time.perf_counter() - started < 3.0
+    assert {s.kind for s in result.spans} == {"coding", "review_wait", "unattributed"}
+
+
 def test_critical_topic_ranks_by_completion_transition():
     # A became complete at 00:20 (abandon of its open sibling), B at 00:12: A is critical,
     # although A's last merge (00:07) is earlier than B's.

@@ -129,13 +129,31 @@ class _TopicState:
     # each step rather than cached, so any later change of revision or composition
     # (an upload, a new change, an abandon, a merge of another patchset) retires it.
     finished: list[Build] = field(default_factory=list)
-    # Last time the topic's composition changed: an upload, a new change or an abandon.
+    # Last time the topic's composition changed: an upload, a change first seen through
+    # any event, or an abandon.
     composition_at: int | None = None
     _pending: dict[int, _ChangeState] | None = None
 
     def touched(self) -> None:
         self._pending = None
         self.finished = [b for b in self.finished if not self.retired(b)]
+
+    def record(self, build: Build) -> None:
+        """Keep a finished build, dropping the ones it makes redundant.
+
+        ``tests_current`` depends only on the tested map and the queue time, and a later
+        queue time only widens it. So an earlier build with the same map (or both
+        without one) and an earlier or equal queue time is current only when this one
+        is too, and this one comes first in ``verdict``. Repeated builds of the same
+        revision set therefore keep one entry, while a verdict for another map stays
+        available in case an abandon makes it current again.
+        """
+        self.finished = [
+            b
+            for b in self.finished
+            if not (b.tested == build.tested and b.queued_at <= build.queued_at)
+        ]
+        self.finished.append(build)
 
     def live(self) -> list[_ChangeState]:
         return [c for c in self.changes.values() if c.exists and not c.abandoned]
@@ -161,7 +179,7 @@ class _TopicState:
                 if change.abandoned or change.patchset != patchset:
                     return True
         return any(
-            c.merged and n not in build.tested and c.merged_at > build.queued_at
+            c.merged and n not in build.tested and c.merged_at >= build.queued_at
             for n, c in self.changes.items()
             if c.exists and not c.abandoned
         )
@@ -171,10 +189,11 @@ class _TopicState:
 
         With ``tested`` (change → patchset): every tested change must still be live at
         the tested patchset, every pending change must be tested, and a change merged
-        after the build was queued must have been tested too. A change that was already
-        in the base when the build was queued may be left out. Without ``tested``, the
-        build must have been queued strictly after the last upload, new change or
-        abandon; a tie at the same instant is ambiguous and the build counts as stale.
+        at or after the build's queue time must have been tested too. Only a change merged
+        strictly before the queue time was certainly in the base and may be left out.
+        Without ``tested``, the build must have been queued strictly after the last
+        upload, new change or abandon; a tie at the same instant is ambiguous and the
+        build counts as stale.
         """
         pending = self.pending()
         if not pending:
@@ -190,8 +209,8 @@ class _TopicState:
         for number, change in self.changes.items():
             if not change.exists or change.abandoned or number in build.tested:
                 continue
-            if not change.merged or change.merged_at > build.queued_at:
-                return False
+            if not change.merged or change.merged_at >= build.queued_at:
+                return False  # a merge at the queue instant may not be in the base
         return True
 
     def verdict(self) -> str | None:
@@ -210,11 +229,16 @@ class _BuildEvent:
 def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[int]) -> None:
     if isinstance(event, _BuildEvent):
         if event.build.result in ("pass", "fail") and not state.retired(event.build):
-            state.finished.append(event.build)
+            state.record(event.build)
         return  # infra and canceled ask nothing of the author
     change = state.changes.setdefault(event.change, _ChangeState())
-    if event.kind == "patchset":
+    if not change.exists:
+        # Any event proves the change exists, as in _critical_topic: a vote, a WIP
+        # flag or a merge can be the first one observed. A new member changes the
+        # topic's composition.
         change.exists = True
+        state.composition_at = event.at
+    if event.kind == "patchset":
         change.wip = event.wip
         change.patchset = event.patchset
         change.votes = {k: v for k, v in change.votes.items() if v > 0} if event.keeps_votes else {}
@@ -222,9 +246,6 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
         if not event.wip:
             inferred.add(event.at)  # coding ended by a non-WIP upload, not Ready-for-review
     elif event.kind == "ready":
-        if not change.exists:
-            state.composition_at = event.at  # a change first seen through Ready-for-review
-        change.exists = True
         change.wip = False
         # The author has answered: objections are back with the reviewers.
         change.votes = {k: v for k, v in change.votes.items() if v >= 0}
@@ -238,9 +259,6 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
             change.votes.pop(None, None)
             change.votes[event.reviewer] = event.value
     elif event.kind == "merged":
-        if not change.exists:
-            state.composition_at = event.at  # a change first seen through its merge
-        change.exists = True  # a merge proves the change existed
         change.merged = True
         change.merged_at = event.at
     elif event.kind == "abandoned":
