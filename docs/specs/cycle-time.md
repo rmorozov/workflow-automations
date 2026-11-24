@@ -99,9 +99,12 @@ Details:
 
 - A build counts only for the revision and composition it tested, checked again at
   every step rather than remembered. With `tested`, every tested change must still be
-  live (pending or merged) at the tested patchset, and every pending change must be
-  tested; so an upload, an abandon, a change first seen through any event, or a merge
-  of a later patchset all retire it. Without `tested`, the build must have been queued
+  live (pending or merged) at the tested patchset, every pending change must be
+  tested, and a change merged after the build was queued must have been tested too;
+  so an upload, an abandon, a change first seen through any event (a merge included,
+  since it proves the change existed), a merge of a later patchset, or a merge of an
+  untested sibling all retire it. A build that is already retired when it finishes is
+  dropped, so stale builds cost nothing later. Without `tested`, the build must have been queued
   strictly after the last upload, new change or abandon: the same instant is
   ambiguous and counts as stale. A stale build's running time and verdict are both
   ignored; the verdict is the latest finished pass or fail that is still current.
@@ -119,7 +122,8 @@ Details:
   boundary.
 - Several topics per work item: the **critical topic** sets the spans. A topic is
   complete when every live change is merged by the cycle end; the complete topic
-  that finished last wins, else the topic with the latest activity. Only events up to
+  that became complete last wins (by the event that completed it, which may be an
+  abandon), else the topic with the latest activity. Only events up to
   the cycle end count, so a build that finishes after the close, or one merged member
   of an unfinished topic, can't displace a completed topic. The others are shown on
   their own lanes. The work item is flagged `multi_topic`; a topic linked to several work
@@ -199,6 +203,8 @@ rules:
 | `18_change_first_seen_by_ready` | a change first seen through Ready retires the earlier pass |
 | `19_stale_build_after_merge` | a later patchset merged while CI ran keeps that build stale |
 | `20_subsecond_build_order` | 0.8 s before an upload, or the same instant, is not current |
+| `21_sibling_merged_after_build` | a sibling merged after the queue time must have been tested |
+| `22_merge_is_the_only_event` | a change seen only through its merge still counts as new |
 
 `cycle-time trace tests/cycle_time/scenarios/*.json -o demo.json` builds a trace of
 all of them.

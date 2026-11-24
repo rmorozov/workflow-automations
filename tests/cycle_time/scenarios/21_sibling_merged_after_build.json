@@ -1,0 +1,316 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "124: A passed a build of A alone; B then appears and merges. That pass did not test B, which is now in the base, so it can't put A back in submit_wait. 125: B merged before the A-only build was queued, so leaving B out is fine (review on PR #56).",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 124,
+      "type": "Task",
+      "team": "Platform",
+      "title": "Sibling merged later",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Closed",
+          "at": "2026-11-02T14:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": 125,
+      "type": "Task",
+      "team": "Platform",
+      "title": "Sibling already in base",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Closed",
+          "at": "2026-11-02T12:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t124",
+      "name": "wi-124",
+      "wi_ids": [
+        124
+      ],
+      "changes": [
+        {
+          "number": 1241,
+          "repo": "platform/a",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:01:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T13:30:00Z"
+            }
+          ]
+        },
+        {
+          "number": 1242,
+          "repo": "platform/b",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T10:08:00Z",
+              "patchset": 1
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:10:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T10:12:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 12401,
+          "queued_at": "2026-11-02T10:01:00Z",
+          "started_at": "2026-11-02T10:01:00Z",
+          "finished_at": "2026-11-02T10:06:00Z",
+          "result": "pass",
+          "tested": {
+            "1241": 1
+          }
+        },
+        {
+          "id": 12402,
+          "queued_at": "2026-11-02T12:00:00Z",
+          "started_at": "2026-11-02T12:00:00Z",
+          "finished_at": "2026-11-02T13:00:00Z",
+          "result": "pass",
+          "tested": {
+            "1241": 1,
+            "1242": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "t125",
+      "name": "wi-125",
+      "wi_ids": [
+        125
+      ],
+      "changes": [
+        {
+          "number": 1251,
+          "repo": "platform/a",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:01:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T11:30:00Z"
+            }
+          ]
+        },
+        {
+          "number": 1252,
+          "repo": "platform/b",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:20:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:05:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T10:12:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 12501,
+          "queued_at": "2026-11-02T10:30:00Z",
+          "started_at": "2026-11-02T10:30:00Z",
+          "finished_at": "2026-11-02T11:00:00Z",
+          "result": "pass",
+          "tested": {
+            "1251": 1
+          }
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "124": {
+      "queue": null,
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:01:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:01:00Z",
+          "2026-11-02T10:06:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T10:06:00Z",
+          "2026-11-02T10:08:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T10:08:00Z",
+          "2026-11-02T10:10:00Z"
+        ],
+        [
+          "unattributed",
+          1,
+          "2026-11-02T10:10:00Z",
+          "2026-11-02T12:00:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T12:00:00Z",
+          "2026-11-02T13:00:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T13:00:00Z",
+          "2026-11-02T13:30:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T13:30:00Z",
+          "2026-11-02T14:00:00Z"
+        ]
+      ]
+    },
+    "125": {
+      "queue": null,
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:05:00Z"
+        ],
+        [
+          "unattributed",
+          1,
+          "2026-11-02T10:05:00Z",
+          "2026-11-02T10:30:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:30:00Z",
+          "2026-11-02T11:00:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T11:00:00Z",
+          "2026-11-02T11:30:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T11:30:00Z",
+          "2026-11-02T12:00:00Z"
+        ]
+      ]
+    }
+  }
+}
