@@ -1,0 +1,164 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "Two topics for one work item; the one merged last is the critical path, the other is context on its own lanes.",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 106,
+      "type": "Task",
+      "team": "Platform",
+      "title": "Two topics",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T12:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Closed",
+          "at": "2026-11-03T12:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t106a",
+      "name": "wi-106-prep",
+      "wi_ids": [
+        106
+      ],
+      "changes": [
+        {
+          "number": 1061,
+          "repo": "platform/a",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:30:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:30:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T11:45:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 10601,
+          "queued_at": "2026-11-02T10:30:00Z",
+          "started_at": "2026-11-02T10:30:00Z",
+          "finished_at": "2026-11-02T11:30:00Z",
+          "result": "pass"
+        }
+      ]
+    },
+    {
+      "id": "t106b",
+      "name": "wi-106-main",
+      "wi_ids": [
+        106
+      ],
+      "changes": [
+        {
+          "number": 1062,
+          "repo": "platform/b",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T10:00:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T12:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-03T09:00:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-03T11:00:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 10602,
+          "queued_at": "2026-11-03T09:00:00Z",
+          "started_at": "2026-11-03T09:00:00Z",
+          "finished_at": "2026-11-03T10:00:00Z",
+          "result": "pass"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "106": {
+      "queue": null,
+      "flags": [
+        "multi_topic"
+      ],
+      "critical_topic": "t106b",
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T12:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T12:00:00Z",
+          "2026-11-03T09:00:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-03T09:00:00Z",
+          "2026-11-03T10:00:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-03T10:00:00Z",
+          "2026-11-03T11:00:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-03T11:00:00Z",
+          "2026-11-03T12:00:00Z"
+        ]
+      ]
+    }
+  }
+}

@@ -15,6 +15,7 @@ upload workbook data. `ado-triage` reads (never writes) an on-premise Azure DevO
 | `team-capacity-calibrate` | Measure the bug-fix share of logged work from a saved ADO snapshot (exploratory) | [Team capacity](docs/specs/team-capacity.md#calibration) |
 | `ado-graph` | Export ADO work-item graphs and analyze saved Parquet data | [ADO graph/export](docs/specs/ado-graph.md) |
 | `ado-triage` | Rank ADO change-request scope into a triage agenda and team summary | [ADO scope triage](docs/specs/ado-triage.md) |
+| `cycle-time` | Split work-item cycle time into review, CI and rework spans and export Perfetto traces (synthetic input for now) | [Cycle time](docs/specs/cycle-time.md) |
 
 ## Install
 
@@ -262,6 +263,18 @@ Later, `ado-triage export --from-snapshot work/triage-2026-10-01.json --as-of 20
 --output work/rerun.xlsx` rebuilds the same report offline, with no Kerberos ticket or
 ADO access. The query ID and URL come from the snapshot, so omit `--query-id`.
 Capacity, previous-report and team options work as usual.
+
+## Trace cycle time
+
+`cycle-time` needs no extras. It reads normalized input files; today these are the
+synthetic scenarios, and ingest from ADO, Gerrit and CI comes later.
+
+```bash
+cycle-time trace tests/cycle_time/scenarios/*.json -o work/demo.json   # open in ui.perfetto.dev
+cycle-time trace tests/cycle_time/scenarios/*.json -o work/aligned.json --mode aligned
+cycle-time spans tests/cycle_time/scenarios/03_review_rejected_forgot_wip.json
+cycle-time report tests/cycle_time/scenarios/*.json
+```
 
 ## Development
 

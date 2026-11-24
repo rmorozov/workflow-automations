@@ -1,0 +1,138 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "WIP patchsets, Ready-for-review, +2, CI after +2, merge and Closed at the same second.",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 101,
+      "type": "Task",
+      "team": "Platform",
+      "title": "Happy path",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Proposed",
+          "at": "2026-11-02T08:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Resolved",
+          "at": "2026-11-02T15:00:00Z"
+        },
+        {
+          "rev": 4,
+          "state": "Closed",
+          "at": "2026-11-03T12:30:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t101",
+      "name": "wi-101",
+      "wi_ids": [
+        101
+      ],
+      "changes": [
+        {
+          "number": 1011,
+          "repo": "platform/core",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T10:00:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T13:00:00Z",
+              "patchset": 2,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T15:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-03T10:00:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-03T12:30:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 10101,
+          "queued_at": "2026-11-03T10:20:00Z",
+          "started_at": "2026-11-03T10:30:00Z",
+          "finished_at": "2026-11-03T12:00:00Z",
+          "result": "pass"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "101": {
+      "queue": [
+        "2026-11-02T08:00:00Z",
+        "2026-11-02T09:00:00Z"
+      ],
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T15:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T15:00:00Z",
+          "2026-11-03T10:00:00Z"
+        ],
+        [
+          "unattributed",
+          1,
+          "2026-11-03T10:00:00Z",
+          "2026-11-03T10:20:00Z"
+        ],
+        [
+          "ci_queue",
+          1,
+          "2026-11-03T10:20:00Z",
+          "2026-11-03T10:30:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-03T10:30:00Z",
+          "2026-11-03T12:00:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-03T12:00:00Z",
+          "2026-11-03T12:30:00Z"
+        ]
+      ]
+    }
+  }
+}

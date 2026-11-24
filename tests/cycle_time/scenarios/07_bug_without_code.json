@@ -1,0 +1,65 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "A bug closed without any Gerrit topic: only ADO states split the cycle.",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 107,
+      "type": "Bug",
+      "team": "Tools",
+      "title": "Duplicate",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Proposed",
+          "at": "2026-11-02T08:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 4,
+          "state": "Closed",
+          "at": "2026-11-02T11:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [],
+  "expected": {
+    "107": {
+      "queue": [
+        "2026-11-02T08:00:00Z",
+        "2026-11-02T09:00:00Z"
+      ],
+      "flags": [
+        "ado_only"
+      ],
+      "metrics": {
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "gate",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T11:00:00Z"
+        ]
+      ]
+    }
+  }
+}
