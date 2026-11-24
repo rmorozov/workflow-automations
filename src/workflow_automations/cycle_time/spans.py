@@ -9,6 +9,7 @@ docs/specs/cycle-time.md#span-rules.
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 
 from workflow_automations.cycle_time.model import (
@@ -312,6 +313,8 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
         # A CI label counts only for the patchset it was cast on.
         if event.patchset is None or event.patchset == change.patchset:
             change.ci[event.label] = (event.value, event.at)
+    elif event.kind == "vote" and event.patchset not in (None, change.patchset):
+        pass  # a vote (or withdrawal) for another patchset doesn't touch the current one
     elif event.kind == "vote":
         if event.reviewer is None:
             change.votes = {None: event.value}  # change-level effective label
@@ -469,45 +472,46 @@ def _ado_only(item: WorkItem, result: Result) -> list[Span]:
     return _merge_intervals(labels)
 
 
-def _resolutions(topic: Topic) -> dict[tuple[int, str, int], str]:
-    """Classify each negative CI vote by what answered it first.
+def _resolutions(topic: Topic, end: int) -> dict[tuple[int, str, int], str]:
+    """Classify each negative CI vote by what answered it first, up to ``end``.
 
     A new patchset of that change means ``rework``. A build of the topic queued later,
     or a new vote on the same label and patchset, without new code means ``retry``.
-    A tie goes to ``rework``, because an upload triggers its own build. Nothing yet
-    means ``unresolved``.
+    A tie goes to ``rework``, because an upload triggers its own build. Nothing by
+    ``end`` (the work item's cycle end) means ``unresolved``, so later activity on a
+    shared topic can't rewrite a closed item. One reverse pass per change keeps the
+    next upload and the next vote per label and patchset; queues are bisected.
     """
-    queues = sorted(b.queued_at for b in topic.builds)
+    queues = sorted(b.queued_at for b in topic.builds if b.queued_at <= end)
     out: dict[tuple[int, str, int], str] = {}
     for change in topic.changes:
-        events = change.events
+        events = [e for e in change.events if e.at <= end]
+        on: list[int | None] = []  # patchset each event applies to
         patchset = None
-        for i, event in enumerate(events):
+        for event in events:
             if event.kind == "patchset":
                 patchset = event.patchset
-            if event.kind != "vote" or event.label == REVIEW_LABEL or event.value >= 0:
-                continue
-            on = event.patchset if event.patchset is not None else patchset
-            upload = next(
-                (e.at for e in events[i + 1 :] if e.kind == "patchset" and e.at >= event.at),
-                None,
-            )
-            rerun = [q for q in queues if q > event.at]
-            rerun += [
-                e.at
-                for e in events[i + 1 :]
-                if e.kind == "vote"
-                and e.label == event.label
-                and (e.patchset if e.patchset is not None else on) == on
-            ]
-            first_rerun = min(rerun, default=None)
-            if upload is not None and (first_rerun is None or upload <= first_rerun):
-                outcome = "rework"
-            elif first_rerun is not None:
-                outcome = "retry"
-            else:
-                outcome = "unresolved"
-            out[(change.number, event.label, event.at)] = outcome
+            on.append(event.patchset if event.patchset is not None else patchset)
+        next_upload: int | None = None
+        next_vote: dict[tuple[str, int | None], int] = {}
+        for event, ps in zip(reversed(events), reversed(on), strict=True):
+            if event.kind == "vote" and event.label != REVIEW_LABEL and event.value < 0:
+                k = bisect.bisect_right(queues, event.at)
+                reruns = [t for t in (next_vote.get((event.label, ps)),) if t is not None]
+                if k < len(queues):
+                    reruns.append(queues[k])
+                first_rerun = min(reruns, default=None)
+                if next_upload is not None and (first_rerun is None or next_upload <= first_rerun):
+                    outcome = "rework"
+                elif first_rerun is not None:
+                    outcome = "retry"
+                else:
+                    outcome = "unresolved"
+                out[(change.number, event.label, event.at)] = outcome
+            if event.kind == "patchset":
+                next_upload = event.at
+            elif event.kind == "vote" and event.label != REVIEW_LABEL:
+                next_vote[(event.label, ps)] = event.at
     return out
 
 
@@ -536,7 +540,7 @@ def _with_topic(
     state, inferred = _TopicState(), set()
     if rules is not None:
         state.required = {c.number: rules.required(c.repo, c.branch) for c in topic.changes}
-        state.resolution = _resolutions(topic)
+        state.resolution = _resolutions(topic, end)
     i, rnd, had_gate = 0, 1, False
     prev_kind: str | None = None
     labels = []

@@ -673,3 +673,59 @@ def test_files_with_and_without_label_rules_combine():
 def test_bad_label_rules_are_refused(labels, message):
     with pytest.raises(model.InputError, match=message):
         model.load(minimal(labels=labels))
+
+
+def test_code_review_votes_count_only_on_their_patchset():
+    late_approval = [
+        _ps("09:10", 1),
+        _ps("09:20", 2),
+        _vote("09:30", 1, "Build", patchset=2),
+        _vote("09:40", 2, patchset=1),  # late +2 for the old patchset
+    ]
+    (result,) = compute(_label_item(late_approval))
+    assert result.spans[-1].kind == "review_wait"
+    late_withdrawal = [
+        _ps("09:10", 1),
+        _vote("09:15", 2, reviewer="r1"),
+        _ps("09:20", 2, keeps_votes=True),
+        _vote("09:30", 1, "Build", patchset=2),
+        _vote("09:40", 0, reviewer="r1", patchset=1),  # withdrawal on the old patchset
+    ]
+    (result,) = compute(_label_item(late_withdrawal))
+    assert result.spans[-1].kind == "submit_wait"
+
+
+def test_events_after_the_close_leave_a_closed_item_alone():
+    def data(extra):
+        events = [
+            _ps("09:10", 1),
+            _vote("09:20", 2),
+            _vote("09:30", -1, "Build", patchset=1),
+            *extra,
+        ]
+        loaded = _label_item(events)
+        item = loaded.work_items[1]
+        closed = model.StateEntry(2, "Closed", model.parse_time("2026-11-02T10:00Z", ""))
+        loaded.work_items[1] = model.WorkItem(
+            item.id, item.type, item.team, item.title, (*item.states, closed)
+        )
+        return loaded
+
+    (before,) = compute(data([]))
+    (after,) = compute(data([_ps("10:30", 2)]))
+    assert before.spans == after.spans
+    assert before.spans[-1].kind == "ci_failed"
+
+
+def test_many_negative_labels_resolve_in_linear_time():
+    base = model.parse_time("2026-11-02T09:20:00Z", "")
+    events = [_ps("09:10", 1), _vote("09:15", 2)]
+    for k in range(20000):
+        at = model.format_time(base + k * model.SECOND)
+        events.append({"kind": "vote", "at": at, "value": -1, "label": "Build", "patchset": 1})
+    data = _label_item(events)
+    started = time.perf_counter()
+    (result,) = compute(data)
+    assert time.perf_counter() - started < 3.0
+    # each -1 is answered by the next vote on the same patchset; the last by nothing
+    assert [s.kind for s in result.spans][-2:] == ["ci_retry", "ci_failed"]
