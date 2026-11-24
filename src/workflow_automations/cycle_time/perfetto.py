@@ -23,7 +23,8 @@ def _gerrit_name(kind: str, event: Any) -> str:
     if kind == "patchset":
         return f"{event.change} ps{event.patchset or '?'}" + (" (WIP)" if event.wip else "")
     if kind == "vote":
-        return f"{event.change} CR{event.value:+d}"
+        label = "CR" if event.label == "Code-Review" else event.label
+        return f"{event.change} {label}{event.value:+d}"
     return f"{event.change} {kind}"
 
 

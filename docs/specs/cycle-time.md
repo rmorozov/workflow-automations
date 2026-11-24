@@ -50,12 +50,14 @@ One UTF-8 JSON object, the shape the normalized layer will have once ingest exis
 | `as_of` | End of the data, for open cycles |
 | `work_items` | `id`, `type`, `team`, `title`, `states`: `{rev, state, at}` |
 | `topics` | `id` (stable synthetic ID), `name` (the topic string), `wi_ids`, `changes`, `builds` |
-| `changes[]` | `number`, `repo`, `events`: `{at, kind, ...}` |
+| `labels` | Optional CI label rules (see [CI labels](#ci-labels)): `mandatory` label names, `extra`: `{repo, branch, labels}` with an fnmatch branch pattern |
+| `changes[]` | `number`, `repo`, `branch`, `events`: `{at, kind, ...}` |
 | `builds[]` | `id`, `queued_at`, `started_at`, `finished_at`, `result` (`pass`, `fail`, `infra`, `canceled`), optional `tested`: change number → patchset number |
 
 Change event kinds: `patchset` (`patchset`, `wip`, optional `keeps_votes`), `ready`
-(Ready-for-review), `wip` (set back to WIP), `vote` (Code-Review `value` −2..2,
-optional `reviewer`), `merged`, `abandoned`. A vote with a `reviewer` (a pseudonymous
+(Ready-for-review), `wip` (set back to WIP), `vote` (`value` −2..2, optional
+`reviewer`, optional `label`, default `Code-Review`, and optional `patchset` it was cast
+on), `merged`, `abandoned`. A vote with a `reviewer` (a pseudonymous
 key, never a name) sets that reviewer's vote, and `0` withdraws it. A vote without one
 is the change's effective label and replaces all votes. Any record of the wrong JSON
 type is refused with its path (for example `work_items[0].states[0]`).
@@ -87,12 +89,15 @@ Labels, first match wins:
    Closed) makes it author time; an item that stays Active through the merge is
    still `close_lag`.
 3. No change yet, a pending change in WIP, a pending change with an outstanding
-   negative vote, or a failed build of the current revision: `coding` in round 1,
-   `rework` afterwards.
+   negative vote, or a CI failure that new code answered (with build verdicts, every
+   failed build of the current revision): `coding` in round 1, `rework` afterwards.
 4. A build of the current revision is running: `ci_run`. One is queued: `ci_queue`.
-5. A change lacks +2: `review_wait`.
-6. Approved, and the last build since the latest patchset passed: `submit_wait`.
-7. Otherwise (approved, no build queued yet): `unattributed`. This is where the
+5. With CI labels, a failure a re-run answered without new code: `ci_retry`; one
+   nothing has answered yet: `ci_failed`.
+6. A change lacks +2: `review_wait`.
+7. Approved, and CI passed (the last build since the latest patchset, or every
+   required label): `submit_wait`.
+8. Otherwise (approved, no build queued yet): `unattributed`. This is where the
    time between +2 and the CI trigger shows up.
 
 Details:
@@ -115,7 +120,10 @@ Details:
   the reviewer changes it; uploads to other changes don't clear it.
 - A new patchset drops the change's +2 unless the event says `keeps_votes`.
 - An `infra` or `canceled` build asks nothing of the author; a `fail` does.
-- A running build outranks a missing +2 (rule 4 before 5): when CI starts at
+- Without `labels`, the CI verdict comes from build results as above. With `labels`, it
+  comes from the labels instead (next section), and builds only explain `ci_queue` and
+  `ci_run` time.
+- A running build outranks a missing +2 (rule 4 before 6): when CI starts at
   Ready-for-review, the overlap counts as CI time.
 - A round ends when an author span follows a gate span (`review_wait`, `ci_*`,
   `submit_wait`, `unattributed`), `close_lag` or `closed_interim`.
@@ -132,6 +140,29 @@ Details:
   items flags them `shared_topic`.
 - A work item with no topic is split by ADO alone: Active is `coding` / `rework`,
   Resolved is `gate`, and it is flagged `ado_only`.
+
+### CI labels
+
+CI validation is a set of Gerrit labels on each change (build, test, linters and so
+on), set by many pipelines, each setting one or more labels. Every repo needs the
+`mandatory` labels, and an `extra` rule adds labels for a repo and branch pattern. Ingest
+will read the set Gerrit reports for each change; the rules file is for fixtures and
+history.
+
+- A CI label vote counts only on the patchset it was cast on (`patchset`, or the
+  current one when absent), and every new patchset resets the change's CI labels.
+- A change passes when every required label is positive on its current patchset; the
+  topic passes when every pending change passes its own set; any negative required
+  label is a failure. Labels a change doesn't require are ignored.
+- A −1 can't tell a broken change from an infrastructure failure, because infra
+  failures hide inside the ordinary labels. What answers it decides: a new patchset of
+  that change is author time (rule 3); a later build of the topic, or a new vote on the
+  same label and patchset, without new code is `ci_retry`; nothing yet is `ci_failed`.
+  A tie goes to the patchset, since an upload triggers its own build. So the label of a
+  span can depend on a later event, and an open cycle's last −1 stays `ci_failed` until
+  a later snapshot.
+- Each work item uses the label rules of its own input file, so files with and without
+  rules can be combined.
 
 Work-item flags: `open`, `reopened`, `not_started`, `ado_only`, `multi_topic`,
 `shared_topic`, `activity_before_active`. Metrics: `rounds`, `ado_mismatch_s`
@@ -175,7 +206,7 @@ The target pipeline has three stored layers, each derived from the one before:
    facts. Perfetto track layout lives only in the exporter, because calendar and
    aligned modes need different layouts.
 
-The follow-ups are backlog tasks CT-001..CT-009.
+The follow-ups are backlog tasks CT-001..CT-010.
 
 ## Scenarios
 
@@ -209,6 +240,7 @@ rules:
 | `22_merge_is_the_only_event` | a change seen only through its merge still counts as new |
 | `23_change_first_seen_by_vote_or_wip` | a first event of any kind makes a change a member |
 | `24_sibling_merge_tied_with_queue` | a sibling merged at the queue instant is not in the base |
+| `25_ci_labels` | label verdict: per-branch extra label, −1 answered by an upload, a re-run, or nothing |
 
 `cycle-time trace tests/cycle_time/scenarios/*.json -o demo.json` builds a trace of
 all of them.
@@ -222,7 +254,12 @@ Open, to settle with real data:
 
 - The CI trigger point (+2, Ready-for-review or every patchset). The rules handle
   all three, and the answer shows how much time lands in `unattributed`.
-- Whether a running build should outrank `review_wait` (rule 4 before 5).
+- Whether a running build should outrank `review_wait` (rule 4 before 6).
+- Whether any CI label survives a new patchset (Gerrit copy conditions). Today every
+  new patchset resets them.
+- A re-run is any later build of the topic, so a build triggered by another change's
+  upload also counts as one. Linking builds to the labels they set (CT-010) would
+  narrow this.
 - Whether Closed is set automatically on merge (expected `close_lag` ≈ 0).
 - Wall time only for now; business time will reuse the team-capacity calendar
   (CT-006).

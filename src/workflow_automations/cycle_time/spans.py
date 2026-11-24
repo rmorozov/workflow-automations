@@ -12,16 +12,27 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from workflow_automations.cycle_time.model import (
+    REVIEW_LABEL,
     SECOND,
     Build,
     ChangeEvent,
     Input,
+    LabelRules,
     Topic,
     WorkItem,
 )
 
 AUTHOR_KINDS = ("coding", "rework")
-GATE_KINDS = ("review_wait", "ci_queue", "ci_run", "submit_wait", "unattributed", "gate")
+GATE_KINDS = (
+    "review_wait",
+    "ci_queue",
+    "ci_run",
+    "ci_retry",
+    "ci_failed",
+    "submit_wait",
+    "unattributed",
+    "gate",
+)
 SPAN_KINDS = AUTHOR_KINDS + GATE_KINDS + ("close_lag", "closed_interim", "parked")
 # An author span after one of these starts a new round.
 ROUND_BREAKERS = GATE_KINDS + ("close_lag", "closed_interim")
@@ -112,6 +123,8 @@ class _ChangeState:
     merged_at: int | None = None
     abandoned: bool = False
     patchset: int | None = None
+    # CI label votes on the current patchset: label -> (value, time of the vote).
+    ci: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @property
     def approved(self) -> bool:
@@ -133,10 +146,48 @@ class _TopicState:
     # any event, or an abandon.
     composition_at: int | None = None
     _pending: dict[int, _ChangeState] | None = None
+    # Label mode: required CI labels per change, and how each negative CI vote was
+    # resolved, keyed by (change, label, vote time): "rework", "retry" or "unresolved".
+    required: dict[int, frozenset[str]] | None = None
+    resolution: dict[tuple[int, str, int], str] = field(default_factory=dict)
 
     def touched(self) -> None:
         self._pending = None
         self.finished = [b for b in self.finished if not self.retired(b)]
+
+    def _failures(self) -> list[tuple[int, str, int]]:
+        """Negative required CI votes on pending changes: (change, label, vote time)."""
+        assert self.required is not None
+        return [
+            (n, label, c.ci[label][1])
+            for n, c in self.pending().items()
+            for label in sorted(self.required.get(n, ()))
+            if label in c.ci and c.ci[label][0] < 0
+        ]
+
+    def _label_verdict(self) -> str | None:
+        assert self.required is not None
+        if self._failures():
+            return "fail"
+        for n, c in self.pending().items():
+            if any(c.ci.get(label, (0, 0))[0] <= 0 for label in self.required.get(n, ())):
+                return None
+        return "pass"
+
+    def failure(self) -> str:
+        """How the current CI failure was resolved: by new code, a re-run, or not yet.
+
+        A −1 cannot tell a broken change from a network failure, so the next step
+        decides: a new patchset means the author had work to do, a re-run on the same
+        patchset means nobody changed the code. Build verdicts always count as rework.
+        """
+        if self.required is None:
+            return "rework"
+        found = {self.resolution.get(f, "unresolved") for f in self._failures()}
+        for outcome in ("rework", "unresolved"):
+            if outcome in found:
+                return outcome
+        return "retry"
 
     def record(self, build: Build) -> None:
         """Keep a finished build, dropping the ones it makes redundant.
@@ -214,6 +265,8 @@ class _TopicState:
         return True
 
     def verdict(self) -> str | None:
+        if self.required is not None:
+            return self._label_verdict()
         for build in reversed(self.finished):
             if self.tests_current(build):
                 return build.result
@@ -228,6 +281,8 @@ class _BuildEvent:
 
 def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[int]) -> None:
     if isinstance(event, _BuildEvent):
+        if state.required is not None:
+            return  # labels carry the verdict; builds only explain queue and run time
         if event.build.result in ("pass", "fail") and not state.retired(event.build):
             state.record(event.build)
         return  # infra and canceled ask nothing of the author
@@ -241,6 +296,7 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
     if event.kind == "patchset":
         change.wip = event.wip
         change.patchset = event.patchset
+        change.ci = {}  # CI labels are reset on every new patchset
         change.votes = {k: v for k, v in change.votes.items() if v > 0} if event.keeps_votes else {}
         state.composition_at = event.at
         if not event.wip:
@@ -252,6 +308,10 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
         inferred.discard(event.at)
     elif event.kind == "wip":
         change.wip = True
+    elif event.kind == "vote" and event.label != REVIEW_LABEL:
+        # A CI label counts only for the patchset it was cast on.
+        if event.patchset is None or event.patchset == change.patchset:
+            change.ci[event.label] = (event.value, event.at)
     elif event.kind == "vote":
         if event.reviewer is None:
             change.votes = {None: event.value}  # change-level effective label
@@ -285,14 +345,21 @@ def _label(state: _TopicState, active: list[Build], t: int, had_gate: bool, reop
         # Everything is merged. Only a reopen (Active again after a Closed) is new
         # author work; otherwise the item waits for its bookkeeping close.
         return author if reopened else "close_lag"
+    if not pending:
+        return author
     verdict = state.verdict()
-    if not pending or verdict == "fail":
+    failure = state.failure() if verdict == "fail" else None
+    if failure == "rework":
         return author
     if any(c.wip or c.rejected for c in pending):
         return author
     phase = _build_phase(state, active, t)
     if phase:
         return phase
+    if failure == "retry":
+        return "ci_retry"  # a re-run follows without new code: likely infrastructure
+    if failure == "unresolved":
+        return "ci_failed"  # nothing has answered the failure yet
     if not all(c.approved for c in pending):
         return "review_wait"
     if verdict == "pass":
@@ -402,7 +469,51 @@ def _ado_only(item: WorkItem, result: Result) -> list[Span]:
     return _merge_intervals(labels)
 
 
-def _with_topic(item: WorkItem, topic: Topic, result: Result) -> list[Span]:
+def _resolutions(topic: Topic) -> dict[tuple[int, str, int], str]:
+    """Classify each negative CI vote by what answered it first.
+
+    A new patchset of that change means ``rework``. A build of the topic queued later,
+    or a new vote on the same label and patchset, without new code means ``retry``.
+    A tie goes to ``rework``, because an upload triggers its own build. Nothing yet
+    means ``unresolved``.
+    """
+    queues = sorted(b.queued_at for b in topic.builds)
+    out: dict[tuple[int, str, int], str] = {}
+    for change in topic.changes:
+        events = change.events
+        patchset = None
+        for i, event in enumerate(events):
+            if event.kind == "patchset":
+                patchset = event.patchset
+            if event.kind != "vote" or event.label == REVIEW_LABEL or event.value >= 0:
+                continue
+            on = event.patchset if event.patchset is not None else patchset
+            upload = next(
+                (e.at for e in events[i + 1 :] if e.kind == "patchset" and e.at >= event.at),
+                None,
+            )
+            rerun = [q for q in queues if q > event.at]
+            rerun += [
+                e.at
+                for e in events[i + 1 :]
+                if e.kind == "vote"
+                and e.label == event.label
+                and (e.patchset if e.patchset is not None else on) == on
+            ]
+            first_rerun = min(rerun, default=None)
+            if upload is not None and (first_rerun is None or upload <= first_rerun):
+                outcome = "rework"
+            elif first_rerun is not None:
+                outcome = "retry"
+            else:
+                outcome = "unresolved"
+            out[(change.number, event.label, event.at)] = outcome
+    return out
+
+
+def _with_topic(
+    item: WorkItem, topic: Topic, result: Result, rules: LabelRules | None = None
+) -> list[Span]:
     start, end = result.cycle_start, result.cycle_end
     events: list[ChangeEvent | _BuildEvent] = [e for c in topic.changes for e in c.events]
     events += [_BuildEvent(b.finished_at, b) for b in topic.builds if b.finished_at is not None]
@@ -423,6 +534,9 @@ def _with_topic(item: WorkItem, topic: Topic, result: Result) -> list[Span]:
     q = 0
 
     state, inferred = _TopicState(), set()
+    if rules is not None:
+        state.required = {c.number: rules.required(c.repo, c.branch) for c in topic.changes}
+        state.resolution = _resolutions(topic)
     i, rnd, had_gate = 0, 1, False
     prev_kind: str | None = None
     labels = []
@@ -490,7 +604,7 @@ def compute_item(item: WorkItem, data: Input) -> Result:
             result.flags.add("multi_topic")
         if any(len(set(t.wi_ids)) > 1 for t in result.topics):
             result.flags.add("shared_topic")
-        result.spans = _with_topic(item, topic, result)
+        result.spans = _with_topic(item, topic, result, data.label_rules(item.id))
     result.metrics["rounds"] = max((s.round for s in result.spans), default=0)
     validate(result)
     return result

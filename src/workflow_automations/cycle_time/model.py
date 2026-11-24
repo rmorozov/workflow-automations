@@ -9,6 +9,7 @@ integer UTC microseconds. No person names or accounts appear anywhere in the mod
 from __future__ import annotations
 
 import datetime as dt
+import fnmatch
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +21,7 @@ VERSION = 1
 STATES = ("Proposed", "Active", "Resolved", "Closed")
 CHANGE_EVENTS = ("patchset", "ready", "wip", "vote", "merged", "abandoned")
 BUILD_RESULTS = ("pass", "fail", "infra", "canceled")
+REVIEW_LABEL = "Code-Review"
 
 
 class InputError(ValueError):
@@ -52,6 +54,26 @@ class ChangeEvent:
     value: int | None = None
     keeps_votes: bool = False
     reviewer: str | None = None
+    label: str = REVIEW_LABEL
+
+
+@dataclass(frozen=True)
+class LabelRules:
+    """CI labels a change needs before it can be submitted.
+
+    Every repo needs ``mandatory``; each ``extra`` entry adds labels for a repo and a
+    branch pattern (fnmatch, so ``release/*`` matches every release branch).
+    """
+
+    mandatory: tuple[str, ...]
+    extra: tuple[tuple[str, str, tuple[str, ...]], ...] = ()
+
+    def required(self, repo: str, branch: str) -> frozenset[str]:
+        labels = set(self.mandatory)
+        for rule_repo, pattern, extra in self.extra:
+            if rule_repo == repo and fnmatch.fnmatchcase(branch, pattern):
+                labels.update(extra)
+        return frozenset(labels)
 
 
 @dataclass(frozen=True)
@@ -59,6 +81,7 @@ class Change:
     number: int
     repo: str
     events: tuple[ChangeEvent, ...]
+    branch: str = ""
 
 
 @dataclass(frozen=True)
@@ -90,9 +113,16 @@ class Input:
     warnings: list[str] = field(default_factory=list)
     # Observation cutoff per work item: the as_of of the file it came from.
     cutoffs: dict[int, int] = field(default_factory=dict)
+    # Required CI labels of this file; None means the CI verdict comes from builds.
+    labels: LabelRules | None = None
+    # Label rules per work item: those of the file it came from.
+    item_labels: dict[int, LabelRules | None] = field(default_factory=dict)
 
     def cutoff(self, wi_id: int) -> int:
         return self.cutoffs.get(wi_id, self.as_of)
+
+    def label_rules(self, wi_id: int) -> LabelRules | None:
+        return self.item_labels.get(wi_id, self.labels)
 
     def topics_of(self, wi_id: int) -> list[Topic]:
         return [t for t in self.topics.values() if wi_id in t.wi_ids]
@@ -188,6 +218,9 @@ def _change(raw: Any, where: str) -> Change:
         reviewer = event.get("reviewer")
         if reviewer is not None and not isinstance(reviewer, str):
             raise InputError(f"{at}.reviewer: must be a string (a pseudonymous key)")
+        label = event.get("label", REVIEW_LABEL)
+        if not isinstance(label, str) or not label:
+            raise InputError(f"{at}.label: must be a non-empty string")
         kind = event.get("kind")
         if kind not in CHANGE_EVENTS:
             raise InputError(f"{at}.kind: must be one of {', '.join(CHANGE_EVENTS)}")
@@ -195,7 +228,7 @@ def _change(raw: Any, where: str) -> Change:
         if kind == "vote":
             value = _int(value, f"{at}.value")
             if not -2 <= value <= 2:
-                raise InputError(f"{at}.value: Code-Review votes are -2..2")
+                raise InputError(f"{at}.value: votes are -2..2")
         events.append(
             ChangeEvent(
                 at=parse_time(event.get("at"), f"{at}.at"),
@@ -208,10 +241,35 @@ def _change(raw: Any, where: str) -> Change:
                 value=value,
                 keeps_votes=bool(event.get("keeps_votes", False)),
                 reviewer=reviewer,
+                label=label,
             )
         )
     events.sort(key=lambda e: e.at)  # stable: same-second events keep file order
-    return Change(number, str(raw.get("repo", "")), tuple(events))
+    return Change(number, str(raw.get("repo", "")), tuple(events), str(raw.get("branch", "")))
+
+
+def _strings(raw: Any, where: str) -> tuple[str, ...]:
+    if not isinstance(raw, list) or not all(isinstance(x, str) and x for x in raw):
+        raise InputError(f"{where}: must be a list of label names")
+    return tuple(raw)
+
+
+def _labels(raw: Any) -> LabelRules | None:
+    if raw is None:
+        return None
+    _obj(raw, "labels")
+    mandatory = _strings(raw.get("mandatory"), "labels.mandatory")
+    extra = []
+    for i, rule in enumerate(_items(raw, "extra", "labels")):
+        where = f"labels.extra[{i}]"
+        _obj(rule, where)
+        for key in ("repo", "branch"):
+            if not isinstance(rule.get(key), str):
+                raise InputError(f"{where}.{key}: must be a string")
+        extra.append(
+            (rule["repo"], rule["branch"], _strings(rule.get("labels"), where + ".labels"))
+        )
+    return LabelRules(mandatory, tuple(extra))
 
 
 def _tested(raw: Any, where: str) -> dict[int, int] | None:
@@ -286,14 +344,22 @@ def load(data: dict) -> Input:
             for j, b in enumerate(_items(raw, "builds", where))
         )
         topics[topic_id] = Topic(topic_id, str(raw.get("name", topic_id)), wi_ids, changes, builds)
-    return Input(as_of, work_items, topics, warnings, {wi_id: as_of for wi_id in work_items})
+    return Input(
+        as_of,
+        work_items,
+        topics,
+        warnings,
+        {wi_id: as_of for wi_id in work_items},
+        _labels(data.get("labels")),
+    )
 
 
 def merge(inputs: list[Input]) -> Input:
     """Combine several input files; IDs must not collide.
 
-    Each work item keeps the cutoff of its own file, so adding a later snapshot never
-    extends an open item's last span. ``as_of`` is the latest cutoff.
+    Each work item keeps the cutoff and the CI label rules of its own file, so adding a
+    later snapshot never extends an open item's last span, and files with and without
+    label rules can be combined. ``as_of`` is the latest cutoff.
     """
     merged = Input(max(i.as_of for i in inputs), {}, {})
     for part in inputs:
@@ -302,6 +368,7 @@ def merge(inputs: list[Input]) -> Input:
                 raise InputError(f"work item {wi_id} appears in more than one input")
             merged.work_items[wi_id] = item
             merged.cutoffs[wi_id] = part.cutoff(wi_id)
+            merged.item_labels[wi_id] = part.label_rules(wi_id)
         for topic_id, topic in part.topics.items():
             if topic_id in merged.topics:
                 raise InputError(f"topic {topic_id!r} appears in more than one input")

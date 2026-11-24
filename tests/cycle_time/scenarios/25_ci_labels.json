@@ -1,0 +1,509 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "CI verdict from labels: Build and Test everywhere, plus Lint on platform/b release branches. 130: a Lint -1 answered by a new patchset is rework, and the topic waits for B's labels on patchset 2. 131: a Build -1 answered by a re-run on the same patchset is ci_retry (likely infrastructure). 132: an unanswered -1 at the cutoff is ci_failed. Build results are ignored; labels decide.",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 130,
+      "type": "Task",
+      "team": "Platform",
+      "title": "Two repos, two label sets",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Closed",
+          "at": "2026-11-02T13:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": 131,
+      "type": "Task",
+      "team": "Platform",
+      "title": "Re-run after a Build -1",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Closed",
+          "at": "2026-11-02T12:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": 132,
+      "type": "Task",
+      "team": "Platform",
+      "title": "Unanswered -1",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t130",
+      "name": "wi-130",
+      "wi_ids": [
+        130
+      ],
+      "changes": [
+        {
+          "number": 1301,
+          "repo": "platform/a",
+          "branch": "main",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:10:00Z",
+              "value": 2
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:40:00Z",
+              "label": "Build",
+              "value": 1,
+              "patchset": 1
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:40:00Z",
+              "label": "Test",
+              "value": 1,
+              "patchset": 1
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T12:30:00Z"
+            }
+          ]
+        },
+        {
+          "number": 1302,
+          "repo": "platform/b",
+          "branch": "release/1",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:20:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:15:00Z",
+              "value": 2
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:20:00Z",
+              "label": "Lint",
+              "value": -1,
+              "patchset": 1
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:40:00Z",
+              "label": "Build",
+              "value": 1,
+              "patchset": 1
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:40:00Z",
+              "label": "Test",
+              "value": 1,
+              "patchset": 1
+            },
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T10:50:00Z",
+              "patchset": 2
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T11:00:00Z",
+              "value": 2
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T11:30:00Z",
+              "label": "Build",
+              "value": 1,
+              "patchset": 2
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T11:30:00Z",
+              "label": "Test",
+              "value": 1,
+              "patchset": 2
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T11:30:00Z",
+              "label": "Lint",
+              "value": 1,
+              "patchset": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T12:30:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 13001,
+          "queued_at": "2026-11-02T10:00:00Z",
+          "started_at": "2026-11-02T10:05:00Z",
+          "finished_at": "2026-11-02T10:40:00Z",
+          "result": "pass"
+        },
+        {
+          "id": 13002,
+          "queued_at": "2026-11-02T10:00:00Z",
+          "started_at": "2026-11-02T10:05:00Z",
+          "finished_at": "2026-11-02T10:20:00Z",
+          "result": "fail"
+        },
+        {
+          "id": 13003,
+          "queued_at": "2026-11-02T10:51:00Z",
+          "started_at": "2026-11-02T10:52:00Z",
+          "finished_at": "2026-11-02T11:30:00Z",
+          "result": "pass"
+        }
+      ]
+    },
+    {
+      "id": "t131",
+      "name": "wi-131",
+      "wi_ids": [
+        131
+      ],
+      "changes": [
+        {
+          "number": 1311,
+          "repo": "platform/a",
+          "branch": "main",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:05:00Z",
+              "value": 2
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:20:00Z",
+              "label": "Build",
+              "value": -1,
+              "patchset": 1
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:20:00Z",
+              "label": "Test",
+              "value": 1,
+              "patchset": 1
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T11:00:00Z",
+              "label": "Build",
+              "value": 1,
+              "patchset": 1
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T11:30:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 13101,
+          "queued_at": "2026-11-02T10:00:00Z",
+          "started_at": "2026-11-02T10:00:00Z",
+          "finished_at": "2026-11-02T10:20:00Z",
+          "result": "fail"
+        },
+        {
+          "id": 13102,
+          "queued_at": "2026-11-02T10:40:00Z",
+          "started_at": "2026-11-02T10:45:00Z",
+          "finished_at": "2026-11-02T11:00:00Z",
+          "result": "pass"
+        }
+      ]
+    },
+    {
+      "id": "t132",
+      "name": "wi-132",
+      "wi_ids": [
+        132
+      ],
+      "changes": [
+        {
+          "number": 1321,
+          "repo": "platform/a",
+          "branch": "main",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:05:00Z",
+              "value": 2
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:20:00Z",
+              "label": "Build",
+              "value": -1,
+              "patchset": 1
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 13201,
+          "queued_at": "2026-11-02T10:00:00Z",
+          "started_at": "2026-11-02T10:00:00Z",
+          "finished_at": "2026-11-02T10:20:00Z",
+          "result": "fail"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "130": {
+      "queue": null,
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 1800,
+        "rounds": 2
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "ci_queue",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:05:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:05:00Z",
+          "2026-11-02T10:20:00Z"
+        ],
+        [
+          "rework",
+          2,
+          "2026-11-02T10:20:00Z",
+          "2026-11-02T10:50:00Z",
+          [
+            "inferred_patchset"
+          ]
+        ],
+        [
+          "review_wait",
+          2,
+          "2026-11-02T10:50:00Z",
+          "2026-11-02T10:51:00Z"
+        ],
+        [
+          "ci_queue",
+          2,
+          "2026-11-02T10:51:00Z",
+          "2026-11-02T10:52:00Z"
+        ],
+        [
+          "ci_run",
+          2,
+          "2026-11-02T10:52:00Z",
+          "2026-11-02T11:30:00Z"
+        ],
+        [
+          "submit_wait",
+          2,
+          "2026-11-02T11:30:00Z",
+          "2026-11-02T12:30:00Z"
+        ],
+        [
+          "close_lag",
+          2,
+          "2026-11-02T12:30:00Z",
+          "2026-11-02T13:00:00Z"
+        ]
+      ]
+    },
+    "131": {
+      "queue": null,
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:20:00Z"
+        ],
+        [
+          "ci_retry",
+          1,
+          "2026-11-02T10:20:00Z",
+          "2026-11-02T10:40:00Z"
+        ],
+        [
+          "ci_queue",
+          1,
+          "2026-11-02T10:40:00Z",
+          "2026-11-02T10:45:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:45:00Z",
+          "2026-11-02T11:00:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T11:00:00Z",
+          "2026-11-02T11:30:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T11:30:00Z",
+          "2026-11-02T12:00:00Z"
+        ]
+      ]
+    },
+    "132": {
+      "queue": null,
+      "flags": [
+        "open"
+      ],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:20:00Z"
+        ],
+        [
+          "ci_failed",
+          1,
+          "2026-11-02T10:20:00Z",
+          "2026-11-06T00:00:00Z"
+        ]
+      ]
+    }
+  },
+  "labels": {
+    "mandatory": [
+      "Build",
+      "Test"
+    ],
+    "extra": [
+      {
+        "repo": "platform/b",
+        "branch": "release/*",
+        "labels": [
+          "Lint"
+        ]
+      }
+    ]
+  }
+}
