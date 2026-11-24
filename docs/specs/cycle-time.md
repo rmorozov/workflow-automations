@@ -60,7 +60,8 @@ key, never a name) sets that reviewer's vote, and `0` withdraws it. A vote witho
 is the change's effective label and replaces all votes. Any record of the wrong JSON
 type is refused with its path (for example `work_items[0].states[0]`).
 
-Times are ISO 8601 with an explicit zone; a time without a zone is refused. States are
+Times are ISO 8601 with an explicit zone; a time without a zone is refused. They are
+kept as integer microseconds, so sub-second order between sources survives. States are
 ordered by `rev`, never by timestamp, so two changes in one second stay in order.
 Other keys (`description`, `expected`) are ignored, so scenario files are valid input.
 Several files can be passed at once; work item and topic IDs must not repeat across
@@ -96,16 +97,18 @@ Labels, first match wins:
 
 Details:
 
-- A build counts only for the revision and composition it tested. With `tested`,
-  every pending change must be at the tested patchset and no tested change may have
-  been abandoned. Without it, the build must have been queued after the last upload,
-  new change or abandon. A pass or failure of an older revision is ignored, and so is
-  its running time. An abandon also drops a pass already recorded.
+- A build counts only for the revision and composition it tested, checked again at
+  every step rather than remembered. With `tested`, every tested change must still be
+  live (pending or merged) at the tested patchset, and every pending change must be
+  tested; so an upload, an abandon, a change first seen through any event, or a merge
+  of a later patchset all retire it. Without `tested`, the build must have been queued
+  strictly after the last upload, new change or abandon: the same instant is
+  ambiguous and counts as stale. A stale build's running time and verdict are both
+  ignored; the verdict is the latest finished pass or fail that is still current.
 - A change is approved while some vote is +2 and none is −2. A negative vote stays
   with its change until that change gets a new patchset or a Ready-for-review, or
   the reviewer changes it; uploads to other changes don't clear it.
-- A new patchset drops the change's +2 unless the event says `keeps_votes`, and
-  forgets the last build result.
+- A new patchset drops the change's +2 unless the event says `keeps_votes`.
 - An `infra` or `canceled` build asks nothing of the author; a `fail` does.
 - A running build outranks a missing +2 (rule 4 before 5): when CI starts at
   Ready-for-review, the overlap counts as CI time.
@@ -114,10 +117,12 @@ Details:
 - A gate that a non-WIP upload started, rather than Ready-for-review, flags the
   author span before it `inferred_patchset`: its end is the upload, not a declared
   boundary.
-- Several topics per work item: the **critical topic**, the one merged last (else
-  the one with the latest activity), sets the spans. Only events up to the cycle end
-  count, so a build that finishes after the close can't displace a merged topic. The others are shown on their
-  own lanes. The work item is flagged `multi_topic`; a topic linked to several work
+- Several topics per work item: the **critical topic** sets the spans. A topic is
+  complete when every live change is merged by the cycle end; the complete topic
+  that finished last wins, else the topic with the latest activity. Only events up to
+  the cycle end count, so a build that finishes after the close, or one merged member
+  of an unfinished topic, can't displace a completed topic. The others are shown on
+  their own lanes. The work item is flagged `multi_topic`; a topic linked to several work
   items flags them `shared_topic`.
 - A work item with no topic is split by ADO alone: Active is `coding` / `rework`,
   Resolved is `gate`, and it is flagged `ado_only`.
@@ -132,6 +137,7 @@ before the first Active entry).
 
 - `cycle-time spans INPUT... [-o FILE]`: CSV, one row per span plus the `queue` row
   (round 0): `wi_id, team, type, kind, round, start_utc, end_utc, duration_s, flags`.
+  Times carry a fraction only when they have one.
 - `cycle-time trace INPUT... -o FILE [--mode calendar|aligned]`: a Chrome JSON trace
   that [ui.perfetto.dev](https://ui.perfetto.dev) opens directly (the UI runs in the
   browser and does not upload the file). Each team is a process. Each work item has a
@@ -190,6 +196,9 @@ rules:
 | `15_overlapping_and_running_builds` | overlapping and unfinished builds in the trace |
 | `16_abandoned_tested_change` | abandoning a tested change before or after the pass |
 | `17_withdrawn_approval` | a withdrawn sole +2 reopens review; a second +2 holds |
+| `18_change_first_seen_by_ready` | a change first seen through Ready retires the earlier pass |
+| `19_stale_build_after_merge` | a later patchset merged while CI ran keeps that build stale |
+| `20_subsecond_build_order` | 0.8 s before an upload, or the same instant, is not current |
 
 `cycle-time trace tests/cycle_time/scenarios/*.json -o demo.json` builds a trace of
 all of them.

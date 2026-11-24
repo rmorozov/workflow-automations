@@ -11,7 +11,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from workflow_automations.cycle_time.model import Build, ChangeEvent, Input, Topic, WorkItem
+from workflow_automations.cycle_time.model import (
+    SECOND,
+    Build,
+    ChangeEvent,
+    Input,
+    Topic,
+    WorkItem,
+)
 
 AUTHOR_KINDS = ("coding", "rework")
 GATE_KINDS = ("review_wait", "ci_queue", "ci_run", "submit_wait", "unattributed", "gate")
@@ -117,13 +124,17 @@ class _ChangeState:
 @dataclass
 class _TopicState:
     changes: dict[int, _ChangeState] = field(default_factory=dict)
-    ci_result: str | None = None  # verdict of the last build of the current revision
+    # Finished pass/fail builds, oldest first. The verdict is re-derived from them at
+    # each step rather than cached, so any later change of revision or composition
+    # (an upload, a new change, an abandon, a merge of another patchset) retires it.
+    finished: list[Build] = field(default_factory=list)
     # Last time the topic's composition changed: an upload, a new change or an abandon.
     composition_at: int | None = None
     _pending: dict[int, _ChangeState] | None = None
 
     def touched(self) -> None:
         self._pending = None
+        self.finished = [b for b in self.finished if not self._retired(b)]
 
     def live(self) -> list[_ChangeState]:
         return [c for c in self.changes.values() if c.exists and not c.abandoned]
@@ -137,23 +148,45 @@ class _TopicState:
             }
         return self._pending
 
+    def _retired(self, build: Build) -> bool:
+        """Stale for good: a tested change moved on or was abandoned, or (without
+        ``tested``) the composition changed after the queue time."""
+        if build.tested is None:
+            return self.composition_at is not None and build.queued_at <= self.composition_at
+        for number, patchset in build.tested.items():
+            change = self.changes.get(number)
+            if change is not None and change.exists:
+                if change.abandoned or change.patchset != patchset:
+                    return True
+        return False
+
     def tests_current(self, build: Build) -> bool:
         """Whether the build tested the topic's current revision and composition.
 
-        With ``tested`` (change → patchset), every pending change must be at the tested
-        patchset and no tested change may have been abandoned since. Without it, the
-        build must have been queued after the last upload, new change or abandon.
+        With ``tested`` (change → patchset), every tested change must still be live
+        (pending or merged) at the tested patchset, and every pending change must be
+        tested. Without it, the build must have been queued strictly after the last
+        upload, new change or abandon; a tie at the same instant is ambiguous and the
+        build is treated as stale.
         """
         pending = self.pending()
         if not pending:
             return False
-        if build.tested is not None:
-            if any(n in self.changes and self.changes[n].abandoned for n in build.tested):
+        if build.tested is None:
+            return self.composition_at is None or build.queued_at > self.composition_at
+        for number, patchset in build.tested.items():
+            change = self.changes.get(number)
+            if change is None or not change.exists or change.abandoned:
                 return False
-            return all(
-                n in build.tested and c.patchset == build.tested[n] for n, c in pending.items()
-            )
-        return self.composition_at is None or build.queued_at >= self.composition_at
+            if change.patchset != patchset:
+                return False
+        return all(number in build.tested for number in pending)
+
+    def verdict(self) -> str | None:
+        for build in reversed(self.finished):
+            if self.tests_current(build):
+                return build.result
+        return None
 
 
 @dataclass(frozen=True)
@@ -164,21 +197,21 @@ class _BuildEvent:
 
 def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[int]) -> None:
     if isinstance(event, _BuildEvent):
-        if event.build.result in ("pass", "fail") and state.tests_current(event.build):
-            state.ci_result = event.build.result
-        return  # infra and canceled ask nothing of the author; stale verdicts are ignored
+        if event.build.result in ("pass", "fail"):
+            state.finished.append(event.build)
+        return  # infra and canceled ask nothing of the author
     change = state.changes.setdefault(event.change, _ChangeState())
-    state.touched()
     if event.kind == "patchset":
         change.exists = True
         change.wip = event.wip
         change.patchset = event.patchset
         change.votes = {k: v for k, v in change.votes.items() if v > 0} if event.keeps_votes else {}
-        state.ci_result = None
         state.composition_at = event.at
         if not event.wip:
             inferred.add(event.at)  # coding ended by a non-WIP upload, not Ready-for-review
     elif event.kind == "ready":
+        if not change.exists:
+            state.composition_at = event.at  # a change first seen through Ready-for-review
         change.exists = True
         change.wip = False
         # The author has answered: objections are back with the reviewers.
@@ -196,8 +229,8 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
         change.merged = True
     elif event.kind == "abandoned":
         change.abandoned = True
-        state.ci_result = None
         state.composition_at = event.at
+    state.touched()
 
 
 def _build_phase(state: _TopicState, active: list[Build], t: int) -> str | None:
@@ -218,7 +251,8 @@ def _label(state: _TopicState, active: list[Build], t: int, had_gate: bool, reop
         # Everything is merged. Only a reopen (Active again after a Closed) is new
         # author work; otherwise the item waits for its bookkeeping close.
         return author if reopened else "close_lag"
-    if not pending or state.ci_result == "fail":
+    verdict = state.verdict()
+    if not pending or verdict == "fail":
         return author
     if any(c.wip or c.rejected for c in pending):
         return author
@@ -227,26 +261,42 @@ def _label(state: _TopicState, active: list[Build], t: int, had_gate: bool, reop
         return phase
     if not all(c.approved for c in pending):
         return "review_wait"
-    if state.ci_result == "pass":
+    if verdict == "pass":
         return "submit_wait"
     return "unattributed"  # approved, but no build of this revision queued or passed yet
 
 
 def _critical_topic(topics: list[Topic], end: int) -> Topic:
-    def last_activity(topic: Topic) -> int:
-        times = [e.at for c in topic.changes for e in c.events if e.at <= end]
+    """The topic that completed last, else the one with the latest activity.
+
+    A topic is complete when every live change (seen and not abandoned) is merged by
+    ``end``. Only events at or before ``end`` count.
+    """
+
+    def key(topic: Topic) -> tuple[bool, int]:
+        seen: set[int] = set()
+        gone: set[int] = set()
+        merged: dict[int, int] = {}
+        times: list[int] = []
+        for change in topic.changes:
+            for event in change.events:
+                if event.at > end:
+                    continue
+                times.append(event.at)
+                if event.kind in ("patchset", "ready"):
+                    seen.add(change.number)
+                elif event.kind == "abandoned":
+                    gone.add(change.number)
+                elif event.kind == "merged":
+                    seen.add(change.number)
+                    merged[change.number] = event.at
         for b in topic.builds:
             times += [t for t in (b.queued_at, b.started_at, b.finished_at) if t is not None]
         times = [t for t in times if t <= end]
-        merges = [
-            e.at for c in topic.changes for e in c.events if e.kind == "merged" and e.at <= end
-        ]
-        return max(merges) if merges else max(times, default=0)
-
-    # A topic that merged outranks one that only has activity, then the later one wins.
-    def key(topic: Topic) -> tuple[bool, int]:
-        merged = any(e.kind == "merged" and e.at <= end for c in topic.changes for e in c.events)
-        return (merged, last_activity(topic))
+        live = seen - gone
+        if live and live <= merged.keys():
+            return (True, max(merged[n] for n in live))
+        return (False, max(times, default=0))
 
     return max(topics, key=key)
 
@@ -365,13 +415,13 @@ def _with_topic(item: WorkItem, topic: Topic, result: Result) -> list[Span]:
             had_gate = True  # author time after a close is rework
         labels.append((a, b, kind, rnd, flags))
         prev_kind = kind
-    result.metrics["ado_mismatch_s"] = mismatch
+    result.metrics["ado_mismatch_s"] = mismatch // SECOND
     activity = [e.at for c in topic.changes for e in c.events]
     for b in topic.builds:
         activity += [t for t in (b.queued_at, b.started_at, b.finished_at) if t is not None]
     first_event = min(activity, default=None)
     if first_event is not None and first_event < start:
-        result.metrics["activity_before_active_s"] = start - first_event
+        result.metrics["activity_before_active_s"] = (start - first_event) // SECOND
         result.flags.add("activity_before_active")
     spans = _merge_intervals(labels)
     # The inferred flag marks the gate span that the non-WIP upload opened; move it to

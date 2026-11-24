@@ -12,7 +12,7 @@ import io
 import math
 from collections import defaultdict
 
-from workflow_automations.cycle_time.model import format_time
+from workflow_automations.cycle_time.model import SECOND, format_time
 from workflow_automations.cycle_time.spans import SPAN_KINDS, Result
 
 SPAN_COLUMNS = [
@@ -38,6 +38,10 @@ def percentile(values: list[float], q: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (pos - low)
 
 
+def _seconds(us: int) -> int | float:
+    return us // SECOND if us % SECOND == 0 else us / SECOND
+
+
 def spans_csv(results: list[Result]) -> str:
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
@@ -58,7 +62,7 @@ def spans_csv(results: list[Result]) -> str:
                     rnd,
                     format_time(start),
                     format_time(end),
-                    end - start,
+                    _seconds(end - start),
                     ";".join(flags),
                 ]
             )
@@ -82,7 +86,7 @@ def summary(results: list[Result]) -> list[dict]:
     for (team, kind), per_item in sorted(
         totals.items(), key=lambda kv: (kv[0][0], order[kv[0][1]])
     ):
-        values = [v / 3600 for v in per_item.values()]
+        values = [v / (3600 * SECOND) for v in per_item.values()]
         rows.append(
             {
                 "team": team,

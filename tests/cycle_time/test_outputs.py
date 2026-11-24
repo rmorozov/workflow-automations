@@ -166,7 +166,7 @@ def test_percentile_interpolates_linearly():
 def test_summary_leaves_out_open_cycles():
     rows = report.summary(all_results())
     tools_cycle = next(r for r in rows if r["team"] == "Tools" and r["kind"] == "cycle")
-    assert tools_cycle["work_items"] == 5  # 107, 108, 110, 113, 114; 109 and 115 are open
+    assert tools_cycle["work_items"] == 7  # 107, 108, 110, 113, 114, 122, 123; 109, 115 open
 
 
 def test_cli_refuses_to_overwrite(tmp_path, capsys):
@@ -348,7 +348,9 @@ def test_aligned_trace_clips_ci_phases_at_the_cycle_start():
     assert "ci_queue" in kinds and "ci_run" in kinds
     ci = [e for e in perfetto.export(results, "aligned")["traceEvents"] if e.get("cat") == "ci"]
     queued = next(e for e in ci if e["name"] == "queued")
-    assert queued["ts"] == 0 and queued["dur"] == 5 * 60 * perfetto.US and queued["args"]["clipped"]
+    assert (
+        queued["ts"] == 0 and queued["dur"] == 5 * 60 * model.SECOND and queued["args"]["clipped"]
+    )
     assert any(e["name"] == "build 10101 pass" for e in ci)
 
 
@@ -357,14 +359,14 @@ def test_many_builds_compute_in_linear_time():
     base = model.parse_time("2026-11-02T10:00:00Z", "")
     builds = []
     for k in range(3000):
-        q = base + k * 600
+        q = base + k * 600 * model.SECOND
         builds.append(
             {
                 "id": k,
                 "queued_at": model.format_time(q),
-                "started_at": model.format_time(q + 60),
-                "finished_at": model.format_time(q + 300),
-                "result": "infra",
+                "started_at": model.format_time(q + 60 * model.SECOND),
+                "finished_at": model.format_time(q + 300 * model.SECOND),
+                "result": "pass" if k % 2 else "infra",
             }
         )
     data = model.load(
@@ -393,3 +395,59 @@ def test_many_builds_compute_in_linear_time():
     (result,) = compute(data)
     assert time.perf_counter() - started < 3.0
     assert sum(s.kind == "ci_run" for s in result.spans) == 3000
+
+
+def test_critical_topic_prefers_a_completed_topic_over_a_partly_merged_one():
+    def change(number, *events):
+        return {"number": number, "events": [dict(e) for e in events]}
+
+    ps = {"kind": "patchset", "patchset": 1}
+    data = model.load(
+        minimal(
+            work_items=[
+                {
+                    "id": 1,
+                    "states": [
+                        {"rev": 1, "state": "Active", "at": "2026-11-02T00:00Z"},
+                        {"rev": 2, "state": "Closed", "at": "2026-11-02T01:00Z"},
+                    ],
+                }
+            ],
+            topics=[
+                {
+                    "id": "done",
+                    "wi_ids": [1],
+                    "changes": [
+                        change(
+                            1,
+                            {**ps, "at": "2026-11-02T00:05Z"},
+                            {"kind": "merged", "at": "2026-11-02T00:15Z"},
+                        )
+                    ],
+                },
+                {
+                    "id": "half",
+                    "wi_ids": [1],
+                    "changes": [
+                        change(
+                            2,
+                            {**ps, "at": "2026-11-02T00:06Z"},
+                            {"kind": "merged", "at": "2026-11-02T00:20Z"},
+                        ),
+                        change(
+                            3,
+                            {**ps, "at": "2026-11-02T00:07Z"},
+                            {"kind": "ready", "at": "2026-11-02T00:25Z"},
+                        ),
+                    ],
+                },
+            ],
+        )
+    )
+    (result,) = compute(data)
+    assert result.critical_topic == "done"
+
+
+def test_spans_csv_keeps_sub_second_times():
+    out = report.spans_csv(compute(model.read(scenario("20_"))))
+    assert "2026-11-02T10:04:00.100000Z" in out and ",0.8," in out
