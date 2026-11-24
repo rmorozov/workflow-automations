@@ -103,20 +103,30 @@ def _pack(builds: tuple[Build, ...], cutoff: int) -> list[list[Build]]:
     return lanes
 
 
-def _build_slices(writer: _Writer, pid: int, tid: int, build: Build, cutoff: int, shift: int):
+def _build_slices(
+    writer: _Writer, pid: int, tid: int, build: Build, cutoff: int, shift: int, lo: int | None
+) -> None:
+    """Queue and run slices of one build; ``lo`` clips each phase to the visible window."""
+
+    def emit(name: str, start: int, end: int, args: dict) -> None:
+        if lo is not None:
+            if end <= lo:
+                return
+            if start < lo:
+                start, args = lo, {**args, "clipped": True}
+        if end > start:
+            writer.slice(pid, tid, name, start + shift, end + shift, args, "ci")
+
     start = build.started_at
     if start is None:
         start = build.finished_at  # finished without starting (canceled while queued)
     queue_end = start if start is not None else _end(build, cutoff)
-    if queue_end > build.queued_at:
-        args = {"build": build.id, "ongoing": start is None}
-        writer.slice(pid, tid, "queued", build.queued_at + shift, queue_end + shift, args, "ci")
+    emit("queued", build.queued_at, queue_end, {"build": build.id, "ongoing": start is None})
     if build.started_at is not None:
-        end = _end(build, cutoff)
         ongoing = build.finished_at is None
         name = f"build {build.id} " + ("running" if ongoing else str(build.result))
         args = {"build": build.id, "result": build.result, "ongoing": ongoing}
-        writer.slice(pid, tid, name, build.started_at + shift, end + shift, args, "ci")
+        emit(name, build.started_at, _end(build, cutoff), args)
 
 
 def _rounds(result: Result) -> Iterator[tuple[int, int, int]]:
@@ -214,8 +224,8 @@ def export(results: list[Result], mode: str = "calendar") -> dict[str, Any]:
                     ci = writer.lane(pid, f"WI {item.id} · CI {topic.name}{suffix}", sort)
                     sort += 1
                     for build in lane:
-                        if keep(build.queued_at):
-                            _build_slices(writer, pid, ci, build, result.cutoff, shift)
+                        clip = result.cycle_start if mode == "aligned" else None
+                        _build_slices(writer, pid, ci, build, result.cutoff, shift, clip)
     return {"traceEvents": writer.events, "displayTimeUnit": "ms", "otherData": {"mode": mode}}
 
 

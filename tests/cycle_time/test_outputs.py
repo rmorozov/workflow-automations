@@ -2,6 +2,7 @@
 
 import csv
 import json
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -58,6 +59,15 @@ def minimal(**over):
             },
             "integer",
         ),
+        (
+            {"work_items": [{"id": 1, "states": [None]}]},
+            r"work_items\[0\]\.states\[0\]: must be an object",
+        ),
+        ({"work_items": "x"}, "must be a list"),
+        ({"topics": [{"id": "t", "changes": [None]}]}, r"changes\[0\]: must be an object"),
+        ({"topics": [{"id": "t", "changes": [{"number": 1, "events": [5]}]}]}, r"events\[0\]"),
+        ({"topics": [{"id": "t", "builds": "x"}]}, r"topics\[0\]\.builds: must be a list"),
+        ({"topics": [None]}, r"topics\[0\]: must be an object"),
     ],
 )
 def test_invalid_input_is_refused(change, message):
@@ -141,7 +151,8 @@ def test_trace_slices_nest_strictly_per_lane(mode):
 def test_trace_has_one_cycle_per_started_item_and_spans_at_depth_two():
     trace = perfetto.export(all_results())
     cycles = [e for e in trace["traceEvents"] if e.get("cat") == "cycle"]
-    assert len(cycles) == len(SCENARIOS)
+    expected = sum(len(json.loads(p.read_text())["expected"]) for p in SCENARIOS)
+    assert len(cycles) == expected
     names = {e["name"] for e in trace["traceEvents"] if e.get("cat") == "span"}
     assert {"coding", "rework", "review_wait", "ci_run", "unattributed"} <= names
 
@@ -299,3 +310,86 @@ def test_tested_must_map_changes_to_patchsets():
     }
     with pytest.raises(model.InputError, match="change number"):
         model.load(minimal(topics=[topic]))
+
+
+def test_cli_exits_2_on_malformed_nested_records(tmp_path, capsys):
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps(minimal(work_items=[{"id": 1, "states": [None]}])))
+    assert main(["spans", str(bad)]) == 2
+    assert "states[0]" in capsys.readouterr().err
+
+
+def test_shared_topic_is_flagged_from_any_linked_topic():
+    raw = json.loads(scenario("06_").read_text())
+    raw["work_items"].append(
+        {"id": 999, "states": [{"rev": 1, "state": "Active", "at": "2026-11-02T09:00Z"}]}
+    )
+    raw["topics"][0]["wi_ids"] = [106, 999]  # the non-critical topic is shared
+    results = {r.item.id: r for r in compute(model.load(raw))}
+    assert results[106].critical_topic == "t106b"
+    assert {"multi_topic", "shared_topic"} <= results[106].flags
+
+
+def test_early_build_queue_counts_as_activity_before_active():
+    raw = json.loads(scenario("01_").read_text())
+    raw["topics"][0]["builds"][0]["queued_at"] = "2026-11-02T06:00:00Z"
+    (result,) = compute(model.load(raw))
+    assert "activity_before_active" in result.flags
+    assert result.metrics["activity_before_active_s"] == 3 * 3600
+
+
+def test_aligned_trace_clips_ci_phases_at_the_cycle_start():
+    raw = json.loads(scenario("01_").read_text())
+    # Active at 10:25 on day two: between the 10:20 queue and the 10:30 build start.
+    raw["work_items"][0]["states"][1]["at"] = "2026-11-03T10:25:00Z"
+    raw["work_items"][0]["states"][2]["at"] = "2026-11-03T10:25:00Z"
+    results = compute(model.load(raw))
+    kinds = [s.kind for s in results[0].spans]
+    assert "ci_queue" in kinds and "ci_run" in kinds
+    ci = [e for e in perfetto.export(results, "aligned")["traceEvents"] if e.get("cat") == "ci"]
+    queued = next(e for e in ci if e["name"] == "queued")
+    assert queued["ts"] == 0 and queued["dur"] == 5 * 60 * perfetto.US and queued["args"]["clipped"]
+    assert any(e["name"] == "build 10101 pass" for e in ci)
+
+
+def test_many_builds_compute_in_linear_time():
+    # Sequential builds used to be rescanned at every cut (quadratic): 400 took 0.26 s.
+    base = model.parse_time("2026-11-02T10:00:00Z", "")
+    builds = []
+    for k in range(3000):
+        q = base + k * 600
+        builds.append(
+            {
+                "id": k,
+                "queued_at": model.format_time(q),
+                "started_at": model.format_time(q + 60),
+                "finished_at": model.format_time(q + 300),
+                "result": "infra",
+            }
+        )
+    data = model.load(
+        minimal(
+            topics=[
+                {
+                    "id": "t",
+                    "wi_ids": [1],
+                    "changes": [
+                        {
+                            "number": 1,
+                            "events": [
+                                {"kind": "patchset", "patchset": 1, "at": "2026-11-02T09:10Z"},
+                                {"kind": "ready", "at": "2026-11-02T09:30Z"},
+                                {"kind": "vote", "value": 2, "at": "2026-11-02T09:40Z"},
+                            ],
+                        }
+                    ],
+                    "builds": builds,
+                }
+            ],
+            as_of="2026-11-30T00:00:00Z",
+        )
+    )
+    started = time.perf_counter()
+    (result,) = compute(data)
+    assert time.perf_counter() - started < 3.0
+    assert sum(s.kind == "ci_run" for s in result.spans) == 3000
