@@ -1,0 +1,161 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "A merges and the item closes; it is reopened at 10:00 and B is the fix, merged at 10:48. The reopen came after A completed the topic, so 10:00-10:20 is rework; B's merge answers the reopen, so the time until the final close is close_lag, not a third round (review on PR #56).",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 133,
+      "type": "Task",
+      "team": "Tools",
+      "title": "Reopen fixed by a second change",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Closed",
+          "at": "2026-11-02T09:50:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Active",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 4,
+          "state": "Closed",
+          "at": "2026-11-02T11:30:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t133",
+      "name": "wi-133",
+      "wi_ids": [
+        133
+      ],
+      "changes": [
+        {
+          "number": 1331,
+          "repo": "tools/cli",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T09:20:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T09:40:00Z"
+            }
+          ]
+        },
+        {
+          "number": 1332,
+          "repo": "tools/cli",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T10:20:00Z",
+              "patchset": 1
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:30:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T10:48:00Z"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "133": {
+      "queue": null,
+      "flags": [
+        "reopened"
+      ],
+      "metrics": {
+        "ado_mismatch_s": 3480,
+        "rounds": 2
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T09:10:00Z",
+          [
+            "inferred_patchset"
+          ]
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T09:10:00Z",
+          "2026-11-02T09:20:00Z"
+        ],
+        [
+          "unattributed",
+          1,
+          "2026-11-02T09:20:00Z",
+          "2026-11-02T09:40:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T09:40:00Z",
+          "2026-11-02T09:50:00Z"
+        ],
+        [
+          "closed_interim",
+          1,
+          "2026-11-02T09:50:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "rework",
+          2,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:20:00Z",
+          [
+            "inferred_patchset"
+          ]
+        ],
+        [
+          "review_wait",
+          2,
+          "2026-11-02T10:20:00Z",
+          "2026-11-02T10:30:00Z"
+        ],
+        [
+          "unattributed",
+          2,
+          "2026-11-02T10:30:00Z",
+          "2026-11-02T10:48:00Z"
+        ],
+        [
+          "close_lag",
+          2,
+          "2026-11-02T10:48:00Z",
+          "2026-11-02T11:30:00Z"
+        ]
+      ]
+    }
+  }
+}
