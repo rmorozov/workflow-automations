@@ -120,6 +120,10 @@ Details:
   with its change until that change gets a new patchset or a Ready-for-review, or
   the reviewer changes it; uploads to other changes don't clear it.
 - A new patchset drops the change's +2 unless the event says `keeps_votes`.
+- A Code-Review −2 is the exception: Gerrit keeps it across patchsets (CI labels always
+  reset). Once the author answers it with a new patchset or a Ready-for-review, it no
+  longer makes the time author time, but it still blocks approval, so the change is in
+  `review_wait` until that reviewer withdraws or changes it.
 - A vote that names a `patchset` other than the current one, a withdrawal included,
   is ignored: a late +2 for patchset 1 doesn't approve patchset 2. A vote without a
   `patchset` applies to the current one.
@@ -247,6 +251,7 @@ rules:
 | `24_sibling_merge_tied_with_queue` | a sibling merged at the queue instant is not in the base |
 | `25_ci_labels` | label verdict: per-branch extra label, −1 answered by an upload, a re-run, or nothing |
 | `26_reopen_answered_by_merge` | a merge after a reopen ends the reopen's rework |
+| `27_sticky_code_review_minus_two` | a −2 survives the upload and blocks a second +2 |
 
 `cycle-time trace tests/cycle_time/scenarios/*.json -o demo.json` builds a trace of
 all of them.
@@ -261,8 +266,6 @@ Open, to settle with real data:
 - The CI trigger point (+2, Ready-for-review or every patchset). The rules handle
   all three, and the answer shows how much time lands in `unattributed`.
 - Whether a running build should outrank `review_wait` (rule 4 before 6).
-- Whether any CI label survives a new patchset (Gerrit copy conditions). Today every
-  new patchset resets them.
 - A re-run is any later build of the topic, so a build triggered by another change's
   upload also counts as one. Linking builds to the labels they set (CT-010) would
   narrow this.
