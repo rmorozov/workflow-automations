@@ -100,11 +100,13 @@ Details:
 - A build counts only for the revision and composition it tested, checked again at
   every step rather than remembered. With `tested`, every tested change must still be
   live (pending or merged) at the tested patchset, every pending change must be
-  tested, and a change merged after the build was queued must have been tested too;
-  so an upload, an abandon, a change first seen through any event (a merge included,
-  since it proves the change existed), a merge of a later patchset, or a merge of an
-  untested sibling all retire it. A build that is already retired when it finishes is
-  dropped, so stale builds cost nothing later. Without `tested`, the build must have been queued
+  tested, and a change merged at or after the build's queue time must have been
+  tested too (a merge at the queue instant may not be in the base); so an upload, an
+  abandon, a change first seen through any event (a vote, WIP flag or merge proves
+  the change exists, as an upload does), a merge of a later patchset, or a merge of
+  an untested sibling all retire it. A build that is already retired when it
+  finishes is dropped, and a later build of the same tested set replaces an earlier
+  one, so repeated or stale builds cost nothing later. Without `tested`, the build must have been queued
   strictly after the last upload, new change or abandon: the same instant is
   ambiguous and counts as stale. A stale build's running time and verdict are both
   ignored; the verdict is the latest finished pass or fail that is still current.
@@ -205,6 +207,8 @@ rules:
 | `20_subsecond_build_order` | 0.8 s before an upload, or the same instant, is not current |
 | `21_sibling_merged_after_build` | a sibling merged after the queue time must have been tested |
 | `22_merge_is_the_only_event` | a change seen only through its merge still counts as new |
+| `23_change_first_seen_by_vote_or_wip` | a first event of any kind makes a change a member |
+| `24_sibling_merge_tied_with_queue` | a sibling merged at the queue instant is not in the base |
 
 `cycle-time trace tests/cycle_time/scenarios/*.json -o demo.json` builds a trace of
 all of them.
