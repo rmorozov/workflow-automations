@@ -166,8 +166,8 @@ def test_percentile_interpolates_linearly():
 def test_summary_leaves_out_open_cycles():
     rows = report.summary(all_results())
     tools_cycle = next(r for r in rows if r["team"] == "Tools" and r["kind"] == "cycle")
-    # 107, 108, 110, 113, 114, 122, 123, 126; 109 and 115 are open
-    assert tools_cycle["work_items"] == 8
+    # 107, 108, 110, 113, 114, 122, 123, 126, 133; 109 and 115 are open
+    assert tools_cycle["work_items"] == 9
 
 
 def test_cli_refuses_to_overwrite(tmp_path, capsys):
@@ -729,3 +729,14 @@ def test_many_negative_labels_resolve_in_linear_time():
     assert time.perf_counter() - started < 3.0
     # each -1 is answered by the next vote on the same patchset; the last by nothing
     assert [s.kind for s in result.spans][-2:] == ["ci_retry", "ci_failed"]
+
+
+def test_last_of_two_simultaneous_failures_stays_unanswered():
+    events = [
+        _ps("09:10", 1),
+        _vote("09:20", 2),
+        _vote("09:30", -1, "Build", patchset=1),
+        _vote("09:30", -1, "Build", patchset=1),  # same label, patchset and instant
+    ]
+    (result,) = compute(_label_item(events))
+    assert result.spans[-1].kind == "ci_failed"

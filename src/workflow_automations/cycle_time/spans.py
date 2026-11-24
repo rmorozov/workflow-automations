@@ -124,7 +124,7 @@ class _ChangeState:
     merged_at: int | None = None
     abandoned: bool = False
     patchset: int | None = None
-    # CI label votes on the current patchset: label -> (value, time of the vote).
+    # CI label votes on the current patchset: label -> (value, identity of the vote).
     ci: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     @property
@@ -148,19 +148,22 @@ class _TopicState:
     composition_at: int | None = None
     _pending: dict[int, _ChangeState] | None = None
     # Label mode: required CI labels per change, and how each negative CI vote was
-    # resolved, keyed by (change, label, vote time): "rework", "retry" or "unresolved".
+    # resolved, keyed by the vote event's identity (two votes can share a timestamp):
+    # "rework", "retry" or "unresolved".
     required: dict[int, frozenset[str]] | None = None
-    resolution: dict[tuple[int, str, int], str] = field(default_factory=dict)
+    resolution: dict[int, str] = field(default_factory=dict)
+    # When every live change last became merged; None while something is pending.
+    completed_at: int | None = None
 
     def touched(self) -> None:
         self._pending = None
         self.finished = [b for b in self.finished if not self.retired(b)]
 
-    def _failures(self) -> list[tuple[int, str, int]]:
-        """Negative required CI votes on pending changes: (change, label, vote time)."""
+    def _failures(self) -> list[int]:
+        """Negative required CI votes on pending changes, as vote-event identities."""
         assert self.required is not None
         return [
-            (n, label, c.ci[label][1])
+            c.ci[label][1]
             for n, c in self.pending().items()
             for label in sorted(self.required.get(n, ()))
             if label in c.ci and c.ci[label][0] < 0
@@ -312,7 +315,7 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
     elif event.kind == "vote" and event.label != REVIEW_LABEL:
         # A CI label counts only for the patchset it was cast on.
         if event.patchset is None or event.patchset == change.patchset:
-            change.ci[event.label] = (event.value, event.at)
+            change.ci[event.label] = (event.value, id(event))
     elif event.kind == "vote" and event.patchset not in (None, change.patchset):
         pass  # a vote (or withdrawal) for another patchset doesn't touch the current one
     elif event.kind == "vote":
@@ -328,6 +331,10 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
         change.abandoned = True
         state.composition_at = event.at
     state.touched()
+    if state.pending() or not state.live():
+        state.completed_at = None
+    elif state.completed_at is None:
+        state.completed_at = event.at
 
 
 def _build_phase(state: _TopicState, active: list[Build], t: int) -> str | None:
@@ -340,14 +347,20 @@ def _build_phase(state: _TopicState, active: list[Build], t: int) -> str | None:
     return None
 
 
-def _label(state: _TopicState, active: list[Build], t: int, had_gate: bool, reopened: bool) -> str:
+def _label(
+    state: _TopicState, active: list[Build], t: int, had_gate: bool, reopened: int | None
+) -> str:
     author = "rework" if had_gate else "coding"
     live = state.live()
     pending = list(state.pending().values())
     if live and not pending:
-        # Everything is merged. Only a reopen (Active again after a Closed) is new
-        # author work; otherwise the item waits for its bookkeeping close.
-        return author if reopened else "close_lag"
+        # Everything is merged. Only a reopen (Active again after a Closed) that came
+        # after the topic was completed is new author work; a merge after the reopen
+        # answers it, and the item waits for its bookkeeping close.
+        done = state.completed_at
+        return (
+            author if reopened is not None and done is not None and reopened > done else "close_lag"
+        )
     if not pending:
         return author
     verdict = state.verdict()
@@ -430,17 +443,20 @@ def _merge_intervals(labels: list[tuple[int, int, str, int, tuple[str, ...]]]) -
     return spans
 
 
-def _reopened_at(item: WorkItem, t: int) -> bool:
-    """ADO is Active at ``t`` and a Closed entry came before it: the item was reopened."""
-    seen_closed = False
+def _reopened_at(item: WorkItem, t: int) -> int | None:
+    """When the item was last reopened, if ADO is Active at ``t`` after a Closed entry."""
+    seen_closed = waiting = False
     state = None
+    reopened = None
     for entry in item.states:
         if entry.at > t:
             break
         if entry.state == "Closed":
-            seen_closed = True
+            seen_closed = waiting = True
+        elif entry.state == "Active" and waiting:
+            reopened, waiting = entry.at, False  # first Active after the latest Closed
         state = entry.state
-    return state == "Active" and seen_closed
+    return reopened if state == "Active" and seen_closed else None
 
 
 def _ado_override(item: WorkItem, t: int) -> str | None:
@@ -472,7 +488,7 @@ def _ado_only(item: WorkItem, result: Result) -> list[Span]:
     return _merge_intervals(labels)
 
 
-def _resolutions(topic: Topic, end: int) -> dict[tuple[int, str, int], str]:
+def _resolutions(topic: Topic, end: int) -> dict[int, str]:
     """Classify each negative CI vote by what answered it first, up to ``end``.
 
     A new patchset of that change means ``rework``. A build of the topic queued later,
@@ -483,7 +499,7 @@ def _resolutions(topic: Topic, end: int) -> dict[tuple[int, str, int], str]:
     next upload and the next vote per label and patchset; queues are bisected.
     """
     queues = sorted(b.queued_at for b in topic.builds if b.queued_at <= end)
-    out: dict[tuple[int, str, int], str] = {}
+    out: dict[int, str] = {}
     for change in topic.changes:
         events = [e for e in change.events if e.at <= end]
         on: list[int | None] = []  # patchset each event applies to
@@ -507,7 +523,7 @@ def _resolutions(topic: Topic, end: int) -> dict[tuple[int, str, int], str]:
                     outcome = "retry"
                 else:
                     outcome = "unresolved"
-                out[(change.number, event.label, event.at)] = outcome
+                out[id(event)] = outcome
             if event.kind == "patchset":
                 next_upload = event.at
             elif event.kind == "vote" and event.label != REVIEW_LABEL:

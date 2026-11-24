@@ -86,8 +86,9 @@ Labels, first match wins:
 1. ADO is Closed (before the final close): `closed_interim`. ADO is Proposed:
    `parked`.
 2. Every live change is merged: `close_lag`. Only a reopen (ADO Active again after a
-   Closed) makes it author time; an item that stays Active through the merge is
-   still `close_lag`.
+   Closed) that came after the topic became complete makes it author time; a merge
+   after the reopen answers it, so the time from then to the close is `close_lag`
+   again. An item that stays Active through the merge is still `close_lag`.
 3. No change yet, a pending change in WIP, a pending change with an outstanding
    negative vote, or a CI failure that new code answered (with build verdicts, every
    failed build of the current revision): `coding` in round 1, `rework` afterwards.
@@ -245,6 +246,7 @@ rules:
 | `23_change_first_seen_by_vote_or_wip` | a first event of any kind makes a change a member |
 | `24_sibling_merge_tied_with_queue` | a sibling merged at the queue instant is not in the base |
 | `25_ci_labels` | label verdict: per-branch extra label, −1 answered by an upload, a re-run, or nothing |
+| `26_reopen_answered_by_merge` | a merge after a reopen ends the reopen's rework |
 
 `cycle-time trace tests/cycle_time/scenarios/*.json -o demo.json` builds a trace of
 all of them.
