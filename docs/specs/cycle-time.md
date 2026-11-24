@@ -54,8 +54,11 @@ One UTF-8 JSON object, the shape the normalized layer will have once ingest exis
 | `builds[]` | `id`, `queued_at`, `started_at`, `finished_at`, `result` (`pass`, `fail`, `infra`, `canceled`), optional `tested`: change number → patchset number |
 
 Change event kinds: `patchset` (`patchset`, `wip`, optional `keeps_votes`), `ready`
-(Ready-for-review), `wip` (set back to WIP), `vote` (Code-Review `value` −2..2),
-`merged`, `abandoned`.
+(Ready-for-review), `wip` (set back to WIP), `vote` (Code-Review `value` −2..2,
+optional `reviewer`), `merged`, `abandoned`. A vote with a `reviewer` (a pseudonymous
+key, never a name) sets that reviewer's vote, and `0` withdraws it. A vote without one
+is the change's effective label and replaces all votes. Any record of the wrong JSON
+type is refused with its path (for example `work_items[0].states[0]`).
 
 Times are ISO 8601 with an explicit zone; a time without a zone is refused. States are
 ordered by `rev`, never by timestamp, so two changes in one second stay in order.
@@ -93,12 +96,14 @@ Labels, first match wins:
 
 Details:
 
-- A build counts only for the revision it tested. With `tested`, every pending
-  change must be at the tested patchset; without it, the build must have been queued
-  after the latest upload. A pass or failure of an older revision is ignored, and so
-  is its running time.
-- A negative vote belongs to its change. It stays outstanding until that change gets
-  a new patchset, a Ready-for-review or a +2; uploads to other changes don't clear it.
+- A build counts only for the revision and composition it tested. With `tested`,
+  every pending change must be at the tested patchset and no tested change may have
+  been abandoned. Without it, the build must have been queued after the last upload,
+  new change or abandon. A pass or failure of an older revision is ignored, and so is
+  its running time. An abandon also drops a pass already recorded.
+- A change is approved while some vote is +2 and none is −2. A negative vote stays
+  with its change until that change gets a new patchset or a Ready-for-review, or
+  the reviewer changes it; uploads to other changes don't clear it.
 - A new patchset drops the change's +2 unless the event says `keeps_votes`, and
   forgets the last build result.
 - An `infra` or `canceled` build asks nothing of the author; a `fail` does.
@@ -120,7 +125,8 @@ Details:
 Work-item flags: `open`, `reopened`, `not_started`, `ado_only`, `multi_topic`,
 `shared_topic`, `activity_before_active`. Metrics: `rounds`, `ado_mismatch_s`
 (seconds where ADO said Active during a gate span, or Resolved during an author span),
-`activity_before_active_s`.
+`activity_before_active_s` (earliest Gerrit event or build queue, start or finish
+before the first Active entry).
 
 ## Outputs
 
@@ -132,7 +138,8 @@ Work-item flags: `open`, `reopened`, `not_started`, `ado_only`, `multi_topic`,
   span lane (cycle, round and span nested at depths 0, 1, 2), an ADO lane, a Gerrit
   lane of instants and CI lanes per linked topic. Builds whose lifetimes overlap go
   on separate CI lanes (`#2`, `#3`), so slices never cross. A build still queued or
-  running at the cutoff is drawn up to the cutoff with `ongoing: true`. Every span
+  running at the cutoff is drawn up to the cutoff with `ongoing: true`. In `aligned`
+  mode each queue and run phase is clipped at the cycle start (`clipped: true`). Every span
   keeps its UTC times and flags in args. `aligned` shifts each work item to start at 0, sorts the longest
   first and drops `queue` and anything before the cycle.
 - `cycle-time report INPUT... [-o FILE] [--csv]`: p50 and p95 hours per team and
@@ -181,6 +188,8 @@ rules:
 | `13_active_through_merge` | no reopen, so post-merge time is `close_lag` |
 | `14_ado_only_reopen` | Active → Closed → Active starts round 2 |
 | `15_overlapping_and_running_builds` | overlapping and unfinished builds in the trace |
+| `16_abandoned_tested_change` | abandoning a tested change before or after the pass |
+| `17_withdrawn_approval` | a withdrawn sole +2 reopens review; a second +2 holds |
 
 `cycle-time trace tests/cycle_time/scenarios/*.json -o demo.json` builds a trace of
 all of them.

@@ -1,0 +1,274 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "118: the only approver withdraws their +2 after CI passed, so review waits again until another reviewer approves. 119: one of two +2s is withdrawn and the other still holds. Reviewers are pseudonymous keys (review on PR #56).",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 118,
+      "type": "Task",
+      "team": "Platform",
+      "title": "Sole approval withdrawn",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Closed",
+          "at": "2026-11-02T15:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": 119,
+      "type": "Task",
+      "team": "Platform",
+      "title": "One of two approvals withdrawn",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Closed",
+          "at": "2026-11-02T13:30:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t118",
+      "name": "wi-118",
+      "wi_ids": [
+        118
+      ],
+      "changes": [
+        {
+          "number": 1181,
+          "repo": "platform/core",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:30:00Z",
+              "value": 2,
+              "reviewer": "r1"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T12:00:00Z",
+              "value": 0,
+              "reviewer": "r1"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T13:00:00Z",
+              "value": 2,
+              "reviewer": "r2"
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T14:00:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 11801,
+          "queued_at": "2026-11-02T10:30:00Z",
+          "started_at": "2026-11-02T10:30:00Z",
+          "finished_at": "2026-11-02T11:30:00Z",
+          "result": "pass",
+          "tested": {
+            "1181": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "t119",
+      "name": "wi-119",
+      "wi_ids": [
+        119
+      ],
+      "changes": [
+        {
+          "number": 1191,
+          "repo": "platform/core",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:20:00Z",
+              "value": 2,
+              "reviewer": "r1"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:25:00Z",
+              "value": 2,
+              "reviewer": "r2"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T12:00:00Z",
+              "value": 0,
+              "reviewer": "r1"
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T13:00:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 11901,
+          "queued_at": "2026-11-02T10:30:00Z",
+          "started_at": "2026-11-02T10:30:00Z",
+          "finished_at": "2026-11-02T11:30:00Z",
+          "result": "pass",
+          "tested": {
+            "1191": 1
+          }
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "118": {
+      "queue": null,
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:30:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:30:00Z",
+          "2026-11-02T11:30:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T11:30:00Z",
+          "2026-11-02T12:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T12:00:00Z",
+          "2026-11-02T13:00:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T13:00:00Z",
+          "2026-11-02T14:00:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T14:00:00Z",
+          "2026-11-02T15:00:00Z"
+        ]
+      ]
+    },
+    "119": {
+      "queue": null,
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:20:00Z"
+        ],
+        [
+          "unattributed",
+          1,
+          "2026-11-02T10:20:00Z",
+          "2026-11-02T10:30:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:30:00Z",
+          "2026-11-02T11:30:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T11:30:00Z",
+          "2026-11-02T13:00:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T13:00:00Z",
+          "2026-11-02T13:30:00Z"
+        ]
+      ]
+    }
+  }
+}

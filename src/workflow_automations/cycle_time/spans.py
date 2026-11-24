@@ -99,40 +99,61 @@ def _bounds(item: WorkItem, as_of: int, result: Result) -> bool:
 class _ChangeState:
     exists: bool = False
     wip: bool = False
-    approved: bool = False
-    rejected: bool = False  # an outstanding negative vote on this change
+    # Code-Review votes by pseudonymous reviewer key; None is the change-level label.
+    votes: dict[str | None, int] = field(default_factory=dict)
     merged: bool = False
     abandoned: bool = False
     patchset: int | None = None
-    patchset_at: int | None = None
+
+    @property
+    def approved(self) -> bool:
+        return 2 in self.votes.values() and -2 not in self.votes.values()
+
+    @property
+    def rejected(self) -> bool:  # an outstanding negative vote
+        return any(v < 0 for v in self.votes.values())
 
 
 @dataclass
 class _TopicState:
     changes: dict[int, _ChangeState] = field(default_factory=dict)
     ci_result: str | None = None  # verdict of the last build of the current revision
+    # Last time the topic's composition changed: an upload, a new change or an abandon.
+    composition_at: int | None = None
+    _pending: dict[int, _ChangeState] | None = None
+
+    def touched(self) -> None:
+        self._pending = None
 
     def live(self) -> list[_ChangeState]:
         return [c for c in self.changes.values() if c.exists and not c.abandoned]
 
     def pending(self) -> dict[int, _ChangeState]:
-        return {
-            n: c for n, c in self.changes.items() if c.exists and not c.abandoned and not c.merged
-        }
+        if self._pending is None:
+            self._pending = {
+                n: c
+                for n, c in self.changes.items()
+                if c.exists and not c.abandoned and not c.merged
+            }
+        return self._pending
 
     def tests_current(self, build: Build) -> bool:
-        """Whether the build tested the topic's current revision.
+        """Whether the build tested the topic's current revision and composition.
 
         With ``tested`` (change → patchset), every pending change must be at the tested
-        patchset. Without it, the build must have been queued after the latest upload.
+        patchset and no tested change may have been abandoned since. Without it, the
+        build must have been queued after the last upload, new change or abandon.
         """
         pending = self.pending()
+        if not pending:
+            return False
         if build.tested is not None:
-            return bool(pending) and all(
+            if any(n in self.changes and self.changes[n].abandoned for n in build.tested):
+                return False
+            return all(
                 n in build.tested and c.patchset == build.tested[n] for n, c in pending.items()
             )
-        uploads = [c.patchset_at for c in pending.values() if c.patchset_at is not None]
-        return bool(pending) and build.queued_at >= max(uploads, default=build.queued_at)
+        return self.composition_at is None or build.queued_at >= self.composition_at
 
 
 @dataclass(frozen=True)
@@ -147,56 +168,49 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
             state.ci_result = event.build.result
         return  # infra and canceled ask nothing of the author; stale verdicts are ignored
     change = state.changes.setdefault(event.change, _ChangeState())
+    state.touched()
     if event.kind == "patchset":
         change.exists = True
         change.wip = event.wip
         change.patchset = event.patchset
-        change.patchset_at = event.at
-        change.rejected = False
-        if not event.keeps_votes:
-            change.approved = False
+        change.votes = {k: v for k, v in change.votes.items() if v > 0} if event.keeps_votes else {}
         state.ci_result = None
+        state.composition_at = event.at
         if not event.wip:
             inferred.add(event.at)  # coding ended by a non-WIP upload, not Ready-for-review
     elif event.kind == "ready":
         change.exists = True
         change.wip = False
-        change.rejected = False
+        # The author has answered: objections are back with the reviewers.
+        change.votes = {k: v for k, v in change.votes.items() if v >= 0}
         inferred.discard(event.at)
     elif event.kind == "wip":
         change.wip = True
     elif event.kind == "vote":
-        if event.value == 2:
-            change.approved = True
-            change.rejected = False
-        elif event.value is not None and event.value < 0:
-            change.approved = False
-            change.rejected = True
+        if event.reviewer is None:
+            change.votes = {None: event.value}  # change-level effective label
+        else:
+            change.votes.pop(None, None)
+            change.votes[event.reviewer] = event.value
     elif event.kind == "merged":
         change.merged = True
     elif event.kind == "abandoned":
         change.abandoned = True
+        state.ci_result = None
+        state.composition_at = event.at
 
 
-def _build_phase(state: _TopicState, builds: tuple[Build, ...], t: int) -> str | None:
-    current = [b for b in builds if state.tests_current(b)]
+def _build_phase(state: _TopicState, active: list[Build], t: int) -> str | None:
+    current = [b for b in active if state.tests_current(b)]
     for build in current:
-        if (
-            build.started_at is not None
-            and build.started_at <= t
-            and (build.finished_at is None or t < build.finished_at)
-        ):
+        if build.started_at is not None and build.started_at <= t:
             return "ci_run"
-    for build in current:
-        start = build.started_at if build.started_at is not None else build.finished_at
-        if build.queued_at <= t and (start is None or t < start):
-            return "ci_queue"
+    if current:
+        return "ci_queue"
     return None
 
 
-def _label(
-    state: _TopicState, builds: tuple[Build, ...], t: int, had_gate: bool, reopened: bool
-) -> str:
+def _label(state: _TopicState, active: list[Build], t: int, had_gate: bool, reopened: bool) -> str:
     author = "rework" if had_gate else "coding"
     live = state.live()
     pending = list(state.pending().values())
@@ -208,7 +222,7 @@ def _label(
         return author
     if any(c.wip or c.rejected for c in pending):
         return author
-    phase = _build_phase(state, builds, t)
+    phase = _build_phase(state, active, t)
     if phase:
         return phase
     if not all(c.approved for c in pending):
@@ -314,6 +328,11 @@ def _with_topic(item: WorkItem, topic: Topic, result: Result) -> list[Span]:
         }
     cuts_sorted = sorted(cuts)
 
+    # Builds sweep: `active` holds builds queued and not yet finished at the current cut.
+    by_queue = sorted(topic.builds, key=lambda b: b.queued_at)
+    active: list[Build] = []
+    q = 0
+
     state, inferred = _TopicState(), set()
     i, rnd, had_gate = 0, 1, False
     prev_kind: str | None = None
@@ -323,11 +342,15 @@ def _with_topic(item: WorkItem, topic: Topic, result: Result) -> list[Span]:
         while i < len(events) and events[i].at <= a:
             _apply(state, events[i], inferred)
             i += 1
+        while q < len(by_queue) and by_queue[q].queued_at <= a:
+            active.append(by_queue[q])
+            q += 1
+        active = [b for b in active if b.finished_at is None or a < b.finished_at]
         kind = _ado_override(item, a)
         flags: tuple[str, ...] = ()
         if kind is None:
             ado = _ado_state_at(item, a)
-            kind = _label(state, topic.builds, a, had_gate, _reopened_at(item, a))
+            kind = _label(state, active, a, had_gate, _reopened_at(item, a))
             if kind in AUTHOR_KINDS and prev_kind in ROUND_BREAKERS:
                 rnd += 1
             if kind in GATE_KINDS:
@@ -343,7 +366,10 @@ def _with_topic(item: WorkItem, topic: Topic, result: Result) -> list[Span]:
         labels.append((a, b, kind, rnd, flags))
         prev_kind = kind
     result.metrics["ado_mismatch_s"] = mismatch
-    first_event = min((e.at for e in events), default=None)
+    activity = [e.at for c in topic.changes for e in c.events]
+    for b in topic.builds:
+        activity += [t for t in (b.queued_at, b.started_at, b.finished_at) if t is not None]
+    first_event = min(activity, default=None)
     if first_event is not None and first_event < start:
         result.metrics["activity_before_active_s"] = start - first_event
         result.flags.add("activity_before_active")
@@ -373,7 +399,7 @@ def compute_item(item: WorkItem, data: Input) -> Result:
         result.critical_topic = topic.id
         if len(result.topics) > 1:
             result.flags.add("multi_topic")
-        if len(topic.wi_ids) > 1:
+        if any(len(set(t.wi_ids)) > 1 for t in result.topics):
             result.flags.add("shared_topic")
         result.spans = _with_topic(item, topic, result)
     result.metrics["rounds"] = max((s.round for s in result.spans), default=0)

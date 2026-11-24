@@ -51,6 +51,7 @@ class ChangeEvent:
     wip: bool = False
     value: int | None = None
     keeps_votes: bool = False
+    reviewer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -123,13 +124,28 @@ def _opt_time(raw: dict, key: str, where: str) -> int | None:
     return None if raw.get(key) is None else parse_time(raw[key], f"{where}.{key}")
 
 
-def _work_item(raw: Any, where: str) -> WorkItem:
+def _obj(raw: Any, where: str) -> dict:
     if not isinstance(raw, dict):
         raise InputError(f"{where}: must be an object")
+    return raw
+
+
+def _items(raw: dict, key: str, where: str) -> list:
+    value = raw.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise InputError(f"{where}.{key}: must be a list")
+    return value
+
+
+def _work_item(raw: Any, where: str) -> WorkItem:
+    _obj(raw, where)
     wi_id = _int(raw.get("id"), f"{where}.id")
     states = []
-    for i, entry in enumerate(raw.get("states") or []):
+    for i, entry in enumerate(_items(raw, "states", where)):
         at = f"{where}.states[{i}]"
+        _obj(entry, at)
         if entry.get("state") not in STATES:
             raise InputError(f"{at}.state: must be one of {', '.join(STATES)}")
         states.append(
@@ -154,10 +170,15 @@ def _work_item(raw: Any, where: str) -> WorkItem:
 
 
 def _change(raw: Any, where: str) -> Change:
+    _obj(raw, where)
     number = _int(raw.get("number"), f"{where}.number")
     events = []
-    for i, event in enumerate(raw.get("events") or []):
+    for i, event in enumerate(_items(raw, "events", where)):
         at = f"{where}.events[{i}]"
+        _obj(event, at)
+        reviewer = event.get("reviewer")
+        if reviewer is not None and not isinstance(reviewer, str):
+            raise InputError(f"{at}.reviewer: must be a string (a pseudonymous key)")
         kind = event.get("kind")
         if kind not in CHANGE_EVENTS:
             raise InputError(f"{at}.kind: must be one of {', '.join(CHANGE_EVENTS)}")
@@ -177,6 +198,7 @@ def _change(raw: Any, where: str) -> Change:
                 wip=bool(event.get("wip", False)),
                 value=value,
                 keeps_votes=bool(event.get("keeps_votes", False)),
+                reviewer=reviewer,
             )
         )
     events.sort(key=lambda e: e.at)  # stable: same-second events keep file order
@@ -197,6 +219,7 @@ def _tested(raw: Any, where: str) -> dict[int, int] | None:
 
 
 def _build(raw: Any, where: str, topic: str) -> Build:
+    _obj(raw, where)
     result = raw.get("result")
     if result is not None and result not in BUILD_RESULTS:
         raise InputError(f"{where}.result: must be one of {', '.join(BUILD_RESULTS)}")
@@ -225,32 +248,33 @@ def load(data: dict) -> Input:
         raise InputError(f"version must be {VERSION}")
     as_of = parse_time(data.get("as_of"), "as_of")
     work_items: dict[int, WorkItem] = {}
-    for i, raw in enumerate(data.get("work_items") or []):
+    for i, raw in enumerate(_items(data, "work_items", "input")):
         item = _work_item(raw, f"work_items[{i}]")
         if item.id in work_items:
             raise InputError(f"work_items[{i}].id: {item.id} is listed twice")
         work_items[item.id] = item
     topics: dict[str, Topic] = {}
     warnings: list[str] = []
-    for i, raw in enumerate(data.get("topics") or []):
+    for i, raw in enumerate(_items(data, "topics", "input")):
         where = f"topics[{i}]"
+        _obj(raw, where)
         topic_id = raw.get("id")
         if not isinstance(topic_id, str) or not topic_id:
             raise InputError(f"{where}.id: must be a non-empty string")
         if topic_id in topics:
             raise InputError(f"{where}.id: {topic_id!r} is listed twice")
-        wi_ids = tuple(_int(w, f"{where}.wi_ids") for w in raw.get("wi_ids") or [])
+        wi_ids = tuple(_int(w, f"{where}.wi_ids") for w in _items(raw, "wi_ids", where))
         for wi_id in wi_ids:
             if wi_id not in work_items:
                 warnings.append(
                     f"topic {topic_id!r} links work item {wi_id}, which is not in the input"
                 )
         changes = tuple(
-            _change(c, f"{where}.changes[{j}]") for j, c in enumerate(raw.get("changes") or [])
+            _change(c, f"{where}.changes[{j}]") for j, c in enumerate(_items(raw, "changes", where))
         )
         builds = tuple(
             _build(b, f"{where}.builds[{j}]", topic_id)
-            for j, b in enumerate(raw.get("builds") or [])
+            for j, b in enumerate(_items(raw, "builds", where))
         )
         topics[topic_id] = Topic(topic_id, str(raw.get("name", topic_id)), wi_ids, changes, builds)
     return Input(as_of, work_items, topics, warnings, {wi_id: as_of for wi_id in work_items})
