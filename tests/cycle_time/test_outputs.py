@@ -166,7 +166,8 @@ def test_percentile_interpolates_linearly():
 def test_summary_leaves_out_open_cycles():
     rows = report.summary(all_results())
     tools_cycle = next(r for r in rows if r["team"] == "Tools" and r["kind"] == "cycle")
-    assert tools_cycle["work_items"] == 7  # 107, 108, 110, 113, 114, 122, 123; 109, 115 open
+    # 107, 108, 110, 113, 114, 122, 123, 126; 109 and 115 are open
+    assert tools_cycle["work_items"] == 8
 
 
 def test_cli_refuses_to_overwrite(tmp_path, capsys):
@@ -446,6 +447,104 @@ def test_critical_topic_prefers_a_completed_topic_over_a_partly_merged_one():
     )
     (result,) = compute(data)
     assert result.critical_topic == "done"
+
+
+def test_stale_builds_compute_in_linear_time():
+    # Builds of an outdated patchset are retired, not kept and rescanned at every cut.
+    base = model.parse_time("2026-11-02T10:00:00Z", "")
+    builds = []
+    for k in range(3000):
+        q = base + k * 600 * model.SECOND
+        builds.append(
+            {
+                "id": k,
+                "queued_at": model.format_time(q),
+                "started_at": model.format_time(q + 60 * model.SECOND),
+                "finished_at": model.format_time(q + 300 * model.SECOND),
+                "result": "pass",
+                "tested": {"1": 1},
+            }
+        )
+    data = model.load(
+        minimal(
+            topics=[
+                {
+                    "id": "t",
+                    "wi_ids": [1],
+                    "changes": [
+                        {
+                            "number": 1,
+                            "events": [
+                                {"kind": "patchset", "patchset": 1, "at": "2026-11-02T09:10Z"},
+                                {"kind": "patchset", "patchset": 2, "at": "2026-11-02T09:20Z"},
+                                {"kind": "ready", "at": "2026-11-02T09:30Z"},
+                                {"kind": "vote", "value": 2, "at": "2026-11-02T09:40Z"},
+                            ],
+                        }
+                    ],
+                    "builds": builds,
+                }
+            ],
+            as_of="2026-11-30T00:00:00Z",
+        )
+    )
+    started = time.perf_counter()
+    (result,) = compute(data)
+    assert time.perf_counter() - started < 3.0
+    assert {s.kind for s in result.spans} == {"coding", "review_wait", "unattributed"}
+
+
+def test_critical_topic_ranks_by_completion_transition():
+    # A became complete at 00:20 (abandon of its open sibling), B at 00:12: A is critical,
+    # although A's last merge (00:07) is earlier than B's.
+    def change(number, *events):
+        return {"number": number, "events": [dict(e) for e in events]}
+
+    ps = {"kind": "patchset", "patchset": 1}
+    data = model.load(
+        minimal(
+            work_items=[
+                {
+                    "id": 1,
+                    "states": [
+                        {"rev": 1, "state": "Active", "at": "2026-11-02T00:00Z"},
+                        {"rev": 2, "state": "Closed", "at": "2026-11-02T00:30Z"},
+                    ],
+                }
+            ],
+            topics=[
+                {
+                    "id": "A",
+                    "wi_ids": [1],
+                    "changes": [
+                        change(
+                            1,
+                            {**ps, "at": "2026-11-02T00:01Z"},
+                            {"kind": "merged", "at": "2026-11-02T00:07Z"},
+                        ),
+                        change(
+                            2,
+                            {**ps, "at": "2026-11-02T00:03Z"},
+                            {"kind": "abandoned", "at": "2026-11-02T00:20Z"},
+                        ),
+                    ],
+                },
+                {
+                    "id": "B",
+                    "wi_ids": [1],
+                    "changes": [
+                        change(
+                            3,
+                            {**ps, "at": "2026-11-02T00:02Z"},
+                            {"kind": "merged", "at": "2026-11-02T00:12Z"},
+                        )
+                    ],
+                },
+            ],
+        )
+    )
+    (result,) = compute(data)
+    assert result.critical_topic == "A"
 
 
 def test_spans_csv_keeps_sub_second_times():

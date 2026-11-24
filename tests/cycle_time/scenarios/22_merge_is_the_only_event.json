@@ -1,0 +1,71 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "The only Gerrit event seen is the merge: it proves the change existed, so the time after it is close_lag, not coding (review on PR #56).",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 126,
+      "type": "Task",
+      "team": "Tools",
+      "title": "Merge only",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Closed",
+          "at": "2026-11-02T09:40:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t126",
+      "name": "wi-126",
+      "wi_ids": [
+        126
+      ],
+      "changes": [
+        {
+          "number": 1261,
+          "repo": "tools/cli",
+          "events": [
+            {
+              "kind": "merged",
+              "at": "2026-11-02T09:08:00Z"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "126": {
+      "queue": null,
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T09:08:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T09:08:00Z",
+          "2026-11-02T09:40:00Z"
+        ]
+      ]
+    }
+  }
+}

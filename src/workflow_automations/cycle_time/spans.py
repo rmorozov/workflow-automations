@@ -109,6 +109,7 @@ class _ChangeState:
     # Code-Review votes by pseudonymous reviewer key; None is the change-level label.
     votes: dict[str | None, int] = field(default_factory=dict)
     merged: bool = False
+    merged_at: int | None = None
     abandoned: bool = False
     patchset: int | None = None
 
@@ -134,7 +135,7 @@ class _TopicState:
 
     def touched(self) -> None:
         self._pending = None
-        self.finished = [b for b in self.finished if not self._retired(b)]
+        self.finished = [b for b in self.finished if not self.retired(b)]
 
     def live(self) -> list[_ChangeState]:
         return [c for c in self.changes.values() if c.exists and not c.abandoned]
@@ -148,9 +149,10 @@ class _TopicState:
             }
         return self._pending
 
-    def _retired(self, build: Build) -> bool:
-        """Stale for good: a tested change moved on or was abandoned, or (without
-        ``tested``) the composition changed after the queue time."""
+    def retired(self, build: Build) -> bool:
+        """Stale for good: a tested change moved on or was abandoned, a sibling merged
+        after the queue time without being tested, or (without ``tested``) the
+        composition changed after the queue time."""
         if build.tested is None:
             return self.composition_at is not None and build.queued_at <= self.composition_at
         for number, patchset in build.tested.items():
@@ -158,16 +160,21 @@ class _TopicState:
             if change is not None and change.exists:
                 if change.abandoned or change.patchset != patchset:
                     return True
-        return False
+        return any(
+            c.merged and n not in build.tested and c.merged_at > build.queued_at
+            for n, c in self.changes.items()
+            if c.exists and not c.abandoned
+        )
 
     def tests_current(self, build: Build) -> bool:
         """Whether the build tested the topic's current revision and composition.
 
-        With ``tested`` (change → patchset), every tested change must still be live
-        (pending or merged) at the tested patchset, and every pending change must be
-        tested. Without it, the build must have been queued strictly after the last
-        upload, new change or abandon; a tie at the same instant is ambiguous and the
-        build is treated as stale.
+        With ``tested`` (change → patchset): every tested change must still be live at
+        the tested patchset, every pending change must be tested, and a change merged
+        after the build was queued must have been tested too. A change that was already
+        in the base when the build was queued may be left out. Without ``tested``, the
+        build must have been queued strictly after the last upload, new change or
+        abandon; a tie at the same instant is ambiguous and the build counts as stale.
         """
         pending = self.pending()
         if not pending:
@@ -180,7 +187,12 @@ class _TopicState:
                 return False
             if change.patchset != patchset:
                 return False
-        return all(number in build.tested for number in pending)
+        for number, change in self.changes.items():
+            if not change.exists or change.abandoned or number in build.tested:
+                continue
+            if not change.merged or change.merged_at > build.queued_at:
+                return False
+        return True
 
     def verdict(self) -> str | None:
         for build in reversed(self.finished):
@@ -197,7 +209,7 @@ class _BuildEvent:
 
 def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[int]) -> None:
     if isinstance(event, _BuildEvent):
-        if event.build.result in ("pass", "fail"):
+        if event.build.result in ("pass", "fail") and not state.retired(event.build):
             state.finished.append(event.build)
         return  # infra and canceled ask nothing of the author
     change = state.changes.setdefault(event.change, _ChangeState())
@@ -226,7 +238,11 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
             change.votes.pop(None, None)
             change.votes[event.reviewer] = event.value
     elif event.kind == "merged":
+        if not change.exists:
+            state.composition_at = event.at  # a change first seen through its merge
+        change.exists = True  # a merge proves the change existed
         change.merged = True
+        change.merged_at = event.at
     elif event.kind == "abandoned":
         change.abandoned = True
         state.composition_at = event.at
@@ -267,36 +283,41 @@ def _label(state: _TopicState, active: list[Build], t: int, had_gate: bool, reop
 
 
 def _critical_topic(topics: list[Topic], end: int) -> Topic:
-    """The topic that completed last, else the one with the latest activity.
+    """The topic that became complete last, else the one with the latest activity.
 
-    A topic is complete when every live change (seen and not abandoned) is merged by
-    ``end``. Only events at or before ``end`` count.
+    A topic is complete when every live change (seen and not abandoned) is merged.
+    It becomes complete at the event that makes it so: the last merge, or an
+    abandon that removes the last pending change. Only events up to ``end`` count.
     """
 
     def key(topic: Topic) -> tuple[bool, int]:
+        events = sorted(
+            ((e.at, e.kind, c.number) for c in topic.changes for e in c.events if e.at <= end),
+            key=lambda x: x[0],
+        )
         seen: set[int] = set()
         gone: set[int] = set()
-        merged: dict[int, int] = {}
-        times: list[int] = []
-        for change in topic.changes:
-            for event in change.events:
-                if event.at > end:
-                    continue
-                times.append(event.at)
-                if event.kind in ("patchset", "ready"):
-                    seen.add(change.number)
-                elif event.kind == "abandoned":
-                    gone.add(change.number)
-                elif event.kind == "merged":
-                    seen.add(change.number)
-                    merged[change.number] = event.at
+        merged: set[int] = set()
+        completed_at: int | None = None
+        for at, kind, number in events:
+            if kind == "abandoned":
+                gone.add(number)
+            else:
+                seen.add(number)
+                if kind == "merged":
+                    merged.add(number)
+            live = seen - gone
+            complete = bool(live) and live <= merged
+            if complete and completed_at is None:
+                completed_at = at
+            elif not complete:
+                completed_at = None
+        if completed_at is not None:
+            return (True, completed_at)
+        times = [at for at, _, _ in events]
         for b in topic.builds:
             times += [t for t in (b.queued_at, b.started_at, b.finished_at) if t is not None]
-        times = [t for t in times if t <= end]
-        live = seen - gone
-        if live and live <= merged.keys():
-            return (True, max(merged[n] for n in live))
-        return (False, max(times, default=0))
+        return (False, max((t for t in times if t <= end), default=0))
 
     return max(topics, key=key)
 
