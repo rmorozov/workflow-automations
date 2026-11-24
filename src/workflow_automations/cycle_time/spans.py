@@ -120,6 +120,10 @@ class _ChangeState:
     wip: bool = False
     # Code-Review votes by pseudonymous reviewer key; None is the change-level label.
     votes: dict[str | None, int] = field(default_factory=dict)
+    # Reviewers whose −2 the author has already answered (a new patchset or Ready).
+    # Gerrit keeps a −2 across patchsets, so it still blocks approval, but the ball is
+    # back with the reviewer: it is review time, not author time.
+    answered: set[str | None] = field(default_factory=set)
     merged: bool = False
     merged_at: int | None = None
     abandoned: bool = False
@@ -133,7 +137,15 @@ class _ChangeState:
 
     @property
     def rejected(self) -> bool:  # an outstanding negative vote
-        return any(v < 0 for v in self.votes.values())
+        return any(v < 0 and k not in self.answered for k, v in self.votes.items())
+
+    def answer(self, keep_positive: bool) -> None:
+        """The author answered: −2s stay (they block until withdrawn), the rest go."""
+        blocks = {k for k, v in self.votes.items() if v == -2}
+        self.votes = {k: v for k, v in self.votes.items() if v > 0 and keep_positive} | {
+            k: -2 for k in blocks
+        }
+        self.answered = blocks
 
 
 @dataclass
@@ -301,14 +313,14 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
         change.wip = event.wip
         change.patchset = event.patchset
         change.ci = {}  # CI labels are reset on every new patchset
-        change.votes = {k: v for k, v in change.votes.items() if v > 0} if event.keeps_votes else {}
+        change.answer(keep_positive=event.keeps_votes)  # a Code-Review −2 is kept
         state.composition_at = event.at
         if not event.wip:
             inferred.add(event.at)  # coding ended by a non-WIP upload, not Ready-for-review
     elif event.kind == "ready":
         change.wip = False
         # The author has answered: objections are back with the reviewers.
-        change.votes = {k: v for k, v in change.votes.items() if v >= 0}
+        change.answer(keep_positive=True)
         inferred.discard(event.at)
     elif event.kind == "wip":
         change.wip = True
@@ -321,9 +333,12 @@ def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[i
     elif event.kind == "vote":
         if event.reviewer is None:
             change.votes = {None: event.value}  # change-level effective label
+            change.answered = set()
         else:
             change.votes.pop(None, None)
             change.votes[event.reviewer] = event.value
+            change.answered.discard(event.reviewer)
+            change.answered.discard(None)
     elif event.kind == "merged":
         change.merged = True
         change.merged_at = event.at

@@ -740,3 +740,16 @@ def test_last_of_two_simultaneous_failures_stays_unanswered():
     ]
     (result,) = compute(_label_item(events))
     assert result.spans[-1].kind == "ci_failed"
+
+
+def test_ready_after_minus_two_hands_the_change_back_to_review():
+    events = [
+        _ps("09:10", 1, wip=True),
+        {"kind": "ready", "at": "2026-11-02T09:20Z"},
+        _vote("09:30", -2, reviewer="r1"),
+        {"kind": "ready", "at": "2026-11-02T09:40Z"},  # answered without an upload
+        _vote("09:50", 2, reviewer="r2"),  # the -2 still blocks approval
+    ]
+    (result,) = compute(_label_item(events))
+    assert [s.kind for s in result.spans][-2:] == ["rework", "review_wait"]
+    assert result.spans[-1].start == model.parse_time("2026-11-02T09:40Z", "")
