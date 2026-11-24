@@ -41,6 +41,7 @@ team-capacity = "workflow_automations.team_capacity:main"
 team-capacity-calibrate = "workflow_automations.team_capacity_calibrate:main"
 ado-triage = "workflow_automations.ado_triage:main"
 ado-graph = "workflow_automations.ado_graph:main"
+cycle-time = "workflow_automations.cycle_time:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

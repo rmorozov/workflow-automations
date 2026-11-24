@@ -75,6 +75,8 @@ jobs:
           python -m workflow_automations.ado_graph --help
           ado-triage --help
           python -m workflow_automations.ado_triage --help
+          cycle-time --help
+          python -m workflow_automations.cycle_time --help
 
   offline-analysis:
     # ado-graph analyze must install and run without the ADO SDK or Kerberos headers.

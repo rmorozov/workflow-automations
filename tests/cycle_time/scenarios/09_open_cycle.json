@@ -1,0 +1,72 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "Still in development at as_of: the cycle ends at as_of and is left out of percentiles.",
+  "as_of": "2026-11-02T18:00:00Z",
+  "work_items": [
+    {
+      "id": 109,
+      "type": "Task",
+      "team": "Tools",
+      "title": "In progress",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Proposed",
+          "at": "2026-11-02T08:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Active",
+          "at": "2026-11-02T10:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t109",
+      "name": "wi-109",
+      "wi_ids": [
+        109
+      ],
+      "changes": [
+        {
+          "number": 1091,
+          "repo": "tools/cli",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T11:00:00Z",
+              "patchset": 1,
+              "wip": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "109": {
+      "queue": [
+        "2026-11-02T08:00:00Z",
+        "2026-11-02T10:00:00Z"
+      ],
+      "flags": [
+        "open"
+      ],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T18:00:00Z"
+        ]
+      ]
+    }
+  }
+}

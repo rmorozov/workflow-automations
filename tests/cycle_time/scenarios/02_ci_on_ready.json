@@ -1,0 +1,132 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "CI starts at Ready-for-review and runs while review waits: a running build wins the label.",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 102,
+      "type": "Task",
+      "team": "Platform",
+      "title": "CI in parallel with review",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Proposed",
+          "at": "2026-11-02T07:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Resolved",
+          "at": "2026-11-02T12:00:00Z"
+        },
+        {
+          "rev": 4,
+          "state": "Closed",
+          "at": "2026-11-02T16:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t102",
+      "name": "wi-102",
+      "wi_ids": [
+        102
+      ],
+      "changes": [
+        {
+          "number": 1021,
+          "repo": "platform/core",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T10:00:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T12:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T14:00:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T15:00:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 10201,
+          "queued_at": "2026-11-02T12:00:00Z",
+          "started_at": "2026-11-02T12:15:00Z",
+          "finished_at": "2026-11-02T13:15:00Z",
+          "result": "pass"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "102": {
+      "queue": [
+        "2026-11-02T07:00:00Z",
+        "2026-11-02T09:00:00Z"
+      ],
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T12:00:00Z"
+        ],
+        [
+          "ci_queue",
+          1,
+          "2026-11-02T12:00:00Z",
+          "2026-11-02T12:15:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T12:15:00Z",
+          "2026-11-02T13:15:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T13:15:00Z",
+          "2026-11-02T14:00:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T14:00:00Z",
+          "2026-11-02T15:00:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T15:00:00Z",
+          "2026-11-02T16:00:00Z"
+        ]
+      ]
+    }
+  }
+}

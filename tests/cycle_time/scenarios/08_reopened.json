@@ -1,0 +1,208 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "Closed, reopened next morning, fixed with a second change in the same topic uploaded without WIP while ADO is still Active.",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 108,
+      "type": "Task",
+      "team": "Tools",
+      "title": "Reopened",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Closed",
+          "at": "2026-11-02T11:00:00Z"
+        },
+        {
+          "rev": 4,
+          "state": "Active",
+          "at": "2026-11-03T09:00:00Z"
+        },
+        {
+          "rev": 5,
+          "state": "Resolved",
+          "at": "2026-11-03T10:00:00Z"
+        },
+        {
+          "rev": 6,
+          "state": "Closed",
+          "at": "2026-11-03T11:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t108",
+      "name": "wi-108",
+      "wi_ids": [
+        108
+      ],
+      "changes": [
+        {
+          "number": 1081,
+          "repo": "tools/cli",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:20:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T10:55:00Z"
+            }
+          ]
+        },
+        {
+          "number": 1082,
+          "repo": "tools/cli",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-03T09:50:00Z",
+              "patchset": 1,
+              "wip": false
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-03T10:10:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-03T10:50:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 10801,
+          "queued_at": "2026-11-02T10:20:00Z",
+          "started_at": "2026-11-02T10:20:00Z",
+          "finished_at": "2026-11-02T10:50:00Z",
+          "result": "pass"
+        },
+        {
+          "id": 10802,
+          "queued_at": "2026-11-03T10:10:00Z",
+          "started_at": "2026-11-03T10:15:00Z",
+          "finished_at": "2026-11-03T10:45:00Z",
+          "result": "pass"
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "108": {
+      "queue": null,
+      "flags": [
+        "reopened"
+      ],
+      "metrics": {
+        "ado_mismatch_s": 600,
+        "rounds": 2
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:20:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:20:00Z",
+          "2026-11-02T10:50:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T10:50:00Z",
+          "2026-11-02T10:55:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T10:55:00Z",
+          "2026-11-02T11:00:00Z"
+        ],
+        [
+          "closed_interim",
+          1,
+          "2026-11-02T11:00:00Z",
+          "2026-11-03T09:00:00Z"
+        ],
+        [
+          "rework",
+          2,
+          "2026-11-03T09:00:00Z",
+          "2026-11-03T09:50:00Z",
+          [
+            "inferred_patchset"
+          ]
+        ],
+        [
+          "review_wait",
+          2,
+          "2026-11-03T09:50:00Z",
+          "2026-11-03T10:10:00Z"
+        ],
+        [
+          "ci_queue",
+          2,
+          "2026-11-03T10:10:00Z",
+          "2026-11-03T10:15:00Z"
+        ],
+        [
+          "ci_run",
+          2,
+          "2026-11-03T10:15:00Z",
+          "2026-11-03T10:45:00Z"
+        ],
+        [
+          "submit_wait",
+          2,
+          "2026-11-03T10:45:00Z",
+          "2026-11-03T10:50:00Z"
+        ],
+        [
+          "close_lag",
+          2,
+          "2026-11-03T10:50:00Z",
+          "2026-11-03T11:00:00Z"
+        ]
+      ]
+    }
+  }
+}
