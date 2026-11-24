@@ -51,7 +51,7 @@ One UTF-8 JSON object, the shape the normalized layer will have once ingest exis
 | `work_items` | `id`, `type`, `team`, `title`, `states`: `{rev, state, at}` |
 | `topics` | `id` (stable synthetic ID), `name` (the topic string), `wi_ids`, `changes`, `builds` |
 | `changes[]` | `number`, `repo`, `events`: `{at, kind, ...}` |
-| `builds[]` | `id`, `queued_at`, `started_at`, `finished_at`, `result` (`pass`, `fail`, `infra`, `canceled`) |
+| `builds[]` | `id`, `queued_at`, `started_at`, `finished_at`, `result` (`pass`, `fail`, `infra`, `canceled`), optional `tested`: change number → patchset number |
 
 Change event kinds: `patchset` (`patchset`, `wip`, optional `keeps_votes`), `ready`
 (Ready-for-review), `wip` (set back to WIP), `vote` (Code-Review `value` −2..2),
@@ -61,7 +61,8 @@ Times are ISO 8601 with an explicit zone; a time without a zone is refused. Stat
 ordered by `rev`, never by timestamp, so two changes in one second stay in order.
 Other keys (`description`, `expected`) are ignored, so scenario files are valid input.
 Several files can be passed at once; work item and topic IDs must not repeat across
-them, and `as_of` is the latest one.
+them. Each work item keeps its own file's `as_of` as its observation cutoff, so adding
+a later snapshot never extends an open item's last span or changes its rank.
 
 The input holds **no person names or accounts**. Ingest will pseudonymize people
 before this layer, and spans, traces and reports are team-level only.
@@ -78,11 +79,13 @@ Labels, first match wins:
 
 1. ADO is Closed (before the final close): `closed_interim`. ADO is Proposed:
    `parked`.
-2. Every live change is merged: `close_lag`, unless ADO is Active again (a reopen),
-   which is author time.
-3. No change yet, a change in WIP, or the author's turn after a negative vote or a
-   failed build: `coding` in round 1, `rework` afterwards.
-4. A build of the topic is running: `ci_run`. One is queued: `ci_queue`.
+2. Every live change is merged: `close_lag`. Only a reopen (ADO Active again after a
+   Closed) makes it author time; an item that stays Active through the merge is
+   still `close_lag`.
+3. No change yet, a pending change in WIP, a pending change with an outstanding
+   negative vote, or a failed build of the current revision: `coding` in round 1,
+   `rework` afterwards.
+4. A build of the current revision is running: `ci_run`. One is queued: `ci_queue`.
 5. A change lacks +2: `review_wait`.
 6. Approved, and the last build since the latest patchset passed: `submit_wait`.
 7. Otherwise (approved, no build queued yet): `unattributed`. This is where the
@@ -90,6 +93,12 @@ Labels, first match wins:
 
 Details:
 
+- A build counts only for the revision it tested. With `tested`, every pending
+  change must be at the tested patchset; without it, the build must have been queued
+  after the latest upload. A pass or failure of an older revision is ignored, and so
+  is its running time.
+- A negative vote belongs to its change. It stays outstanding until that change gets
+  a new patchset, a Ready-for-review or a +2; uploads to other changes don't clear it.
 - A new patchset drops the change's +2 unless the event says `keeps_votes`, and
   forgets the last build result.
 - An `infra` or `canceled` build asks nothing of the author; a `fail` does.
@@ -101,7 +110,8 @@ Details:
   author span before it `inferred_patchset`: its end is the upload, not a declared
   boundary.
 - Several topics per work item: the **critical topic**, the one merged last (else
-  the one with the latest activity), sets the spans. The others are shown on their
+  the one with the latest activity), sets the spans. Only events up to the cycle end
+  count, so a build that finishes after the close can't displace a merged topic. The others are shown on their
   own lanes. The work item is flagged `multi_topic`; a topic linked to several work
   items flags them `shared_topic`.
 - A work item with no topic is split by ADO alone: Active is `coding` / `rework`,
@@ -120,8 +130,10 @@ Work-item flags: `open`, `reopened`, `not_started`, `ado_only`, `multi_topic`,
   that [ui.perfetto.dev](https://ui.perfetto.dev) opens directly (the UI runs in the
   browser and does not upload the file). Each team is a process. Each work item has a
   span lane (cycle, round and span nested at depths 0, 1, 2), an ADO lane, a Gerrit
-  lane of instants and one CI lane per linked topic. Every span keeps its UTC times
-  and flags in args. `aligned` shifts each work item to start at 0, sorts the longest
+  lane of instants and CI lanes per linked topic. Builds whose lifetimes overlap go
+  on separate CI lanes (`#2`, `#3`), so slices never cross. A build still queued or
+  running at the cutoff is drawn up to the cutoff with `ongoing: true`. Every span
+  keeps its UTC times and flags in args. `aligned` shifts each work item to start at 0, sorts the longest
   first and drops `queue` and anything before the cycle.
 - `cycle-time report INPUT... [-o FILE] [--csv]`: p50 and p95 hours per team and
   kind, plus `cycle`. Percentiles interpolate linearly between ranks (the pandas
@@ -164,6 +176,11 @@ rules:
 | `08_reopened` | `closed_interim`, rework after reopen |
 | `09_open_cycle` | `open`, left out of percentiles |
 | `10_resolved_early` | `ado_mismatch_s`, activity before Active |
+| `11_stale_build_verdict` | a pass of the previous patchset doesn't approve the new one |
+| `12_rejection_on_other_change` | −1 on A is not cleared by an upload on B |
+| `13_active_through_merge` | no reopen, so post-merge time is `close_lag` |
+| `14_ado_only_reopen` | Active → Closed → Active starts round 2 |
+| `15_overlapping_and_running_builds` | overlapping and unfinished builds in the trace |
 
 `cycle-time trace tests/cycle_time/scenarios/*.json -o demo.json` builds a trace of
 all of them.

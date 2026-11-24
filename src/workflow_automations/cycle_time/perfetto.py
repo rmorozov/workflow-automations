@@ -12,7 +12,7 @@ import json
 from collections.abc import Iterator
 from typing import Any
 
-from workflow_automations.cycle_time.model import format_time
+from workflow_automations.cycle_time.model import Build, format_time
 from workflow_automations.cycle_time.spans import Result
 
 MODES = ("calendar", "aligned")
@@ -85,6 +85,40 @@ class _Writer:
         )
 
 
+def _end(build: Build, cutoff: int) -> int:
+    """Display end of a build: its finish, or the observation cutoff while unfinished."""
+    return build.finished_at if build.finished_at is not None else max(cutoff, build.queued_at)
+
+
+def _pack(builds: tuple[Build, ...], cutoff: int) -> list[list[Build]]:
+    """Builds whose lifetimes overlap go on separate lanes, so slices never cross."""
+    lanes: list[list[Build]] = []
+    for build in sorted(builds, key=lambda b: (b.queued_at, b.id)):
+        for lane in lanes:
+            if _end(lane[-1], cutoff) <= build.queued_at:
+                lane.append(build)
+                break
+        else:
+            lanes.append([build])
+    return lanes
+
+
+def _build_slices(writer: _Writer, pid: int, tid: int, build: Build, cutoff: int, shift: int):
+    start = build.started_at
+    if start is None:
+        start = build.finished_at  # finished without starting (canceled while queued)
+    queue_end = start if start is not None else _end(build, cutoff)
+    if queue_end > build.queued_at:
+        args = {"build": build.id, "ongoing": start is None}
+        writer.slice(pid, tid, "queued", build.queued_at + shift, queue_end + shift, args, "ci")
+    if build.started_at is not None:
+        end = _end(build, cutoff)
+        ongoing = build.finished_at is None
+        name = f"build {build.id} " + ("running" if ongoing else str(build.result))
+        args = {"build": build.id, "result": build.result, "ongoing": ongoing}
+        writer.slice(pid, tid, name, build.started_at + shift, end + shift, args, "ci")
+
+
 def _rounds(result: Result) -> Iterator[tuple[int, int, int]]:
     current = None
     for span in result.spans:
@@ -116,7 +150,7 @@ def export(results: list[Result], mode: str = "calendar") -> dict[str, Any]:
             return lo is None or t + shift >= lo
 
         pid = writer.pid(item.team)
-        base = order * 10
+        base = order * 100
         tid = writer.lane(pid, f"WI {item.id} {item.type}", base)
         args = {"wi_id": item.id, "flags": sorted(result.flags), **result.metrics}
         if result.critical_topic:
@@ -173,34 +207,15 @@ def export(results: list[Result], mode: str = "calendar") -> dict[str, Any]:
                         if keep(event.at):
                             name = _gerrit_name(event.kind, event)
                             writer.instant(pid, gerrit, name, event.at + shift, {"topic": topic.id})
-            for k, topic in enumerate(result.topics):
-                ci = writer.lane(pid, f"WI {item.id} · CI {topic.name}", base + 3 + k)
-                for build in topic.builds:
-                    start = build.started_at if build.started_at is not None else build.finished_at
-                    if start is not None and start > build.queued_at and keep(build.queued_at):
-                        writer.slice(
-                            pid,
-                            ci,
-                            "queued",
-                            build.queued_at + shift,
-                            start + shift,
-                            {"build": build.id},
-                            "ci",
-                        )
-                    if (
-                        build.started_at is not None
-                        and build.finished_at is not None
-                        and keep(build.started_at)
-                    ):
-                        writer.slice(
-                            pid,
-                            ci,
-                            f"build {build.id} {build.result}",
-                            build.started_at + shift,
-                            build.finished_at + shift,
-                            {"build": build.id, "result": build.result},
-                            "ci",
-                        )
+            sort = base + 3
+            for topic in result.topics:
+                for lane_no, lane in enumerate(_pack(topic.builds, result.cutoff), start=1):
+                    suffix = f" #{lane_no}" if lane_no > 1 else ""
+                    ci = writer.lane(pid, f"WI {item.id} · CI {topic.name}{suffix}", sort)
+                    sort += 1
+                    for build in lane:
+                        if keep(build.queued_at):
+                            _build_slices(writer, pid, ci, build, result.cutoff, shift)
     return {"traceEvents": writer.events, "displayTimeUnit": "ms", "otherData": {"mode": mode}}
 
 

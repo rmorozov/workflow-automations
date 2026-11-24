@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 from workflow_automations.cycle_time import model, perfetto, report
@@ -39,14 +41,31 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _write(text: str, path: Path | None, overwrite: bool) -> None:
+    """Write through a uniquely named sibling temporary file.
+
+    Without ``overwrite`` the file is published with a hard link, which fails if the
+    target appeared meanwhile, so an existing file is never replaced. Nothing else in
+    the directory is touched.
+    """
     if path is None:
         sys.stdout.write(text)
         return
     if path.exists() and not overwrite:
         raise FileExistsError(f"{path} exists; pass --overwrite to replace it")
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(path)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        if overwrite:
+            os.replace(tmp, path)
+        else:
+            try:
+                os.link(tmp, path)
+            except FileExistsError as exc:
+                raise FileExistsError(f"{path} exists; pass --overwrite to replace it") from exc
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -63,11 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             rows = report.summary(results)
             if args.csv:
-                header = "team,kind,work_items,p50_h,p95_h\n"
-                text = header + "".join(
-                    f"{r['team']},{r['kind']},{r['work_items']},{r['p50_h']},{r['p95_h']}\n"
-                    for r in rows
-                )
+                text = report.summary_csv(rows)
             else:
                 text = report.summary_markdown(rows)
         _write(text, args.output, args.overwrite)

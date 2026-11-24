@@ -1,0 +1,117 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "Open cycle: an infra build overlaps a retry that is still running at as_of, and a third build is only queued. The trace puts overlapping builds on separate CI lanes and draws unfinished ones up to as_of (review on PR #56).",
+  "as_of": "2026-11-02T13:00:00Z",
+  "work_items": [
+    {
+      "id": 115,
+      "type": "Task",
+      "team": "Tools",
+      "title": "CI in flight",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t115",
+      "name": "wi-115",
+      "wi_ids": [
+        115
+      ],
+      "changes": [
+        {
+          "number": 1151,
+          "repo": "tools/cli",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 11501,
+          "queued_at": "2026-11-02T10:30:00Z",
+          "started_at": "2026-11-02T10:30:00Z",
+          "finished_at": "2026-11-02T12:00:00Z",
+          "result": "infra",
+          "tested": {
+            "1151": 1
+          }
+        },
+        {
+          "id": 11502,
+          "queued_at": "2026-11-02T11:30:00Z",
+          "started_at": "2026-11-02T11:30:00Z",
+          "finished_at": null,
+          "result": null,
+          "tested": {
+            "1151": 1
+          }
+        },
+        {
+          "id": 11503,
+          "queued_at": "2026-11-02T12:30:00Z",
+          "started_at": null,
+          "finished_at": null,
+          "result": null,
+          "tested": {
+            "1151": 1
+          }
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "115": {
+      "queue": null,
+      "flags": [
+        "open"
+      ],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:30:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:30:00Z",
+          "2026-11-02T13:00:00Z"
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "ADO stays Active until Closed: the time after the merge is close_lag, not a second round (review on PR #56).",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 113,
+      "type": "Task",
+      "team": "Tools",
+      "title": "Never Resolved",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Closed",
+          "at": "2026-11-02T13:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t113",
+      "name": "wi-113",
+      "wi_ids": [
+        113
+      ],
+      "changes": [
+        {
+          "number": 1131,
+          "repo": "tools/cli",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:30:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T11:00:00Z",
+              "value": 2
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T12:30:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 11301,
+          "queued_at": "2026-11-02T11:00:00Z",
+          "started_at": "2026-11-02T11:00:00Z",
+          "finished_at": "2026-11-02T12:00:00Z",
+          "result": "pass",
+          "tested": {
+            "1131": 1
+          }
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "113": {
+      "queue": null,
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 9000,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T11:00:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T11:00:00Z",
+          "2026-11-02T12:00:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T12:00:00Z",
+          "2026-11-02T12:30:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T12:30:00Z",
+          "2026-11-02T13:00:00Z"
+        ]
+      ]
+    }
+  }
+}

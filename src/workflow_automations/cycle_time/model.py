@@ -68,6 +68,8 @@ class Build:
     started_at: int | None
     finished_at: int | None
     result: str | None
+    # change number -> patchset number the build tested; None when the source lacks it
+    tested: dict[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,11 @@ class Input:
     work_items: dict[int, WorkItem]
     topics: dict[str, Topic]
     warnings: list[str] = field(default_factory=list)
+    # Observation cutoff per work item: the as_of of the file it came from.
+    cutoffs: dict[int, int] = field(default_factory=dict)
+
+    def cutoff(self, wi_id: int) -> int:
+        return self.cutoffs.get(wi_id, self.as_of)
 
     def topics_of(self, wi_id: int) -> list[Topic]:
         return [t for t in self.topics.values() if wi_id in t.wi_ids]
@@ -164,7 +171,9 @@ def _change(raw: Any, where: str) -> Change:
                 at=parse_time(event.get("at"), f"{at}.at"),
                 kind=kind,
                 change=number,
-                patchset=event.get("patchset"),
+                patchset=None
+                if event.get("patchset") is None
+                else _int(event["patchset"], f"{at}.patchset"),
                 wip=bool(event.get("wip", False)),
                 value=value,
                 keeps_votes=bool(event.get("keeps_votes", False)),
@@ -172,6 +181,19 @@ def _change(raw: Any, where: str) -> Change:
         )
     events.sort(key=lambda e: e.at)  # stable: same-second events keep file order
     return Change(number, str(raw.get("repo", "")), tuple(events))
+
+
+def _tested(raw: Any, where: str) -> dict[int, int] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or not raw:
+        raise InputError(f"{where}: must map change numbers to patchset numbers")
+    tested = {}
+    for key, value in raw.items():
+        if not str(key).isdecimal():
+            raise InputError(f"{where}: {key!r} is not a change number")
+        tested[int(key)] = _int(value, f"{where}.{key}")
+    return tested
 
 
 def _build(raw: Any, where: str, topic: str) -> Build:
@@ -185,6 +207,7 @@ def _build(raw: Any, where: str, topic: str) -> Build:
         started_at=_opt_time(raw, "started_at", where),
         finished_at=_opt_time(raw, "finished_at", where),
         result=result,
+        tested=_tested(raw.get("tested"), f"{where}.tested"),
     )
     times = [t for t in (build.queued_at, build.started_at, build.finished_at) if t is not None]
     if times != sorted(times):
@@ -230,17 +253,22 @@ def load(data: dict) -> Input:
             for j, b in enumerate(raw.get("builds") or [])
         )
         topics[topic_id] = Topic(topic_id, str(raw.get("name", topic_id)), wi_ids, changes, builds)
-    return Input(as_of, work_items, topics, warnings)
+    return Input(as_of, work_items, topics, warnings, {wi_id: as_of for wi_id in work_items})
 
 
 def merge(inputs: list[Input]) -> Input:
-    """Combine several input files; IDs must not collide. as_of is the latest one."""
+    """Combine several input files; IDs must not collide.
+
+    Each work item keeps the cutoff of its own file, so adding a later snapshot never
+    extends an open item's last span. ``as_of`` is the latest cutoff.
+    """
     merged = Input(max(i.as_of for i in inputs), {}, {})
     for part in inputs:
         for wi_id, item in part.work_items.items():
             if wi_id in merged.work_items:
                 raise InputError(f"work item {wi_id} appears in more than one input")
             merged.work_items[wi_id] = item
+            merged.cutoffs[wi_id] = part.cutoff(wi_id)
         for topic_id, topic in part.topics.items():
             if topic_id in merged.topics:
                 raise InputError(f"topic {topic_id!r} appears in more than one input")
