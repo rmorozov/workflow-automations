@@ -101,3 +101,14 @@ def summary_markdown(rows: list[dict]) -> str:
         cells = [row["team"], row["kind"], row["work_items"], row["p50_h"], row["p95_h"]]
         lines.append("| " + " | ".join(str(c) for c in cells) + " |")
     return "\n".join(lines) + "\n"
+
+
+SUMMARY_COLUMNS = ["team", "kind", "work_items", "p50_h", "p95_h"]
+
+
+def summary_csv(rows: list[dict]) -> str:
+    out = io.StringIO()
+    writer = csv.DictWriter(out, SUMMARY_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(rows)
+    return out.getvalue()

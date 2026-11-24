@@ -1,0 +1,69 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "Active, Closed, Active, Closed with no Gerrit topic and no Resolved: the second Active window is rework in round 2 (review on PR #56).",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 114,
+      "type": "Bug",
+      "team": "Tools",
+      "title": "Reopened without review",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Closed",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Active",
+          "at": "2026-11-03T09:00:00Z"
+        },
+        {
+          "rev": 4,
+          "state": "Closed",
+          "at": "2026-11-03T10:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [],
+  "expected": {
+    "114": {
+      "queue": null,
+      "flags": [
+        "ado_only",
+        "reopened"
+      ],
+      "metrics": {
+        "rounds": 2
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "closed_interim",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-03T09:00:00Z"
+        ],
+        [
+          "rework",
+          2,
+          "2026-11-03T09:00:00Z",
+          "2026-11-03T10:00:00Z"
+        ]
+      ]
+    }
+  }
+}

@@ -44,6 +44,7 @@ class Result:
     metrics: dict[str, int] = field(default_factory=dict)
     critical_topic: str | None = None
     topics: list[Topic] = field(default_factory=list)
+    cutoff: int = 0  # observation cutoff of the item's input file
 
     @property
     def cycle_time(self) -> int | None:
@@ -99,109 +100,141 @@ class _ChangeState:
     exists: bool = False
     wip: bool = False
     approved: bool = False
+    rejected: bool = False  # an outstanding negative vote on this change
     merged: bool = False
     abandoned: bool = False
+    patchset: int | None = None
+    patchset_at: int | None = None
 
 
 @dataclass
 class _TopicState:
     changes: dict[int, _ChangeState] = field(default_factory=dict)
-    author_turn: bool = False
-    ci_result: str | None = None
+    ci_result: str | None = None  # verdict of the last build of the current revision
 
     def live(self) -> list[_ChangeState]:
         return [c for c in self.changes.values() if c.exists and not c.abandoned]
+
+    def pending(self) -> dict[int, _ChangeState]:
+        return {
+            n: c for n, c in self.changes.items() if c.exists and not c.abandoned and not c.merged
+        }
+
+    def tests_current(self, build: Build) -> bool:
+        """Whether the build tested the topic's current revision.
+
+        With ``tested`` (change → patchset), every pending change must be at the tested
+        patchset. Without it, the build must have been queued after the latest upload.
+        """
+        pending = self.pending()
+        if build.tested is not None:
+            return bool(pending) and all(
+                n in build.tested and c.patchset == build.tested[n] for n, c in pending.items()
+            )
+        uploads = [c.patchset_at for c in pending.values() if c.patchset_at is not None]
+        return bool(pending) and build.queued_at >= max(uploads, default=build.queued_at)
 
 
 @dataclass(frozen=True)
 class _BuildEvent:
     at: int
     build: Build
-    kind: str  # finished; queued and started only matter as intervals
 
 
 def _apply(state: _TopicState, event: ChangeEvent | _BuildEvent, inferred: set[int]) -> None:
     if isinstance(event, _BuildEvent):
-        if event.build.result == "fail":
-            state.ci_result = "fail"
-            state.author_turn = True
-        elif event.build.result == "pass":
-            state.ci_result = "pass"
-        return  # infra and canceled ask nothing of the author
+        if event.build.result in ("pass", "fail") and state.tests_current(event.build):
+            state.ci_result = event.build.result
+        return  # infra and canceled ask nothing of the author; stale verdicts are ignored
     change = state.changes.setdefault(event.change, _ChangeState())
     if event.kind == "patchset":
         change.exists = True
         change.wip = event.wip
+        change.patchset = event.patchset
+        change.patchset_at = event.at
+        change.rejected = False
         if not event.keeps_votes:
             change.approved = False
         state.ci_result = None
-        state.author_turn = False
         if not event.wip:
             inferred.add(event.at)  # coding ended by a non-WIP upload, not Ready-for-review
     elif event.kind == "ready":
         change.exists = True
         change.wip = False
-        state.author_turn = False
+        change.rejected = False
         inferred.discard(event.at)
     elif event.kind == "wip":
         change.wip = True
     elif event.kind == "vote":
         if event.value == 2:
             change.approved = True
+            change.rejected = False
         elif event.value is not None and event.value < 0:
             change.approved = False
-            state.author_turn = True
+            change.rejected = True
     elif event.kind == "merged":
         change.merged = True
     elif event.kind == "abandoned":
         change.abandoned = True
 
 
-def _build_phase(builds: tuple[Build, ...], t: int) -> str | None:
-    for build in builds:
+def _build_phase(state: _TopicState, builds: tuple[Build, ...], t: int) -> str | None:
+    current = [b for b in builds if state.tests_current(b)]
+    for build in current:
         if (
             build.started_at is not None
             and build.started_at <= t
             and (build.finished_at is None or t < build.finished_at)
         ):
             return "ci_run"
-    for build in builds:
+    for build in current:
         start = build.started_at if build.started_at is not None else build.finished_at
         if build.queued_at <= t and (start is None or t < start):
             return "ci_queue"
     return None
 
 
-def _label(state: _TopicState, builds: tuple[Build, ...], t: int, had_gate: bool, ado: str) -> str:
+def _label(
+    state: _TopicState, builds: tuple[Build, ...], t: int, had_gate: bool, reopened: bool
+) -> str:
+    author = "rework" if had_gate else "coding"
     live = state.live()
-    if live and all(c.merged for c in live):
-        if ado == "Active":  # reopened after merge: new code is being written
-            return "rework" if had_gate else "coding"
-        return "close_lag"
-    pending = [c for c in live if not c.merged]
-    if not pending or state.author_turn or any(c.wip for c in pending):
-        return "rework" if had_gate else "coding"
-    phase = _build_phase(builds, t)
+    pending = list(state.pending().values())
+    if live and not pending:
+        # Everything is merged. Only a reopen (Active again after a Closed) is new
+        # author work; otherwise the item waits for its bookkeeping close.
+        return author if reopened else "close_lag"
+    if not pending or state.ci_result == "fail":
+        return author
+    if any(c.wip or c.rejected for c in pending):
+        return author
+    phase = _build_phase(state, builds, t)
     if phase:
         return phase
-    approved = all(c.approved for c in pending)
-    if not approved:
+    if not all(c.approved for c in pending):
         return "review_wait"
     if state.ci_result == "pass":
         return "submit_wait"
-    return "unattributed"  # approved, but no build queued or passed yet
+    return "unattributed"  # approved, but no build of this revision queued or passed yet
 
 
 def _critical_topic(topics: list[Topic], end: int) -> Topic:
     def last_activity(topic: Topic) -> int:
         times = [e.at for c in topic.changes for e in c.events if e.at <= end]
-        times += [b.finished_at or b.queued_at for b in topic.builds if b.queued_at <= end]
+        for b in topic.builds:
+            times += [t for t in (b.queued_at, b.started_at, b.finished_at) if t is not None]
+        times = [t for t in times if t <= end]
         merges = [
             e.at for c in topic.changes for e in c.events if e.kind == "merged" and e.at <= end
         ]
         return max(merges) if merges else max(times, default=0)
 
-    return max(topics, key=last_activity)
+    # A topic that merged outranks one that only has activity, then the later one wins.
+    def key(topic: Topic) -> tuple[bool, int]:
+        merged = any(e.kind == "merged" and e.at <= end for c in topic.changes for e in c.events)
+        return (merged, last_activity(topic))
+
+    return max(topics, key=key)
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +255,19 @@ def _merge_intervals(labels: list[tuple[int, int, str, int, tuple[str, ...]]]) -
         else:
             spans.append(Span(kind, rnd, start, end, flags))
     return spans
+
+
+def _reopened_at(item: WorkItem, t: int) -> bool:
+    """ADO is Active at ``t`` and a Closed entry came before it: the item was reopened."""
+    seen_closed = False
+    state = None
+    for entry in item.states:
+        if entry.at > t:
+            break
+        if entry.state == "Closed":
+            seen_closed = True
+        state = entry.state
+    return state == "Active" and seen_closed
 
 
 def _ado_override(item: WorkItem, t: int) -> str | None:
@@ -245,8 +291,9 @@ def _ado_only(item: WorkItem, result: Result) -> list[Span]:
             if state == "Resolved":
                 kind, had_gate = "gate", True
             else:
-                if had_gate and labels and labels[-1][2] in ("gate", "closed_interim"):
+                if labels and labels[-1][2] in ("gate", "closed_interim"):
                     rnd += 1
+                    had_gate = True
                 kind = "rework" if had_gate else "coding"
         labels.append((a, b, kind, rnd, ()))
     return _merge_intervals(labels)
@@ -255,9 +302,7 @@ def _ado_only(item: WorkItem, result: Result) -> list[Span]:
 def _with_topic(item: WorkItem, topic: Topic, result: Result) -> list[Span]:
     start, end = result.cycle_start, result.cycle_end
     events: list[ChangeEvent | _BuildEvent] = [e for c in topic.changes for e in c.events]
-    events += [
-        _BuildEvent(b.finished_at, b, "finished") for b in topic.builds if b.finished_at is not None
-    ]
+    events += [_BuildEvent(b.finished_at, b) for b in topic.builds if b.finished_at is not None]
     events.sort(key=lambda e: e.at)
     cuts = {start, end} | {s.at for s in item.states if start < s.at < end}
     cuts |= {e.at for e in events if start < e.at < end}
@@ -282,17 +327,19 @@ def _with_topic(item: WorkItem, topic: Topic, result: Result) -> list[Span]:
         flags: tuple[str, ...] = ()
         if kind is None:
             ado = _ado_state_at(item, a)
-            kind = _label(state, topic.builds, a, had_gate, ado)
+            kind = _label(state, topic.builds, a, had_gate, _reopened_at(item, a))
             if kind in AUTHOR_KINDS and prev_kind in ROUND_BREAKERS:
                 rnd += 1
             if kind in GATE_KINDS:
                 had_gate = True
-                if a in inferred:
+                if a in inferred and prev_kind in AUTHOR_KINDS:
                     flags = ("inferred_patchset",)
             if (kind in AUTHOR_KINDS and ado == "Resolved") or (
                 kind in GATE_KINDS and ado == "Active"
             ):
                 mismatch += b - a
+        if kind in ("close_lag", "closed_interim"):
+            had_gate = True  # author time after a close is rework
         labels.append((a, b, kind, rnd, flags))
         prev_kind = kind
     result.metrics["ado_mismatch_s"] = mismatch
@@ -314,8 +361,8 @@ def _with_topic(item: WorkItem, topic: Topic, result: Result) -> list[Span]:
 
 
 def compute_item(item: WorkItem, data: Input) -> Result:
-    result = Result(item)
-    if not _bounds(item, data.as_of, result):
+    result = Result(item, cutoff=data.cutoff(item.id))
+    if not _bounds(item, data.cutoff(item.id), result):
         return result
     result.topics = data.topics_of(item.id)
     if not result.topics:

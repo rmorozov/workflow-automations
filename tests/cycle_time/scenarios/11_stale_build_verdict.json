@@ -1,0 +1,161 @@
+{
+  "schema": "workflow-automations/cycle-time-input",
+  "version": 1,
+  "description": "A rebase that keeps the +2 lands while the previous build runs. That build's pass is for the old patchset, so the new one waits for its own build (review on PR #56).",
+  "as_of": "2026-11-06T00:00:00Z",
+  "work_items": [
+    {
+      "id": 111,
+      "type": "Task",
+      "team": "Platform",
+      "title": "Stale verdict",
+      "states": [
+        {
+          "rev": 1,
+          "state": "Active",
+          "at": "2026-11-02T09:00:00Z"
+        },
+        {
+          "rev": 2,
+          "state": "Resolved",
+          "at": "2026-11-02T10:00:00Z"
+        },
+        {
+          "rev": 3,
+          "state": "Closed",
+          "at": "2026-11-02T14:00:00Z"
+        }
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "id": "t111",
+      "name": "wi-111",
+      "wi_ids": [
+        111
+      ],
+      "changes": [
+        {
+          "number": 1111,
+          "repo": "platform/core",
+          "events": [
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T09:10:00Z",
+              "patchset": 1,
+              "wip": true
+            },
+            {
+              "kind": "ready",
+              "at": "2026-11-02T10:00:00Z"
+            },
+            {
+              "kind": "vote",
+              "at": "2026-11-02T10:05:00Z",
+              "value": 2
+            },
+            {
+              "kind": "patchset",
+              "at": "2026-11-02T11:00:00Z",
+              "patchset": 2,
+              "keeps_votes": true
+            },
+            {
+              "kind": "merged",
+              "at": "2026-11-02T13:30:00Z"
+            }
+          ]
+        }
+      ],
+      "builds": [
+        {
+          "id": 11101,
+          "queued_at": "2026-11-02T10:05:00Z",
+          "started_at": "2026-11-02T10:10:00Z",
+          "finished_at": "2026-11-02T12:00:00Z",
+          "result": "pass",
+          "tested": {
+            "1111": 1
+          }
+        },
+        {
+          "id": 11102,
+          "queued_at": "2026-11-02T12:10:00Z",
+          "started_at": "2026-11-02T12:20:00Z",
+          "finished_at": "2026-11-02T13:00:00Z",
+          "result": "pass",
+          "tested": {
+            "1111": 2
+          }
+        }
+      ]
+    }
+  ],
+  "expected": {
+    "111": {
+      "queue": null,
+      "flags": [],
+      "metrics": {
+        "ado_mismatch_s": 0,
+        "rounds": 1
+      },
+      "spans": [
+        [
+          "coding",
+          1,
+          "2026-11-02T09:00:00Z",
+          "2026-11-02T10:00:00Z"
+        ],
+        [
+          "review_wait",
+          1,
+          "2026-11-02T10:00:00Z",
+          "2026-11-02T10:05:00Z"
+        ],
+        [
+          "ci_queue",
+          1,
+          "2026-11-02T10:05:00Z",
+          "2026-11-02T10:10:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T10:10:00Z",
+          "2026-11-02T11:00:00Z"
+        ],
+        [
+          "unattributed",
+          1,
+          "2026-11-02T11:00:00Z",
+          "2026-11-02T12:10:00Z"
+        ],
+        [
+          "ci_queue",
+          1,
+          "2026-11-02T12:10:00Z",
+          "2026-11-02T12:20:00Z"
+        ],
+        [
+          "ci_run",
+          1,
+          "2026-11-02T12:20:00Z",
+          "2026-11-02T13:00:00Z"
+        ],
+        [
+          "submit_wait",
+          1,
+          "2026-11-02T13:00:00Z",
+          "2026-11-02T13:30:00Z"
+        ],
+        [
+          "close_lag",
+          1,
+          "2026-11-02T13:30:00Z",
+          "2026-11-02T14:00:00Z"
+        ]
+      ]
+    }
+  }
+}
