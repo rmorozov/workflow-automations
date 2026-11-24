@@ -3,7 +3,7 @@
 The input is one JSON object in the shape that the normalized layer will hold once
 ingest exists (see docs/specs/cycle-time.md#input-file). Today it is written by hand
 for synthetic scenarios. Times are ISO 8601 with an explicit zone and are kept as
-integer UTC seconds. No person names or accounts appear anywhere in the model.
+integer UTC microseconds. No person names or accounts appear anywhere in the model.
 """
 
 from __future__ import annotations
@@ -98,7 +98,13 @@ class Input:
         return [t for t in self.topics.values() if wi_id in t.wi_ids]
 
 
+SECOND = 1_000_000  # times are integer microseconds since the epoch, UTC
+_EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+_US = dt.timedelta(microseconds=1)
+
+
 def parse_time(value: Any, where: str) -> int:
+    """ISO 8601 with a zone → integer microseconds, so sub-second order survives."""
     if not isinstance(value, str):
         raise InputError(f"{where}: time must be an ISO 8601 string")
     try:
@@ -107,11 +113,14 @@ def parse_time(value: Any, where: str) -> int:
         raise InputError(f"{where}: {value!r} is not ISO 8601") from exc
     if parsed.tzinfo is None:
         raise InputError(f"{where}: {value!r} has no time zone")
-    return int(parsed.timestamp())
+    return (parsed - _EPOCH) // _US
 
 
-def format_time(seconds: int) -> str:
-    return dt.datetime.fromtimestamp(seconds, dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+def format_time(us: int) -> str:
+    moment = _EPOCH + us * _US
+    if us % SECOND:
+        return moment.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _int(value: Any, where: str) -> int:

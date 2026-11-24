@@ -16,7 +16,7 @@ from workflow_automations.cycle_time.model import Build, format_time
 from workflow_automations.cycle_time.spans import Result
 
 MODES = ("calendar", "aligned")
-US = 1_000_000
+US = 1  # model times are already microseconds, the trace's unit
 
 
 def _gerrit_name(kind: str, event: Any) -> str:
